@@ -86,10 +86,25 @@ Built for `linux/amd64` and `linux/arm64`, because a homelab is as likely to be
 a small ARM box as an x86 server.
 
 Copy `compose.example.yaml` to `compose.yaml`, fill in the backends you have,
-and delete the rest. Two Traefik notes are in the example and both are
-load-bearing: the API router must **not** sit behind the sign-in proxy, and it
-needs an explicit priority higher than the page router's, because Traefik's
-default priority is the rule's character length.
+and delete the rest. Three Traefik notes are in the example and all three are
+load-bearing:
+
+- The API router must **not** sit behind the sign-in proxy. A native client
+  cannot complete an oauth2 flow.
+- It needs an explicit priority higher than the page router's, because
+  Traefik's default priority is the rule's character length.
+- **The same API must also be served at the Jellyfin origin under `/nextup`.**
+  That is where a client looks when nothing is typed in its settings, and it is
+  the single easiest thing to leave out: everything answers correctly on
+  Nextup's own host, the app finds nothing, and the feature is simply absent
+  with no error anywhere. Check it with
+
+  ```
+  curl -i https://your-jellyfin-host/nextup/api/v1/capabilities
+  ```
+
+  A 401 is right — that is Nextup asking for a token. A 404 means the router is
+  missing and no client will ever find the service.
 
 ## Tests
 

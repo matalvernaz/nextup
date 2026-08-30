@@ -87,6 +87,33 @@ services:
       - traefik.http.routers.nextup-api.entrypoints=websecure
       - traefik.http.routers.nextup-api.priority=100
       - traefik.http.routers.nextup-api.tls=true
+      # THE SAME API AT THE JELLYFIN ORIGIN, under /nextup. Do not skip this.
+      #
+      # It is what a client finds with nothing typed in its settings. Without
+      # it the app probes a path nothing serves, gets Jellyfin's own 404, and
+      # concludes there is no request server at all -- which shows up as the
+      # feature simply not being there, with nothing anywhere saying why.
+      #
+      # Only /nextup/api. The browser pages stay on their own host behind the
+      # sign-in proxy; this path carries no cookie and authenticates every
+      # request on the caller's own Jellyfin token.
+      #
+      # List every hostname Jellyfin answers on. A client moves between them
+      # and the derived address follows whichever it is using, which is what
+      # keeps the traffic on the LAN at home rather than out and back.
+      - "traefik.http.routers.nextup-jellyfin.rule=Host(`jellyfin.example.com`) && PathPrefix(`/nextup/api`)"
+      - traefik.http.routers.nextup-jellyfin.entrypoints=websecure
+      # High enough to outrank Jellyfin's own router, whose rule is shorter but
+      # which would otherwise take the path -- Traefik's default priority is
+      # the rule's character length.
+      - traefik.http.routers.nextup-jellyfin.priority=200
+      # A docker label, not an @file middleware: a middleware named @file that
+      # does not exist drops the router silently and the host 404s with nothing
+      # in the log.
+      - traefik.http.routers.nextup-jellyfin.middlewares=nextup-strip
+      - traefik.http.middlewares.nextup-strip.stripprefix.prefixes=/nextup
+      - traefik.http.routers.nextup-jellyfin.service=nextup
+      - traefik.http.routers.nextup-jellyfin.tls=true
       - traefik.http.services.nextup.loadbalancer.server.port=8080
 
 networks:
