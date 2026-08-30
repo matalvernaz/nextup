@@ -172,10 +172,14 @@ def library_ids(medium: str) -> list[str]:
         with _client() as c:
             views = c.get("/Library/VirtualFolders").raise_for_status().json()
     except httpx.HTTPError as exc:
-        # Not fatal: a medium with no library ids is simply not advertised, and
-        # saying so beats refusing to start over a transient Jellyfin blip.
+        # Raised, not swallowed into an empty list. An empty list means "this
+        # server has no library of that kind", which is a settled fact worth
+        # caching; an outage is not, and caching one would leave every medium
+        # with no library ids until somebody restarted the process. Empty
+        # library ids are exactly what tells a client to show no control at
+        # all, so that failure is silent and total.
         log.error("could not list Jellyfin libraries for %s (%s)", medium, exc)
-        return []
+        raise JellyfinUnavailable(str(exc)) from exc
     return [normalise_id(v["ItemId"]) for v in views
             if v.get("CollectionType") == wanted]
 

@@ -8,7 +8,8 @@ rendering when it arrives is one a reader can simply read.
 Identity for these pages comes from the sign-in proxy's forwarded header.
 Identity for the JSON API does not, and never may: see `api.caller`.
 """
-from urllib.parse import quote
+import os
+from urllib.parse import quote, urlsplit
 
 from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
@@ -21,6 +22,46 @@ log = logs.get("main")
 
 app = FastAPI(title="nextup")
 app.include_router(api.router)
+
+SAFE_METHODS = {"GET", "HEAD", "OPTIONS", "TRACE"}
+
+#: Additional hostnames whose pages may post to this one. Rarely needed: the
+#: default is "the host this request arrived at", which covers every ordinary
+#: deployment.
+ALLOWED_ORIGIN_HOSTS = {
+    h.strip().lower()
+    for h in os.environ.get("ALLOWED_ORIGIN_HOSTS", "").split(",") if h.strip()}
+
+
+@app.middleware("http")
+async def block_cross_origin_writes(request: Request, call_next):
+    """Refuse a write whose page came from somewhere else.
+
+    The browser pages ride a forward-auth cookie, and that cookie is scoped to
+    the parent domain -- so a page on any sibling subdomain can post to this
+    one and spend a signed-in person's allowance. SameSite does not stop a
+    *same-site* cross-origin post and CORS does not apply to form submissions,
+    so checking the origin of unsafe methods is the whole mitigation.
+
+    A request carrying neither Origin nor Referer is allowed. Some privacy
+    setups strip both, and native clients send neither -- which is also why
+    this does not disturb the JSON API, whose callers authenticate on a token
+    rather than on a cookie and so have nothing to be ridden.
+    """
+    if request.method in SAFE_METHODS:
+        return await call_next(request)
+    raw = request.headers.get("origin") or request.headers.get("referer") or ""
+    host = urlsplit(raw).hostname if raw else None
+    arrived_at = (request.headers.get("x-forwarded-host")
+                  or request.url.hostname or "").split(",")[0].strip().lower()
+    expected = ({arrived_at} if arrived_at else set()) | ALLOWED_ORIGIN_HOSTS
+    if host and expected and host.lower() not in expected:
+        log.warning("refused a write from %s (expected one of %s)",
+                    host, sorted(expected))
+        return PlainTextResponse(
+            f"Refused: this looks like a cross-site request (from {host}).",
+            status_code=403)
+    return await call_next(request)
 templates = Jinja2Templates(directory="app/templates")
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
@@ -91,7 +132,10 @@ def post_want(request: Request, medium: str = Form(...),
     re-submit, and so the answer arrives as a whole page a reader can read
     from the top.
     """
-    user = viewer(request)
+    try:
+        user = viewer(request)
+    except LookupError as exc:
+        return _back(medium, f"Nextup could not work out who you are. {exc}")
     hit = {"title": title, "year": year, "artist": artist,
            "source": source, "ref": ref}
     try:
@@ -105,7 +149,10 @@ def post_want(request: Request, medium: str = Form(...),
 def post_cancel(request: Request, medium: str = Form(...),
                 item_key: str = Form(...)):
     """Stop looking for one thing."""
-    user = viewer(request)
+    try:
+        user = viewer(request)
+    except LookupError as exc:
+        return _back(medium, f"Nextup could not work out who you are. {exc}")
     _, message = wants.cancel(user, medium, item_key)
     return _back(medium, message)
 

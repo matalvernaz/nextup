@@ -39,31 +39,46 @@ def cost(medium: str, unit: str) -> int:
     return 1
 
 
-def _build() -> dict[str, Medium]:
+#: One medium's backend, its label, its cap, and the units it offers. The
+#: library ids are looked up separately because that is the part that can fail.
+_BACKENDS = (
+    (MOVIE, "Films", ("movie",), radarr.configured, lambda: config.MOVIE_DAILY_CAP),
+    (SERIES, "Series", ("series",), sonarr.configured, lambda: config.SERIES_DAILY_CAP),
+    (MUSIC, "Music", buskarr.UNITS, buskarr.configured, lambda: config.MUSIC_DAILY_CAP),
+)
+
+
+def _build() -> tuple[dict[str, Medium], bool]:
+    """The registry, and whether it is complete enough to keep.
+
+    An incomplete build is one where Jellyfin could not be asked which
+    libraries exist. It is still served -- refusing every medium because a
+    library listing timed out would be worse -- but it is not cached, because
+    empty library ids are exactly what tells a client to show no control at
+    all, and this box has started services before Jellyfin was up.
+    """
     found: dict[str, Medium] = {}
-    if radarr.configured():
-        found[MOVIE] = Medium(MOVIE, "Films", ("movie",),
-                              config.MOVIE_DAILY_CAP,
-                              tuple(jellyfin.library_ids(MOVIE)))
-    if sonarr.configured():
-        found[SERIES] = Medium(SERIES, "Series", ("series",),
-                               config.SERIES_DAILY_CAP,
-                               tuple(jellyfin.library_ids(SERIES)))
-    if buskarr.configured():
-        found[MUSIC] = Medium(MUSIC, "Music", buskarr.UNITS,
-                              config.MUSIC_DAILY_CAP,
-                              tuple(jellyfin.library_ids(MUSIC)))
-    for key in (MOVIE, SERIES, MUSIC):
-        if key not in found:
+    complete = True
+    for key, label, units, is_configured, cap in _BACKENDS:
+        if not is_configured():
             log.info("%s is not offered: its backend is not configured", key)
-        elif not found[key].library_ids:
-            # Offered anyway. A library that has not been created yet is the
-            # ordinary case for somebody setting this up before they own
-            # anything, and refusing the medium would make the first request
-            # impossible.
-            log.warning("%s has no matching Jellyfin library; requests will "
-                        "work but nothing will ever read as arrived", key)
-    return found
+            continue
+        try:
+            libraries = tuple(jellyfin.library_ids(key))
+        except jellyfin.JellyfinUnavailable:
+            log.error("%s offered without library ids: Jellyfin could not be "
+                      "asked. This will be retried rather than cached.", key)
+            libraries = ()
+            complete = False
+        else:
+            if not libraries:
+                # A library that does not exist yet is the ordinary case for
+                # somebody setting this up before they own anything, and
+                # refusing the medium would make the first request impossible.
+                log.warning("%s has no matching Jellyfin library; requests "
+                            "will work but nothing will read as arrived", key)
+        found[key] = Medium(key, label, tuple(units), cap(), libraries)
+    return found, complete
 
 
 _registry: dict[str, Medium] | None = None
@@ -71,17 +86,23 @@ _registry_guard = threading.Lock()
 
 
 def available() -> dict[str, Medium]:
-    """The media this server serves, built once per process.
+    """The media this server serves.
 
-    Cached because it costs a Jellyfin round trip and the answer only changes
-    when the deployment does. `forget` exists for tests.
+    Built once and cached, because it costs a Jellyfin round trip and the
+    answer only changes when the deployment does -- unless the build could not
+    reach Jellyfin, in which case it is rebuilt next time rather than leaving
+    a startup-order accident in place for the life of the process.
     """
     global _registry
     with _registry_guard:
-        if _registry is None:
-            _registry = _build()
-            log.info("serving media: %s", ", ".join(sorted(_registry)) or "none")
-        return _registry
+        if _registry is not None:
+            return _registry
+    built, complete = _build()
+    with _registry_guard:
+        if complete:
+            _registry = built
+            log.info("serving media: %s", ", ".join(sorted(built)) or "none")
+        return built
 
 
 def forget() -> None:

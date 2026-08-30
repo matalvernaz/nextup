@@ -153,10 +153,16 @@ def states(user: jellyfin.User, medium: str | None = None) -> list[dict]:
     newly_arrived: dict[str, set[str]] = {}
     out = []
     for row in rows:
-        state = _state(row, row["medium"], index)
+        # Asked for once and passed to both callers. Each music row costs a
+        # round trip to buskarr, and deriving the state and describing it are
+        # two questions about the same answer.
+        reported = (buskarr.state(row["backend_id"])
+                    if row["medium"] == media.MUSIC
+                    and row["fulfilled_at"] is None else None)
+        state = _state(row, row["medium"], index, reported)
         if state == IN_LIBRARY and row["fulfilled_at"] is None:
             newly_arrived.setdefault(row["medium"], set()).add(row["item_key"])
-        out.append(_described(row, state, index))
+        out.append(_described(row, state, index, reported))
 
     for medium_key, keys in newly_arrived.items():
         store.mark_arrived(user.key, medium_key, keys)
@@ -165,7 +171,8 @@ def states(user: jellyfin.User, medium: str | None = None) -> list[dict]:
     return out
 
 
-def _state(row, medium: str, index: jellyfin.Owned | None = None) -> str:
+def _state(row, medium: str, index: jellyfin.Owned | None = None,
+           reported: dict | None = None) -> str:
     """One request's state.
 
     A row already marked fulfilled stays fulfilled. Re-deriving it would make
@@ -175,7 +182,7 @@ def _state(row, medium: str, index: jellyfin.Owned | None = None) -> str:
     if row["fulfilled_at"] is not None:
         return IN_LIBRARY
     index = index if index is not None else media.owned()
-    if _arrived(row, medium, index):
+    if _arrived(row, medium, index, reported):
         return IN_LIBRARY
     waited = time.time() - row["requested_at"]
     if waited > config.STILL_LOOKING_AFTER_HOURS * 3600:
@@ -183,7 +190,8 @@ def _state(row, medium: str, index: jellyfin.Owned | None = None) -> str:
     return ON_ITS_WAY
 
 
-def _arrived(row, medium: str, index: jellyfin.Owned) -> bool:
+def _arrived(row, medium: str, index: jellyfin.Owned,
+             reported: dict | None = None) -> bool:
     key = row["item_key"]
     if medium == media.MOVIE:
         return bool(radarr.arrived({key}, index.movie_tmdb))
@@ -193,11 +201,13 @@ def _arrived(row, medium: str, index: jellyfin.Owned) -> bool:
     # Music asks buskarr, which placed the file and holds its exact identity.
     # An unreachable buskarr answers None, which is "unknown" and must not be
     # read as "not here" -- the row simply keeps waiting.
-    reported = buskarr.state(row["backend_id"])
+    if reported is None:
+        reported = buskarr.state(row["backend_id"])
     return bool(reported and reported.get("state") == "have")
 
 
-def _described(row, state: str, index: jellyfin.Owned) -> dict:
+def _described(row, state: str, index: jellyfin.Owned,
+               reported: dict | None = None) -> dict:
     """One request as a client shows it."""
     described = {
         "itemKey": row["item_key"],
@@ -214,7 +224,6 @@ def _described(row, state: str, index: jellyfin.Owned) -> dict:
         described["episodesInLibrary"] = sonarr.progress(
             row["item_key"], index.series_episodes)
     elif row["medium"] == media.MUSIC and state != IN_LIBRARY:
-        reported = buskarr.state(row["backend_id"])
         if reported:
             described["tracksInLibrary"] = reported.get("have")
             described["tracksTotal"] = reported.get("total")
