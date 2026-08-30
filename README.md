@@ -78,6 +78,13 @@ interface here.
 
 ## Deploying
 
+```
+docker pull ghcr.io/matalvernaz/nextup:latest
+```
+
+Built for `linux/amd64` and `linux/arm64`, because a homelab is as likely to be
+a small ARM box as an x86 server.
+
 Copy `compose.example.yaml` to `compose.yaml`, fill in the backends you have,
 and delete the rest. Two Traefik notes are in the example and both are
 load-bearing: the API router must **not** sit behind the sign-in proxy, and it
