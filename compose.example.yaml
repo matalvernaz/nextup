@@ -1,0 +1,94 @@
+# Copy to compose.yaml, fill in the parts your server actually has, and delete
+# the rest. Every backend is optional: with only Radarr configured this serves
+# films and says nothing at all about series or music.
+services:
+  nextup:
+    image: ghcr.io/matalvernaz/nextup:latest
+    build: .
+    container_name: nextup
+    restart: unless-stopped
+    environment:
+      # --- Jellyfin: the single library of record -----------------------
+      # An API key of Nextup's own. It is used to introspect callers' tokens
+      # and to read which films and series already exist.
+      JELLYFIN_URL: "http://jellyfin:8096"
+      JELLYFIN_TOKEN: "${JELLYFIN_TOKEN}"
+      # Supplied by the forward-auth proxy in front of the browser pages. The
+      # JSON API never reads it.
+      AUTH_USER_HEADER: "X-Auth-Request-Preferred-Username"
+      # Who a browser request is, when no proxy header is present. Leave empty
+      # in any deployment reachable by more than one person.
+      JELLYFIN_USER: ""
+
+      # Libraries are discovered by collection type. Set these only to narrow
+      # it down -- comma-separated Jellyfin view ids.
+      # MOVIE_LIBRARY_IDS: ""
+      # SERIES_LIBRARY_IDS: ""
+      # MUSIC_LIBRARY_IDS: ""
+
+      # --- Films --------------------------------------------------------
+      RADARR_URL: "http://radarr:7878"
+      RADARR_API_KEY: "${RADARR_API_KEY}"
+      # No default: which profile a household wants is a real choice about
+      # disk and bandwidth. Unset disables films.
+      RADARR_QUALITY_PROFILE_ID: "4"
+      # Discovered when Radarr has exactly one root folder.
+      # RADARR_ROOT_FOLDER: "/movies"
+
+      # --- Series -------------------------------------------------------
+      SONARR_URL: "http://sonarr:8989"
+      SONARR_API_KEY: "${SONARR_API_KEY}"
+      SONARR_QUALITY_PROFILE_ID: "4"
+      # SONARR_ROOT_FOLDER: "/tv"
+      # Sonarr's own vocabulary: all, firstSeason, future, missing, existing.
+      SONARR_MONITOR: "all"
+
+      # --- Music --------------------------------------------------------
+      BUSKARR_URL: "http://buskarr:8000"
+      # Must match the key buskarr itself was started with. Unset disables
+      # music at both ends.
+      BUSKARR_API_KEY: "${BUSKARR_API_KEY}"
+
+      # --- Allowances ---------------------------------------------------
+      # Per account per day, per medium. Jellyfin administrators are uncapped.
+      MOVIE_DAILY_CAP: "3"
+      SERIES_DAILY_CAP: "1"
+      MUSIC_DAILY_CAP: "3"
+      # What each music unit spends. An artist is a whole discography.
+      MUSIC_ARTIST_COST: "3"
+      MUSIC_ALBUM_COST: "1"
+      MUSIC_TRACK_COST: "1"
+
+      STILL_LOOKING_AFTER_HOURS: "24"
+      ARRIVED_VISIBLE_HOURS: "48"
+      LOG_LEVEL: "INFO"
+      DB_PATH: "/data/nextup.db"
+    volumes:
+      - ./data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/healthz',timeout=5).status==200 else 1)\""]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    networks: [traefik]
+    labels:
+      - traefik.enable=true
+      - "traefik.http.routers.nextup.rule=Host(`nextup.example.com`)"
+      - traefik.http.routers.nextup.entrypoints=websecure
+      - traefik.http.routers.nextup.priority=10
+      - traefik.http.routers.nextup.middlewares=sso@file
+      - traefik.http.routers.nextup.tls=true
+      # The JSON API authenticates callers itself and must NOT sit behind the
+      # sign-in proxy: a native app cannot complete an oauth2 flow. Its router
+      # needs a higher priority than the page router, because Traefik's
+      # default priority is the rule's character length.
+      - "traefik.http.routers.nextup-api.rule=Host(`nextup.example.com`) && PathPrefix(`/api/`)"
+      - traefik.http.routers.nextup-api.entrypoints=websecure
+      - traefik.http.routers.nextup-api.priority=100
+      - traefik.http.routers.nextup-api.tls=true
+      - traefik.http.services.nextup.loadbalancer.server.port=8080
+
+networks:
+  traefik:
+    external: true

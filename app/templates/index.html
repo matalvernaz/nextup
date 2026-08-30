@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+{% block title %}Nextup{% endblock %}
+{% block main %}
+
+{% if not media %}
+<h2>Nothing to ask for</h2>
+<p>No acquisition tool is configured, so there is nothing this server can be
+asked for yet.</p>
+{% else %}
+
+<h2>Ask for something</h2>
+<form method="get" action="/" role="search">
+  <fieldset>
+    <legend>Search</legend>
+    <p>
+      <label for="medium">What kind of thing</label><br>
+      <select id="medium" name="medium">
+        {% for m in media %}
+        <option value="{{ m.key }}" {% if m.key == medium %}selected{% endif %}>{{ m.label }}</option>
+        {% endfor %}
+      </select>
+    </p>
+    {# Only music has more than one unit, so the control only appears there. #}
+    {% set current = (media | selectattr('key', 'equalto', medium) | first) %}
+    {% if current and current.units | length > 1 %}
+    <fieldset>
+      <legend>What to look for</legend>
+      {% for u in current.units %}
+      <p>
+        <input type="radio" id="unit-{{ u }}" name="unit" value="{{ u }}"
+               {% if u == unit %}checked{% endif %}>
+        <label for="unit-{{ u }}">{{ u | capitalize }}</label>
+      </p>
+      {% endfor %}
+    </fieldset>
+    {% endif %}
+    <p>
+      <label for="q">Title</label><br>
+      <input type="text" id="q" name="q" value="{{ query }}" autocomplete="off">
+    </p>
+    <p><button type="submit">Search</button></p>
+  </fieldset>
+</form>
+
+{% if query %}
+<h3>{{ results | length }} result{{ '' if results | length == 1 else 's' }} for “{{ query }}”</h3>
+{% if not results %}
+<p>Nothing matched. The catalogues these searches use do not carry everything.</p>
+{% else %}
+<ul class="results">
+  {% for r in results %}
+  <li>
+    <h4>{{ r.title }}{% if r.year %} ({{ r.year }}){% endif %}</h4>
+    {% if r.artist and r.unit != 'artist' %}<p>By {{ r.artist }}.</p>{% endif %}
+    {% if r.seasonCount %}<p>{{ r.seasonCount }} season{{ '' if r.seasonCount == 1 else 's' }}{% if r.network %}, {{ r.network }}{% endif %}.</p>{% endif %}
+    {% if r.trackCount %}<p>{{ r.trackCount }} tracks.</p>{% endif %}
+    {% if r.overview %}<p>{{ r.overview }}</p>{% endif %}
+    {% if r.owned %}
+    <p class="owned">Already in the library.</p>
+    {% else %}
+    <form method="post" action="/want">
+      <input type="hidden" name="medium" value="{{ r.medium }}">
+      <input type="hidden" name="item_key" value="{{ r.itemKey }}">
+      <input type="hidden" name="unit" value="{{ r.unit }}">
+      <input type="hidden" name="title" value="{{ r.title }}">
+      <input type="hidden" name="year" value="{{ r.year | default('') }}">
+      <input type="hidden" name="artist" value="{{ r.artist | default('') }}">
+      <input type="hidden" name="source" value="{{ r.source | default('') }}">
+      <input type="hidden" name="ref" value="{{ r.ref | default('') }}">
+      {#
+        The title is inside the button, not merely beside it. A page of results
+        is otherwise a column of identical "Ask for it" buttons, and which one
+        is which is only knowable by reading backwards.
+      #}
+      <button type="submit">Ask for {{ r.title }}{% if r.artist and r.unit != 'artist' %} by {{ r.artist }}{% endif %}</button>
+    </form>
+    {% endif %}
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
+{% endif %}
+
+<h2>What you have asked for</h2>
+<p>
+  {%- for m in media -%}
+  {%- set left = allowance.get(m.key) -%}
+  {{ m.label }}: {% if left is none %}no limit{% else %}{{ left }} left today{% endif %}.
+  {% endfor %}
+</p>
+
+{% if not requests %}
+<p>Nothing outstanding.</p>
+{% else %}
+<ul class="requests">
+  {% for r in requests %}
+  <li>
+    <h4>{{ r.title or r.itemKey }}{% if r.year %} ({{ r.year }}){% endif %}</h4>
+    <p>
+      {% if r.state == 'in_library' %}In the library.
+      {% elif r.state == 'still_looking' %}Still looking.
+      {% else %}On its way.{% endif %}
+      {% if r.episodesInLibrary is defined and r.episodesInLibrary %}
+      {{ r.episodesInLibrary }} episode{{ '' if r.episodesInLibrary == 1 else 's' }} so far.
+      {% endif %}
+      {% if r.detail %}{{ r.detail }}{% endif %}
+    </p>
+    {% if r.state != 'in_library' %}
+    <form method="post" action="/cancel">
+      <input type="hidden" name="medium" value="{{ r.medium }}">
+      <input type="hidden" name="item_key" value="{{ r.itemKey }}">
+      <button type="submit">Stop looking for {{ r.title or r.itemKey }}</button>
+    </form>
+    {% endif %}
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
+
+{% endif %}
+{% endblock %}

@@ -1,0 +1,12 @@
+/* Plain, high-contrast, and sized in rem so the browser's own text size wins. */
+body { font-family: system-ui, sans-serif; line-height: 1.5; margin: 0 auto;
+       max-width: 46rem; padding: 1rem; }
+.skip { position: absolute; left: -100rem; }
+.skip:focus { position: static; }
+#flash:empty { display: none; }
+#flash { background: #ffe; border: 1px solid #cc9; padding: 0.5rem; }
+.results, .requests { list-style: none; padding: 0; }
+.results li, .requests li { border-top: 1px solid #ccc; padding: 0.75rem 0; }
+.owned { font-style: italic; }
+button { font-size: 1rem; padding: 0.4rem 0.8rem; }
+input[type="text"], select { font-size: 1rem; padding: 0.3rem; min-width: 18rem; }

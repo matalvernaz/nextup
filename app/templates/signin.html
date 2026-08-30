@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block title %}Nextup — not signed in{% endblock %}
+{% block main %}
+<h2>Not signed in</h2>
+<p>Nextup could not work out which account you are. {{ detail }}</p>
+<p>This usually means the sign-in proxy did not pass an identity through.</p>
+{% endblock %}

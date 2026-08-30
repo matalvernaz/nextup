@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Nextup{% endblock %}</title>
+<link rel="stylesheet" href="/static/nextup.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to main content</a>
+<header>
+  <h1>Nextup</h1>
+  {% if user is defined %}<p class="who">Signed in as {{ user.name }}.</p>{% endif %}
+</header>
+{#
+  The live region is rendered on every page whether or not there is anything in
+  it. A region inserted at the same moment as its text is not announced -- the
+  reader has to have been watching an element that already existed.
+#}
+<p id="flash" role="status" aria-live="polite">{{ message|default('') }}</p>
+<main id="main">
+{% block main %}{% endblock %}
+</main>
+</body>
+</html>
