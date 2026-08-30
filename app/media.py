@@ -158,3 +158,24 @@ _owned = _OwnedCache()
 
 def owned(force: bool = False) -> jellyfin.Owned:
     return _owned.get(force=force)
+
+
+def episode_counts(provider_ids: set[str]) -> dict[str, int]:
+    """Episodes in the library for each of these series, where askable.
+
+    Asked per series rather than indexed for the whole library, because the
+    only route to the number on this Jellyfin is to count episodes, and the
+    library-wide answer is 24 MB to answer a question about the two or three
+    series somebody is actually waiting on. A series Jellyfin will not answer
+    for is simply absent from the result, which the caller reads as unknown.
+    """
+    index = owned()
+    counts: dict[str, int] = {}
+    for provider_id in provider_ids:
+        item_id = index.series_item_ids.get(provider_id)
+        if not item_id:
+            continue
+        count = jellyfin.episode_count(item_id)
+        if count is not None:
+            counts[provider_id] = count
+    return counts

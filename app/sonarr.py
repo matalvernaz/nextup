@@ -33,14 +33,19 @@ def item_key(tvdb_id) -> str:
     return f"tvdb:{tvdb_id}"
 
 
-def search(query: str, limit: int, owned: frozenset[str],
-           episodes: dict[str, int]) -> list[dict]:
-    """Series matching a title, with how much of each the library already has."""
+def search(query: str, limit: int, owned: frozenset[str]) -> list[dict]:
+    """Series matching a title, marked with whether the library has one.
+
+    Marked, not counted. How many episodes are held is one request per series
+    on this Jellyfin, and a page of twenty-five hits would pay for all of them
+    to show a number nobody asked for. The count belongs on the request list,
+    where there are three rows and it is the thing being watched.
+    """
     rows = backend().lookup(query, limit)
-    return [_result(row, owned, episodes) for row in rows if row.get("tvdbId")]
+    return [_result(row, owned) for row in rows if row.get("tvdbId")]
 
 
-def _result(row: dict, owned: frozenset[str], episodes: dict[str, int]) -> dict:
+def _result(row: dict, owned: frozenset[str]) -> dict:
     tvdb = str(row["tvdbId"])
     return {
         "itemKey": item_key(tvdb),
@@ -53,7 +58,6 @@ def _result(row: dict, owned: frozenset[str], episodes: dict[str, int]) -> dict:
         "status": row.get("status") or "",
         "seasonCount": _season_count(row),
         "owned": tvdb in owned,
-        "episodesInLibrary": episodes.get(tvdb, 0),
     }
 
 
@@ -138,8 +142,13 @@ def arrived(item_keys: set[str], owned: frozenset[str],
     return out
 
 
-def progress(item_key_value: str, episodes: dict[str, int]) -> int:
-    """Episodes of this series currently in the library."""
+def progress(item_key_value: str, episodes: dict[str, int]) -> int | None:
+    """Episodes of this series in the library, or None where it is not known.
+
+    None rather than zero. Zero is a real answer -- the series exists and
+    nothing has downloaded -- and a Jellyfin that could not be asked must not
+    be reported as having said it.
+    """
     if not item_key_value.startswith("tvdb:"):
-        return 0
-    return episodes.get(item_key_value.split(":", 1)[1], 0)
+        return None
+    return episodes.get(item_key_value.split(":", 1)[1])

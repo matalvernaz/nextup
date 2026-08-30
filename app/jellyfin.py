@@ -51,15 +51,18 @@ class User:
 class Owned:
     """What the library already holds, keyed the way the arrs identify things.
 
-    `series_episodes` counts episode files rather than merely recording that a
-    series exists. A series is not a single arrival: Sonarr accepts the request
-    the moment it is added and the first episode may be days behind the last,
-    so "in the library" has to be able to say how much of it is.
+    `series_item_ids` maps a provider id to Jellyfin's own item id, which is
+    what makes an episode count askable. The count itself is deliberately NOT
+    here: this fork returns neither `RecursiveItemCount` nor `ChildCount` on a
+    Series however they are requested (measured, both come back null), so the
+    only route to it is asking about episodes -- and asking about every
+    episode in the library is a 24 MB, six-second answer to a question only
+    ever asked about the two or three series somebody is waiting on.
     """
     movie_tmdb: frozenset[str] = frozenset()
     series_tvdb: frozenset[str] = frozenset()
     series_tmdb: frozenset[str] = frozenset()
-    series_episodes: dict[str, int] = field(default_factory=dict)
+    series_item_ids: dict[str, str] = field(default_factory=dict)
 
 
 def _client() -> httpx.Client:
@@ -194,25 +197,18 @@ def owned_index() -> Owned:
     movie_tmdb: set[str] = set()
     series_tvdb: set[str] = set()
     series_tmdb: set[str] = set()
-    episodes: dict[str, int] = {}
+    item_ids: dict[str, str] = {}
 
     for item in _items("movie", "Movie", fields="ProviderIds"):
         if tmdb := _provider(item, "Tmdb"):
             movie_tmdb.add(tmdb)
 
-    for item in _items("series", "Series",
-                       fields="ProviderIds,RecursiveItemCount"):
+    for item in _items("series", "Series", fields="ProviderIds"):
         tvdb = _provider(item, "Tvdb")
         tmdb = _provider(item, "Tmdb")
-        # Jellyfin counts a series' descendants here, which for a series is its
-        # episodes. Absent on an older server, in which case the series is
-        # known to exist and its progress is not, and nothing pretends it is.
-        count = item.get("RecursiveItemCount")
         for key in (tvdb, tmdb):
-            if not key:
-                continue
-            if isinstance(count, int):
-                episodes[key] = count
+            if key:
+                item_ids[key] = item["Id"]
         if tvdb:
             series_tvdb.add(tvdb)
         if tmdb:
@@ -220,7 +216,36 @@ def owned_index() -> Owned:
 
     log.info("owned index movies=%d series=%d", len(movie_tmdb), len(series_tvdb))
     return Owned(frozenset(movie_tmdb), frozenset(series_tvdb),
-                 frozenset(series_tmdb), episodes)
+                 frozenset(series_tmdb), item_ids)
+
+
+def episode_count(item_id: str) -> int | None:
+    """How many episodes of one series are in the library, or None if unknown.
+
+    `limit=0` with the total requested makes this a fifty-byte answer -- the
+    count is the whole point and none of the episodes are wanted. None means
+    Jellyfin could not be asked, which is not the same as zero and must not be
+    read as one: zero closes nothing but says the series has not started
+    arriving, while unknown should leave a request exactly as it was.
+    """
+    if not item_id:
+        return None
+    try:
+        with _client() as c:
+            data = c.get("/Items", params={
+                "parentId": item_id,
+                "includeItemTypes": "Episode",
+                "recursive": "true",
+                "limit": 0,
+                "enableTotalRecordCount": "true",
+                "enableImages": "false",
+                "enableUserData": "false",
+            }).raise_for_status().json()
+    except (httpx.HTTPError, ValueError) as exc:
+        log.warning("episode count failed for %s (%s)", item_id, exc)
+        return None
+    count = data.get("TotalRecordCount")
+    return count if isinstance(count, int) else None
 
 
 def _items(medium: str, item_type: str, fields: str) -> list[dict]:

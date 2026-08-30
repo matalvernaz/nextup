@@ -31,15 +31,24 @@ media._registry = {
 }
 
 owned = jellyfin.Owned()
+episode_counts: dict[str, int] = {}
 
 
-def set_owned(**kwargs):
-    global owned
+def set_owned(episodes=None, **kwargs):
+    """State what the library holds, and how many episodes of each series.
+
+    Episodes are counted per series against Jellyfin rather than indexed, so
+    the stub replaces that lookup rather than a field on the index.
+    """
+    global owned, episode_counts
     owned = jellyfin.Owned(**kwargs)
     media._owned._value = owned
     media._owned._built_at = time.monotonic()
+    episode_counts = dict(episodes or {})
 
 
+media.episode_counts = lambda provider_ids: {
+    k: v for k, v in episode_counts.items() if k in provider_ids}
 set_owned()
 
 added: list[tuple] = []
@@ -112,17 +121,25 @@ check.that(store.get("kid", media.MOVIE, "tmdb:100")["fulfilled_at"] is not None
 # A series exists in Jellyfin the moment Sonarr creates it. That is not arrival.
 wants.want(KID, media.SERIES, "tvdb:200", "series", {"title": "A show"})
 set_owned(movie_tmdb=frozenset({"100"}), series_tvdb=frozenset({"200"}),
-          series_episodes={"200": 0})
+          episodes={"200": 0})
 rows = [r for r in wants.states(KID, media.SERIES) if r["itemKey"] == "tvdb:200"]
 check.equal(rows[0]["state"], wants.ON_ITS_WAY,
             "a series folder with no episode in it has not arrived")
 
 set_owned(movie_tmdb=frozenset({"100"}), series_tvdb=frozenset({"200"}),
-          series_episodes={"200": 3})
+          episodes={"200": 3})
 rows = [r for r in wants.states(KID, media.SERIES) if r["itemKey"] == "tvdb:200"]
 check.equal(rows[0]["state"], wants.IN_LIBRARY,
             "a series with an episode in it has started arriving")
 check.equal(rows[0]["episodesInLibrary"], 3, "and it says how much of it is here")
+
+set_owned(movie_tmdb=frozenset({"100"}), series_tvdb=frozenset({"200"}))
+rows = [r for r in wants.states(KID, media.SERIES) if r["itemKey"] == "tvdb:200"]
+check.equal(rows[0]["state"], wants.IN_LIBRARY,
+            "a series already marked arrived stays arrived when the count "
+            "cannot be taken")
+check.that("episodesInLibrary" not in rows[0],
+           "and an unknown count is absent rather than reported as zero")
 
 # Waiting long enough stops it being called "on its way".
 wants.want(OTHER, media.MOVIE, "tmdb:300", "movie", {"title": "Slow"})
