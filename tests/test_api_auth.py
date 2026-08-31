@@ -117,7 +117,13 @@ check.that("user" not in found.json(),
 # Expired rows were read past but never removed, so a service that had seen a
 # few thousand rotated tokens held every one of them until it restarted.
 api._tokens.clear()
-api._tokens["long-gone"] = (0.0, jellyfin.User(id="u0", name="ghost"))
+# Relative to now, not a bare 0.0: time.monotonic() counts from boot, so on a
+# freshly started machine zero is not yet expired and the check passes for the
+# wrong reason. It failed exactly that way on CI.
+import time  # noqa: E402
+
+api._tokens["long-gone"] = (time.monotonic() - config.TOKEN_CACHE_SECONDS - 1,
+                            jellyfin.User(id="u0", name="ghost"))
 client_with(accepts).get("/api/v1/capabilities", headers={"X-Emby-Token": "fresh"})
 check.that("long-gone" not in api._tokens,
            "an expired cache entry is dropped, not kept for ever")
