@@ -75,41 +75,58 @@ def _build() -> tuple[dict[str, Medium], bool]:
                 # A library that does not exist yet is the ordinary case for
                 # somebody setting this up before they own anything, and
                 # refusing the medium would make the first request impossible.
+                # Served, then, but not settled: empty library ids are what
+                # tell a client to show no control at all, and creating the
+                # library ought to be enough on its own to make one appear.
                 log.warning("%s has no matching Jellyfin library; requests "
                             "will work but nothing will read as arrived", key)
+                complete = False
         found[key] = Medium(key, label, tuple(units), cap(), libraries)
     return found, complete
 
 
+#: How long an unsettled registry is kept before it is built again. Long
+#: enough that requests do not each pay for a Jellyfin round trip while the
+#: deployment is half up; short enough that starting Jellyfin, or creating the
+#: library a configured backend has no items in yet, is enough on its own.
+PROVISIONAL_TTL_SECONDS = 300
+
 _registry: dict[str, Medium] | None = None
+_registry_built_at = 0.0
+_registry_settled = False
 _registry_guard = threading.Lock()
 
 
 def available() -> dict[str, Medium]:
     """The media this server serves.
 
-    Built once and cached, because it costs a Jellyfin round trip and the
-    answer only changes when the deployment does -- unless the build could not
-    reach Jellyfin, in which case it is rebuilt next time rather than leaving
-    a startup-order accident in place for the life of the process.
+    Cached, because it costs a Jellyfin round trip and a settled answer only
+    changes when the deployment does. An unsettled one -- Jellyfin could not be
+    asked, or a configured backend has no library yet -- is cached only briefly,
+    so a startup-order accident does not outlive the deployment that caused it.
     """
-    global _registry
+    global _registry, _registry_built_at, _registry_settled
     with _registry_guard:
-        if _registry is not None:
+        if _registry is not None and (
+                _registry_settled
+                or time.monotonic() - _registry_built_at < PROVISIONAL_TTL_SECONDS):
             return _registry
-    built, complete = _build()
+    built, settled = _build()
     with _registry_guard:
-        if complete:
-            _registry = built
+        _registry = built
+        _registry_built_at = time.monotonic()
+        _registry_settled = settled
+        if settled:
             log.info("serving media: %s", ", ".join(sorted(built)) or "none")
         return built
 
 
 def forget() -> None:
     """Drop the cached registry and library index."""
-    global _registry
+    global _registry, _registry_settled
     with _registry_guard:
         _registry = None
+        _registry_settled = False
     _owned.forget()
 
 

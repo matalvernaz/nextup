@@ -9,18 +9,26 @@ Identity for these pages comes from the sign-in proxy's forwarded header.
 Identity for the JSON API does not, and never may: see `api.caller`.
 """
 import os
+from contextlib import asynccontextmanager
 from urllib.parse import quote, urlsplit
 
-from fastapi import FastAPI, Form, Request
+from fastapi import FastAPI, Form, Request, Response
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import api, config, jellyfin, logs, media, store, wants
+from . import api, config, jellyfin, logs, media, selfcheck, store, wants
 
 log = logs.get("main")
 
-app = FastAPI(title="nextup")
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    selfcheck.watch()
+    yield
+
+
+app = FastAPI(title="nextup", lifespan=lifespan)
 app.include_router(api.router)
 
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS", "TRACE"}
@@ -80,10 +88,22 @@ def viewer(request: Request) -> jellyfin.User:
 
 
 @app.get("/healthz", response_class=PlainTextResponse)
-def healthz() -> str:
-    """Liveness only. Deliberately does not touch Jellyfin or any backend --
-    a health check that fails when a downstream is down turns one outage into
-    a restart loop."""
+def healthz(response: Response) -> str:
+    """Liveness, plus the one upstream fault that needs a person.
+
+    A check that fails whenever a downstream is unreachable turns one outage
+    into a restart loop, so this does not probe for reachability: an arr being
+    down, or Jellyfin being slow, is not this container's problem to report. A
+    credential Jellyfin has stopped accepting is different. Every route here
+    resolves a caller through Jellyfin, none of them can work, and it will not
+    come right on its own -- and without this the container reports healthy for
+    the whole time it is useless. The share gateway this service borrowed its
+    shape from ran that way for days.
+    """
+    if jellyfin.credential_rejected():
+        log.warning("unhealthy: Jellyfin is refusing this service's API key")
+        response.status_code = 503
+        return "Jellyfin is refusing this service's API key."
     return "ok"
 
 

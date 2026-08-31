@@ -13,11 +13,23 @@ def _text(name: str, default: str = "") -> str:
 
 
 def _int(name: str, default: int) -> int:
+    """A whole number from the environment, or the default when it is unset.
+
+    A value that is present but will not parse raises. Reading
+    `RADARR_QUALITY_PROFILE_ID=six` as the default of 0 instead disqualifies
+    the backend outright -- `Arr.configured` requires a profile above zero --
+    so films stop being offered at all, on a container that starts, reports
+    healthy and logs only that a backend is not configured. A container that
+    refuses to start and names the variable is far easier to find.
+    """
     raw = _text(name)
-    try:
-        return int(raw) if raw else default
-    except ValueError:
+    if not raw:
         return default
+    try:
+        return int(raw)
+    except ValueError:
+        raise RuntimeError(
+            f"{name} must be a whole number, not {raw!r}") from None
 
 
 def _ids(name: str) -> list[str]:
@@ -26,7 +38,15 @@ def _ids(name: str) -> list[str]:
             for x in _text(name).split(",") if x.strip()]
 
 
+SERVICE_NAME = "nextup"
+
 API_VERSION = 1
+
+# Where clients reach this service at the Jellyfin origin, e.g.
+# "https://jellyfin.example.com/nextup". Optional, and used only to check that
+# route is really there -- see app/selfcheck.py. Unset means the check does not
+# run, which is right for an install serving only the browser pages.
+PUBLIC_URL = _text("PUBLIC_URL").rstrip("/")
 
 # Jellyfin is the single library of record. Nextup never treats an acquisition
 # tool as a catalogue of what is owned: those tools know only what they
@@ -113,7 +133,7 @@ STILL_LOOKING_AFTER_HOURS = _int("STILL_LOOKING_AFTER_HOURS", 24)
 # How long an introspected access token is trusted without re-asking Jellyfin.
 # Short on purpose: expiry is the only thing that makes a token revoked in
 # Jellyfin stop working here.
-TOKEN_CACHE_SECONDS = _int("TOKEN_CACHE_SECONDS", 300)
+TOKEN_CACHE_SECONDS = _int("TOKEN_CACHE_SECONDS", 60)
 
 # How long the library index -- what is already owned, by provider id -- is
 # reused. Arrival is only ever as fresh as this.

@@ -66,11 +66,18 @@ does not list them, and a client shows no control for what is not listed.
 
 | Method | Path | Purpose |
 |---|---|---|
+| `GET` | `/api/v1/info` | That this service is here. The only route that needs no token |
 | `GET` | `/api/v1/capabilities` | What this server serves, and this account's allowances |
 | `GET` | `/api/v1/search?medium=&q=&unit=` | Catalogue hits, marked with what the library holds |
 | `GET` | `/api/v1/requests?medium=` | This account's requests and their states |
 | `POST` | `/api/v1/want` | Ask for one thing |
 | `POST` | `/api/v1/cancel` | Take one back |
+
+`info` answers `{"service": "nextup", "protocol": 1}` and nothing about
+anybody. It exists because every other route needs credentials, which leaves a
+client unable to tell "this server does not run Nextup" from a missing proxy
+rule, a stopped container or a token Jellyfin refused. All four look like a 404
+or a 401 at the Jellyfin origin, and only the first is ordinary.
 
 Browser pages live at `/`. They are server-rendered HTML with real forms and
 no JavaScript in any path that does something — a screen reader is the primary
@@ -100,11 +107,17 @@ load-bearing:
   with no error anywhere. Check it with
 
   ```
-  curl -i https://your-jellyfin-host/nextup/api/v1/capabilities
+  curl -s https://your-jellyfin-host/nextup/api/v1/info
   ```
 
-  A 401 is right — that is Nextup asking for a token. A 404 means the router is
+  `{"service":"nextup","protocol":1}` is right. A 404 means the router is
   missing and no client will ever find the service.
+
+  Set `PUBLIC_URL` to that address minus the `/api/v1/info` and Nextup runs
+  the same check itself, a minute after it starts and hourly after that,
+  logging an error naming the address when it fails. Never a health-check
+  failure: your proxy would drop a container that is still serving its own
+  hostname perfectly well, turning half a misconfiguration into all of one.
 
 ## Tests
 

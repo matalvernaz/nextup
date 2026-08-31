@@ -12,7 +12,7 @@ harness.setup()
 
 from fastapi.testclient import TestClient  # noqa: E402  (after harness.setup)
 
-from app import api, jellyfin  # noqa: E402
+from app import api, config, jellyfin  # noqa: E402
 
 check = harness.Check("api auth")
 
@@ -79,6 +79,49 @@ check.equal(jellyfin.token_from_header('MediaBrowser Token="a", Client="b"'),
 check.equal(jellyfin.token_from_header(None), "", "no header is no token")
 check.equal(jellyfin.token_from_header("MediaBrowser Client=\"x\""), "",
             "a handshake with no token yields no token")
+
+
+# --- the version number is a promise, not a counter -------------------------
+# The shipped EchoFin client requires version == 1 exactly, so bumping this
+# removes the whole feature from every phone that already has the app and
+# cannot be undone by shipping a new one. Additive capability is announced by
+# a named block in /capabilities, which an older client simply does not ask
+# about. Do not "fix" this. The share gateway pins its own the same way.
+check.equal(config.API_VERSION, 1, "API_VERSION is frozen at 1")
+
+client = client_with(accepts)
+caps = client.get("/api/v1/capabilities", headers={"X-Emby-Token": "good"}).json()
+check.equal(caps["version"], 1, "capabilities reports version 1")
+
+# The states a request can be in are part of the same promise. Clients decode
+# them into a fixed enum, so a fourth state does not degrade one row -- it
+# fails the decode of the whole response and takes the screen with it.
+check.equal(caps["states"], ["on_its_way", "still_looking", "in_library"],
+            "the three states are the three states")
+
+
+# --- being found at all -----------------------------------------------------
+# /info answers with no token so that "no such service" and "the service is
+# broken" stop being the same answer. Everything else needs credentials, and a
+# client probing the Jellyfin origin cannot tell a missing proxy rule from a
+# server that simply does not run this.
+found = client_with(rejects).get("/api/v1/info")
+check.equal(found.status_code, 200, "/info answers without a token")
+check.equal(found.json(), {"service": "nextup", "protocol": 1},
+            "/info names the service and the protocol")
+check.that("user" not in found.json(),
+           "/info says nothing about anybody, having asked for nothing")
+
+
+# --- the token cache does not grow for ever ---------------------------------
+# Expired rows were read past but never removed, so a service that had seen a
+# few thousand rotated tokens held every one of them until it restarted.
+api._tokens.clear()
+api._tokens["long-gone"] = (0.0, jellyfin.User(id="u0", name="ghost"))
+client_with(accepts).get("/api/v1/capabilities", headers={"X-Emby-Token": "fresh"})
+check.that("long-gone" not in api._tokens,
+           "an expired cache entry is dropped, not kept for ever")
+check.equal(len(api._tokens), 1, "only the live entry remains")
 
 harness.cleanup()
 raise SystemExit(check.report())
