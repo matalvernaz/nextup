@@ -123,8 +123,10 @@ load-bearing:
 
 ```
 python3 tests/test_api_auth.py
-python3 tests/test_wants.py
+python3 tests/test_deployment.py
+python3 tests/test_media.py
 python3 tests/test_store.py
+python3 tests/test_wants.py
 ```
 
 They need only `fastapi` and `httpx`, so they run wherever the service runs.
