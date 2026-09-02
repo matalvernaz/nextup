@@ -64,5 +64,26 @@ check.that(store.forget("matt", "movie", "tmdb:500"), "a row can be forgotten")
 check.that(not store.forget("matt", "movie", "tmdb:500"),
            "and forgetting it twice reports nothing to do")
 
+# The 2026-09-02 rekey: the ledger moves off casefolded display names and
+# onto Jellyfin account ids, so renaming an account no longer empties that
+# listener's list and recreating a name no longer inherits a stranger's.
+store.record("renamed", "movie", "tmdb:9001", "movie", "Theirs", "2020", 1, "r9")
+store.record("gone-away", "movie", "tmdb:9002", "movie", "Orphan", "2020", 1, "r8")
+check.equal(store.user_key_scheme(), "name", "an unmigrated ledger says so")
+
+moved = store.rekey_users({"renamed": "u-renamed"})
+check.equal(moved, 1, "only the rows whose account was found are moved")
+check.that(store.get("u-renamed", "movie", "tmdb:9001") is not None,
+           "the request now answers to the account id")
+check.that(store.get("renamed", "movie", "tmdb:9001") is None,
+           "and no longer to the old name")
+# Left where they are rather than thrown away: the account may be renamed
+# back, and losing somebody's outstanding requests to tidy a key is worse.
+check.that(store.get("gone-away", "movie", "tmdb:9002") is not None,
+           "rows for an account nobody can name are kept")
+check.equal(store.user_key_scheme(), "id", "the ledger records that it moved")
+check.equal(store.rekey_users({"renamed": "u-renamed"}), 0,
+            "and a second run does nothing")
+
 harness.cleanup()
 raise SystemExit(check.report())

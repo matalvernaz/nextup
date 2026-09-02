@@ -48,8 +48,27 @@ class User:
 
     @property
     def key(self) -> str:
-        """Stable-enough local scope, shared with the proxy's username."""
-        return self.name.casefold()
+        """How this account is written in the ledger.
+
+        Jellyfin's own account id, not the display name. The name was the key
+        until 2026-09-02, and it moves: renaming an account emptied that
+        listener's request list and refunded their daily allowance, and
+        recreating a name inherited a stranger's outstanding requests. The id
+        is in hand on both identity paths, so nothing had to be looked up to
+        get this right.
+        """
+        return self.id
+
+    @property
+    def is_configured_user(self) -> bool:
+        """Whether this is the account named by JELLYFIN_USER.
+
+        A question about the NAME, deliberately: the setting is a name, and
+        the ledger key is no longer one.
+        """
+        return bool(config.JELLYFIN_USER) and (
+            self.name.casefold() == config.JELLYFIN_USER.casefold()
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +125,16 @@ def credential_rejected() -> bool:
     except httpx.HTTPError:
         return False
     return resp.status_code in (401, 403)
+
+
+def all_users() -> dict[str, str]:
+    """Every Jellyfin account, as casefolded display name to account id.
+
+    Only the ledger rekey needs this, and only once.
+    """
+    with _client() as c:
+        users = c.get("/Users").raise_for_status().json()
+    return {dto["Name"].casefold(): dto["Id"] for dto in users}
 
 
 def user(name: str | None = None) -> User:

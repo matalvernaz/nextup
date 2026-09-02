@@ -24,8 +24,27 @@ log = logs.get("main")
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    _rekey_ledger_once()
     selfcheck.watch()
     yield
+
+
+def _rekey_ledger_once() -> None:
+    """Move the ledger off display names and onto Jellyfin account ids.
+
+    Deliberately fatal when Jellyfin cannot be asked. Serving id-keyed lookups
+    over a name-keyed ledger is exactly the failure this migration exists to
+    prevent: every list reads empty and every daily allowance reads unspent,
+    which invites a second request for something already on its way.
+    """
+    if store.user_key_scheme() == "id":
+        return
+    try:
+        names = jellyfin.all_users()
+    except Exception as exc:
+        raise RuntimeError(
+            "cannot rekey the request ledger: Jellyfin did not answer") from exc
+    store.rekey_users(names)
 
 
 app = FastAPI(title="nextup", lifespan=lifespan)

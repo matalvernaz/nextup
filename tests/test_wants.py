@@ -115,7 +115,7 @@ set_owned(movie_tmdb=frozenset({"100"}))
 rows = wants.states(KID, media.MOVIE)
 check.equal(rows[0]["state"], wants.IN_LIBRARY,
             "a film whose TMDB id is in the library has arrived")
-check.that(store.get("kid", media.MOVIE, "tmdb:100")["fulfilled_at"] is not None,
+check.that(store.get(KID.key, media.MOVIE, "tmdb:100")["fulfilled_at"] is not None,
            "arrival is written down, so it is not re-derived every read")
 
 # A series exists in Jellyfin the moment Sonarr creates it. That is not arrival.
@@ -181,7 +181,7 @@ radarr.cancel = lambda backend_id: False
 wants.want(KID, media.MOVIE, "tmdb:500", "movie", {"title": "Stuck"})
 removed, message = wants.cancel(KID, media.MOVIE, "tmdb:500")
 check.that(removed, "the ledger row goes even when the backend is down")
-check.that(store.get("kid", media.MOVIE, "tmdb:500") is None,
+check.that(store.get(KID.key, media.MOVIE, "tmdb:500") is None,
            "and it is really gone")
 check.that("could not be reached" in message, "and the message says so")
 

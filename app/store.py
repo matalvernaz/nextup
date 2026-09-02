@@ -62,6 +62,54 @@ def init() -> None:
     log.info("store ready at %s", config.DB_PATH)
 
 
+#: Written once the ledger's `user_key` column holds Jellyfin account ids.
+USER_KEY_SCHEME = "user_key_scheme"
+
+
+def user_key_scheme() -> str:
+    with db() as conn:
+        row = conn.execute(
+            "SELECT value FROM meta WHERE key=?", (USER_KEY_SCHEME,)).fetchone()
+    return row["value"] if row else "name"
+
+
+def rekey_users(name_to_id: dict[str, str]) -> int:
+    """Move the ledger from casefolded display names onto account ids.
+
+    Run once, from the service's startup, because it needs Jellyfin to say
+    which id each name belongs to and the store cannot ask.
+
+    Rows whose name no longer matches an account are left alone and logged:
+    the account may be renamed back, and throwing away somebody's outstanding
+    requests to tidy a key is a worse answer than leaving them where they are.
+
+    - Parameter name_to_id: casefolded display name to Jellyfin account id.
+    - Returns: how many rows moved.
+    """
+    moved = 0
+    with db() as conn:
+        if conn.execute("SELECT value FROM meta WHERE key=?",
+                        (USER_KEY_SCHEME,)).fetchone():
+            return 0
+        existing = {row["user_key"] for row in
+                    conn.execute("SELECT DISTINCT user_key FROM requests")}
+        for key in sorted(existing):
+            item_id = name_to_id.get(key)
+            if item_id is None:
+                if key not in name_to_id.values():
+                    log.warning(
+                        "ledger rows for %r match no Jellyfin account; left as they are",
+                        key)
+                continue
+            cur = conn.execute(
+                "UPDATE requests SET user_key=? WHERE user_key=?", (item_id, key))
+            moved += cur.rowcount
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                     (USER_KEY_SCHEME, "id"))
+    log.info("ledger rekeyed onto account ids, %d row(s) moved", moved)
+    return moved
+
+
 def record(user_key: str, medium: str, item_key: str, unit: str,
            title: str, year: str, cost: int, backend_id: str) -> None:
     """Write down that this account asked for this thing.

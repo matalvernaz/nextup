@@ -115,7 +115,9 @@ def _add(medium: str, unit: str, item_key: str, hit: dict,
                           str(hit.get("year") or ""))
     if medium == media.SERIES:
         return sonarr.add(_provider_id(item_key), hit.get("title", ""))
-    return buskarr.add(unit, hit, user.key)
+    # The name, not the ledger key: buskarr renders `requested_by` in its own
+    # queue table for a person to read, and an account id says nothing there.
+    return buskarr.add(unit, hit, user.name)
 
 
 def _provider_id(item_key: str) -> str:
