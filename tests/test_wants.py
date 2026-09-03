@@ -32,23 +32,29 @@ media._registry = {
 
 owned = jellyfin.Owned()
 episode_counts: dict[str, int] = {}
+series_progress: dict[str, sonarr.AcquisitionProgress] = {}
 
 
-def set_owned(episodes=None, **kwargs):
+def set_owned(episodes=None, acquisition=None, **kwargs):
     """State what the library holds, and how many episodes of each series.
 
     Episodes are counted per series against Jellyfin rather than indexed, so
     the stub replaces that lookup rather than a field on the index.
     """
-    global owned, episode_counts
+    global owned, episode_counts, series_progress
     owned = jellyfin.Owned(**kwargs)
     media._owned._value = owned
     media._owned._built_at = time.monotonic()
     episode_counts = dict(episodes or {})
+    series_progress = dict(acquisition or {})
 
 
 media.episode_counts = lambda provider_ids: {
     k: v for k, v in episode_counts.items() if k in provider_ids}
+sonarr.acquisition_progress = lambda backend_ids: {
+    backend_id: series_progress[backend_id]
+    for backend_id in backend_ids if backend_id in series_progress
+}
 set_owned()
 
 added: list[tuple] = []
@@ -121,17 +127,35 @@ check.that(store.get(KID.key, media.MOVIE, "tmdb:100")["fulfilled_at"] is not No
 # A series exists in Jellyfin the moment Sonarr creates it. That is not arrival.
 wants.want(KID, media.SERIES, "tvdb:200", "series", {"title": "A show"})
 set_owned(movie_tmdb=frozenset({"100"}), series_tvdb=frozenset({"200"}),
-          episodes={"200": 0})
+          episodes={"200": 0},
+          acquisition={"s1": sonarr.AcquisitionProgress(10, 4)})
 rows = [r for r in wants.states(KID, media.SERIES) if r["itemKey"] == "tvdb:200"]
 check.equal(rows[0]["state"], wants.ON_ITS_WAY,
             "a series folder with no episode in it has not arrived")
+check.equal(rows[0]["episodesTotal"], 10,
+            "series status says how many aired episodes are expected")
+check.equal(rows[0]["episodesQueued"], 4,
+            "series status says how many episode downloads are queued")
 
+set_owned(movie_tmdb=frozenset({"100"}), series_tvdb=frozenset({"200"}),
+          episodes={"200": 3},
+          acquisition={"s1": sonarr.AcquisitionProgress(10, 4)})
+rows = [r for r in wants.states(KID, media.SERIES) if r["itemKey"] == "tvdb:200"]
+check.equal(rows[0]["state"], wants.ON_ITS_WAY,
+            "the first episode does not complete a whole-series request")
+check.equal(rows[0]["episodesInLibrary"], 3, "and it says how much of it is here")
 set_owned(movie_tmdb=frozenset({"100"}), series_tvdb=frozenset({"200"}),
           episodes={"200": 3})
 rows = [r for r in wants.states(KID, media.SERIES) if r["itemKey"] == "tvdb:200"]
+check.equal(rows[0]["state"], wants.ON_ITS_WAY,
+            "an unknown total cannot turn a partial series into complete")
+
+set_owned(movie_tmdb=frozenset({"100"}), series_tvdb=frozenset({"200"}),
+          episodes={"200": 10},
+          acquisition={"s1": sonarr.AcquisitionProgress(10, 0)})
+rows = [r for r in wants.states(KID, media.SERIES) if r["itemKey"] == "tvdb:200"]
 check.equal(rows[0]["state"], wants.IN_LIBRARY,
-            "a series with an episode in it has started arriving")
-check.equal(rows[0]["episodesInLibrary"], 3, "and it says how much of it is here")
+            "all currently aired episodes complete the request")
 
 set_owned(movie_tmdb=frozenset({"100"}), series_tvdb=frozenset({"200"}))
 rows = [r for r in wants.states(KID, media.SERIES) if r["itemKey"] == "tvdb:200"]

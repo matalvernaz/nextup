@@ -17,7 +17,8 @@ ON_ITS_WAY = "on_its_way"
 #: Waiting long enough that "on its way" would be a lie. Not a failure: it
 #: stays monitored and the acquisition tool's own sweep keeps retrying.
 STILL_LOOKING = "still_looking"
-#: It is in the library. For a series, at least one episode of it is.
+#: It is in the library. A whole-series request has every currently aired
+#: episode there; future episodes remain Sonarr's ongoing responsibility.
 IN_LIBRARY = "in_library"
 
 DAY_SECONDS = 24 * 3600
@@ -141,9 +142,9 @@ def _cap_message(found: media.Medium, unit: str, price: int,
 def states(user: jellyfin.User, medium: str | None = None) -> list[dict]:
     """This account's requests and what has become of each.
 
-    Arrival is settled here rather than polled by the client: there is no
-    status to ask a backend for that Jellyfin does not already answer better,
-    and the index this reads is the same one the search marked its hits with.
+    Arrival is settled here rather than polled by the client. Jellyfin remains
+    authoritative for playable media; Sonarr contributes the aired total and
+    queued work needed to describe a whole-series request honestly.
     """
     window = time.time() - config.ARRIVED_VISIBLE_HOURS * 3600
     rows = store.active(user.key, medium, window)
@@ -151,12 +152,18 @@ def states(user: jellyfin.User, medium: str | None = None) -> list[dict]:
         return []
 
     index = media.owned()
-    # Counted once, for exactly the series on this list. Each one is its own
-    # small request, so asking about the rows in hand is the difference
-    # between three of them and none at all.
+    # Counted once, for exactly the series on this list. Jellyfin says what is
+    # playable; Sonarr supplies the currently aired total and queued work.
     episodes = media.episode_counts({
         row["item_key"].split(":", 1)[1] for row in rows
         if row["medium"] == media.SERIES and ":" in row["item_key"]})
+    series_rows = [row for row in rows if row["medium"] == media.SERIES]
+    progress_by_backend = sonarr.acquisition_progress({
+        str(row["backend_id"]) for row in series_rows if row["backend_id"]})
+    series_progress = {
+        row["item_key"]: progress_by_backend.get(str(row["backend_id"]))
+        for row in series_rows
+    }
     newly_arrived: dict[str, set[str]] = {}
     out = []
     for row in rows:
@@ -166,10 +173,12 @@ def states(user: jellyfin.User, medium: str | None = None) -> list[dict]:
         reported = (buskarr.state(row["backend_id"])
                     if row["medium"] == media.MUSIC
                     and row["fulfilled_at"] is None else None)
-        state = _state(row, row["medium"], index, reported, episodes)
+        state = _state(
+            row, row["medium"], index, reported, episodes, series_progress)
         if state == IN_LIBRARY and row["fulfilled_at"] is None:
             newly_arrived.setdefault(row["medium"], set()).add(row["item_key"])
-        out.append(_described(row, state, episodes, reported))
+        out.append(_described(
+            row, state, episodes, reported, series_progress))
 
     for medium_key, keys in newly_arrived.items():
         store.mark_arrived(user.key, medium_key, keys)
@@ -180,7 +189,9 @@ def states(user: jellyfin.User, medium: str | None = None) -> list[dict]:
 
 def _state(row, medium: str, index: jellyfin.Owned | None = None,
            reported: dict | None = None,
-           episodes: dict[str, int] | None = None) -> str:
+           episodes: dict[str, int] | None = None,
+           series_progress: dict[str, sonarr.AcquisitionProgress | None]
+           | None = None) -> str:
     """One request's state.
 
     A row already marked fulfilled stays fulfilled. Re-deriving it would make
@@ -190,7 +201,8 @@ def _state(row, medium: str, index: jellyfin.Owned | None = None,
     if row["fulfilled_at"] is not None:
         return IN_LIBRARY
     index = index if index is not None else media.owned()
-    if _arrived(row, medium, index, reported, episodes):
+    if _arrived(
+            row, medium, index, reported, episodes, series_progress):
         return IN_LIBRARY
     waited = time.time() - row["requested_at"]
     if waited > config.STILL_LOOKING_AFTER_HOURS * 3600:
@@ -200,7 +212,9 @@ def _state(row, medium: str, index: jellyfin.Owned | None = None,
 
 def _arrived(row, medium: str, index: jellyfin.Owned,
              reported: dict | None = None,
-             episodes: dict[str, int] | None = None) -> bool:
+             episodes: dict[str, int] | None = None,
+             series_progress: dict[str, sonarr.AcquisitionProgress | None]
+             | None = None) -> bool:
     key = row["item_key"]
     if medium == media.MOVIE:
         return bool(radarr.arrived({key}, index.movie_tmdb))
@@ -208,7 +222,18 @@ def _arrived(row, medium: str, index: jellyfin.Owned,
         if episodes is None:
             provider_id = key.split(":", 1)[1] if ":" in key else ""
             episodes = media.episode_counts({provider_id})
-        return bool(sonarr.arrived({key}, index.series_tvdb, episodes))
+        count = sonarr.progress(key, episodes)
+        progress = (series_progress or {}).get(key)
+        # One episode proves that a series has started arriving, not that the
+        # whole-series request is complete. If Sonarr cannot supply a total,
+        # keep waiting and report the known library count rather than making a
+        # completion claim that cannot be substantiated.
+        return bool(
+            progress is not None
+            and progress.episodes_total is not None
+            and progress.episodes_total > 0
+            and count is not None
+            and count >= progress.episodes_total)
     # Music asks buskarr, which placed the file and holds its exact identity.
     # An unreachable buskarr answers None, which is "unknown" and must not be
     # read as "not here" -- the row simply keeps waiting.
@@ -217,8 +242,13 @@ def _arrived(row, medium: str, index: jellyfin.Owned,
     return bool(reported and reported.get("state") == "have")
 
 
-def _described(row, state: str, episodes: dict[str, int],
-               reported: dict | None = None) -> dict:
+def _described(
+    row,
+    state: str,
+    episodes: dict[str, int],
+    reported: dict | None = None,
+    series_progress: dict[str, sonarr.AcquisitionProgress | None] | None = None,
+) -> dict:
     """One request as a client shows it."""
     described = {
         "itemKey": row["item_key"],
@@ -236,6 +266,12 @@ def _described(row, state: str, episodes: dict[str, int],
         count = sonarr.progress(row["item_key"], episodes)
         if count is not None:
             described["episodesInLibrary"] = count
+        progress = (series_progress or {}).get(row["item_key"])
+        if progress is not None:
+            if progress.episodes_total is not None:
+                described["episodesTotal"] = progress.episodes_total
+            if progress.episodes_queued is not None:
+                described["episodesQueued"] = progress.episodes_queued
     elif row["medium"] == media.MUSIC and state != IN_LIBRARY:
         if reported:
             described["tracksInLibrary"] = reported.get("have")

@@ -100,8 +100,13 @@ asked for yet.</p>
       {% if r.state == 'in_library' %}In the library.
       {% elif r.state == 'still_looking' %}Still looking.
       {% else %}On its way.{% endif %}
-      {% if r.episodesInLibrary is defined and r.episodesInLibrary %}
-      {{ r.episodesInLibrary }} episode{{ '' if r.episodesInLibrary == 1 else 's' }} so far.
+      {% if r.episodesInLibrary is defined and r.episodesTotal is defined %}
+      {{ r.episodesInLibrary }} of {{ r.episodesTotal }} aired episodes in the library.
+      {% elif r.episodesInLibrary is defined %}
+      {% if r.episodesInLibrary %}{{ r.episodesInLibrary }} episode{{ '' if r.episodesInLibrary == 1 else 's' }} so far.{% else %}No episodes in the library yet.{% endif %}
+      {% endif %}
+      {% if r.episodesQueued is defined and r.episodesQueued %}
+      {{ r.episodesQueued }} episode download{{ '' if r.episodesQueued == 1 else 's' }} queued.
       {% endif %}
       {% if r.detail %}{{ r.detail }}{% endif %}
     </p>

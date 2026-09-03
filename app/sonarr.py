@@ -5,12 +5,24 @@ accepts the request immediately and the episodes land over hours or weeks, so
 `arrived` is not a yes or no: it is a yes with a count, and a request whose
 series exists with no episode in it has not arrived at all.
 """
+from typing import NamedTuple
+
+import httpx
+
 from . import arr, config, logs
 
 log = logs.get("sonarr")
 
 MEDIUM = "series"
 UNIT = "series"
+_PROGRESS_TIMEOUT = httpx.Timeout(5.0, connect=2.0)
+
+
+class AcquisitionProgress(NamedTuple):
+    """What Sonarr currently knows about one whole-series request."""
+
+    episodes_total: int | None
+    episodes_queued: int | None
 
 
 def backend() -> arr.Arr:
@@ -121,6 +133,81 @@ def _lookup_one(tool: arr.Arr, tvdb_id: str) -> dict | None:
 
 def cancel(backend_id: str) -> bool:
     return backend().delete(backend_id)
+
+
+def acquisition_progress(
+    backend_ids: set[str],
+) -> dict[str, AcquisitionProgress]:
+    """Aired and queued episode counts from one batched Sonarr read.
+
+    Jellyfin remains the authority for what a listener can actually play.
+    Sonarr supplies the denominator and work in flight that Jellyfin cannot:
+    without them, one imported episode looks indistinguishable from a complete
+    series request.
+    """
+    wanted = {str(value) for value in backend_ids if value}
+    tool = backend()
+    if not wanted or not tool.configured:
+        return {}
+    try:
+        # Status is optional detail on a request-list response. It must fail
+        # faster than an acquisition write so one stopped Sonarr does not leave
+        # the whole screen saying only "Loading" for the transport's 30s cap.
+        with tool.client(timeout=_PROGRESS_TIMEOUT) as client:
+            response = client.get("/series")
+            response.raise_for_status()
+            rows = response.json()
+            if not isinstance(rows, list):
+                return {}
+            totals = {
+                str(row["id"]): _count(
+                    (row.get("statistics") or {}).get("episodeCount"))
+                for row in rows
+                if isinstance(row, dict)
+                and str(row.get("id") or "") in wanted
+                and isinstance(row.get("statistics") or {}, dict)
+            }
+            queued = _queued_counts(client, wanted)
+    except (httpx.HTTPError, ValueError, AttributeError) as exc:
+        log.warning("Sonarr progress failed ids=%d (%s)", len(wanted), exc)
+        return {}
+    return {
+        backend_id: AcquisitionProgress(
+            total,
+            None if queued is None else queued.get(backend_id, 0),
+        )
+        for backend_id, total in totals.items()
+    }
+
+
+def _queued_counts(
+    client: httpx.Client,
+    backend_ids: set[str],
+) -> dict[str, int] | None:
+    """Distinct queued episodes per requested Sonarr series."""
+    try:
+        response = client.get("/queue/details")
+        response.raise_for_status()
+        rows = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        log.warning("Sonarr queue progress failed ids=%d (%s)",
+                    len(backend_ids), exc)
+        return None
+    if not isinstance(rows, list):
+        return None
+    episode_ids = {backend_id: set() for backend_id in backend_ids}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        backend_id = str(row.get("seriesId") or "")
+        episode_id = row.get("episodeId")
+        if backend_id in episode_ids and episode_id is not None:
+            episode_ids[backend_id].add(episode_id)
+    return {backend_id: len(ids) for backend_id, ids in episode_ids.items()}
+
+
+def _count(value) -> int | None:
+    return value if type(value) is int and value >= 0 else None
 
 
 def arrived(item_keys: set[str], owned: frozenset[str],
