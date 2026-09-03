@@ -66,8 +66,10 @@ services:
 
       STILL_LOOKING_AFTER_HOURS: "24"
       ARRIVED_VISIBLE_HOURS: "48"
-      # Owned TV recommendations use Jellyfin only. The result is cached per
-      # account and library; neither setting enables another backend.
+      # Owned recommendations use Jellyfin only. Results are cached per
+      # account, medium, and library; none of these enable another backend.
+      MOVIE_RECOMMENDATION_LIMIT: "20"
+      MOVIE_RECOMMENDATION_CACHE_SECONDS: "3600"
       SERIES_RECOMMENDATION_LIMIT: "20"
       SERIES_RECOMMENDATION_CACHE_SECONDS: "3600"
       LOG_LEVEL: "INFO"
