@@ -3,10 +3,10 @@
 Ask a Jellyfin server for a film, a series or some music — from a phone, with
 no second account.
 
-Nextup is a small companion service that sits between a Jellyfin client and
-whatever acquires media for that server. It holds the request list, the daily
-allowances, and the answer to "has it arrived yet?". It does not recommend
-anything, it does not keep a library, and it is not a media server.
+Nextup is a small companion service between a Jellyfin client and the server's
+media tools. It recommends unstarted TV already in Jellyfin, holds request
+lists and daily allowances, and answers "has it arrived yet?". It does not
+keep a second library and it is not a media server.
 
 ## Why it exists
 
@@ -24,9 +24,12 @@ asking and how much they have asked for today.
 - **Request** one thing, with a per-medium daily allowance for accounts that
   are not Jellyfin administrators.
 - **Report** what became of each request: `on_its_way`, `still_looking`, or
-  `in_library`.
+  `in_library`, with aired, queued, and in-library episode counts for
+  television.
 - **Cancel** a request, which calls the acquisition off — unless somebody else
   in the household is still waiting for the same thing.
+- **Recommend owned TV series** from the signed-in user's watching history,
+  without another catalogue account or API key.
 
 ## Authentication
 
@@ -45,10 +48,11 @@ header is refused.
 ## Arrival is decided on provider ids
 
 A film has arrived when Jellyfin holds an item whose TMDB id matches the one
-Radarr was asked for. A series has arrived when Jellyfin holds it by TVDB id
-**and has at least one episode of it** — Sonarr creates the series row the
-moment it is added, so counting that as an arrival would close the request
-before anything downloaded.
+Radarr was asked for. A whole-series request has arrived when Jellyfin holds
+every episode Sonarr currently counts as aired. Future episodes remain
+monitored in Sonarr, but the request is not closed after its first episode.
+Until then, the response distinguishes how many episodes Jellyfin can play and
+how many are queued in Sonarr.
 
 Music is the exception, and reads its state from buskarr instead. buskarr
 placed the file and holds the exact `(artist, title, duration)` identity it
@@ -70,6 +74,7 @@ does not list them, and a client shows no control for what is not listed.
 | `GET` | `/api/v1/capabilities` | What this server serves, and this account's allowances |
 | `GET` | `/api/v1/search?medium=&q=&unit=` | Catalogue hits, marked with what the library holds |
 | `GET` | `/api/v1/requests?medium=` | This account's requests and their states |
+| `GET` | `/api/v1/recommendations?medium=series&libraryId=` | Unstarted series from this account's library, ranked from its watching |
 | `POST` | `/api/v1/want` | Ask for one thing |
 | `POST` | `/api/v1/cancel` | Take one back |
 
@@ -82,6 +87,11 @@ or a 401 at the Jellyfin origin, and only the first is ordinary.
 Browser pages live at `/`. They are server-rendered HTML with real forms and
 no JavaScript in any path that does something — a screen reader is the primary
 interface here.
+
+`capabilities.recommendations.media` is independent of `capabilities.media`.
+A TV library can offer an owned recommendation shelf without Sonarr; Sonarr is
+needed only to search for and acquire an unowned series. Older servers omit the
+recommendation block and existing clients continue to use requests unchanged.
 
 ## Deploying
 
@@ -125,6 +135,8 @@ load-bearing:
 python3 tests/test_api_auth.py
 python3 tests/test_deployment.py
 python3 tests/test_media.py
+python3 tests/test_recommendations.py
+python3 tests/test_sonarr_progress.py
 python3 tests/test_store.py
 python3 tests/test_wants.py
 ```

@@ -66,11 +66,11 @@ class Arr:
         """
         return bool(self.url and self.api_key and self.quality_profile_id > 0)
 
-    def client(self) -> httpx.Client:
+    def client(self, timeout: httpx.Timeout = _TIMEOUT) -> httpx.Client:
         return httpx.Client(
             base_url=self.url.rstrip("/") + "/api/v3",
             headers={"X-Api-Key": self.api_key, "Accept": "application/json"},
-            timeout=_TIMEOUT)
+            timeout=timeout)
 
     def lookup(self, term: str, limit: int) -> list[dict]:
         """Catalogue search, which these tools proxy from TMDB and TVDB.
