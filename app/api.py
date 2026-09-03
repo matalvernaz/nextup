@@ -16,9 +16,9 @@ import hashlib
 import time
 from threading import Lock
 
-from fastapi import APIRouter, Body, Depends, Header, HTTPException
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query
 
-from . import config, jellyfin, logs, media, wants
+from . import config, jellyfin, logs, media, recommendations, wants
 
 log = logs.get("api")
 
@@ -121,6 +121,12 @@ def capabilities(user: jellyfin.User = Depends(caller)) -> dict:
         })
     log.info("capabilities user=%s keyholder=%s media=%s",
              user.key, user.is_admin, [b["medium"] for b in blocks])
+    try:
+        recommendation_libraries = list(recommendations.library_ids())
+    except jellyfin.JellyfinUnavailable:
+        # Capabilities are discovery, not the recommendation request itself.
+        # A temporary Jellyfin failure must not make every other medium vanish.
+        recommendation_libraries = []
     return {
         "version": config.API_VERSION,
         "service": "nextup",
@@ -129,6 +135,14 @@ def capabilities(user: jellyfin.User = Depends(caller)) -> dict:
         "states": [wants.ON_ITS_WAY, wants.STILL_LOOKING, wants.IN_LIBRARY],
         "search": {"supported": True, "limit": config.SEARCH_LIMIT},
         "cancel": {"supported": True},
+        "recommendations": {
+            "media": ([{
+                "medium": media.SERIES,
+                "libraryIds": recommendation_libraries,
+                "surfaces": ["owned"],
+                "limit": config.SERIES_RECOMMENDATION_LIMIT,
+            }] if recommendation_libraries else []),
+        },
     }
 
 
@@ -162,6 +176,37 @@ def get_requests(medium: str | None = None,
         "requests": rows,
         "remainingToday": {found.key: wants.allowance(user, found.key)
                            for found in media.available().values()},
+    }
+
+
+@router.get("/recommendations")
+def get_recommendations(
+    medium: str,
+    library_id: str = Query(default="", alias="libraryId"),
+    user: jellyfin.User = Depends(caller),
+) -> dict:
+    """Owned recommendations for one medium and one authenticated account."""
+    if medium != media.SERIES:
+        raise HTTPException(
+            status_code=404,
+            detail=f"This server does not recommend {medium} yet.")
+    try:
+        shelf = recommendations.result(user, library_id)
+    except recommendations.UnknownLibrary as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="This server does not recommend that library.") from exc
+    except jellyfin.JellyfinUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Jellyfin is unreachable.") from exc
+    return {
+        "version": config.API_VERSION,
+        "medium": medium,
+        "libraryId": library_id,
+        "rankerVersion": shelf["ranker_version"],
+        "seedCount": shelf["seed_count"],
+        "recommendations": shelf["recommendations"],
     }
 
 

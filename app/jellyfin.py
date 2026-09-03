@@ -300,6 +300,37 @@ def episode_count(item_id: str) -> int | None:
     return count if isinstance(count, int) else None
 
 
+def series_for_user(uid: str, libraries: list[str] | tuple[str, ...]) -> list[dict]:
+    """Every series in these libraries with one user's play state attached.
+
+    This is intentionally separate from ``owned_index``. Arrival checks need
+    only provider ids and must stay cheap; recommendations need descriptive
+    metadata and, critically, ``userId`` so one account's watching does not
+    become another account's taste profile.
+    """
+    fields = "Genres,People,Studios,CommunityRating,DateCreated,UserData"
+    found: dict[str, dict] = {}
+    try:
+        with _client() as c:
+            for library in libraries:
+                data = c.get("/Items", params={
+                    "parentId": library,
+                    "includeItemTypes": "Series",
+                    "recursive": "true",
+                    "fields": fields,
+                    "userId": uid,
+                    "limit": 10000,
+                }).raise_for_status().json()
+                for item in data.get("Items", []):
+                    if item_id := item.get("Id"):
+                        found[normalise_id(item_id)] = item
+    except (httpx.HTTPError, ValueError) as exc:
+        log.error("series recommendation library read failed user=%s (%s)",
+                  uid, exc)
+        raise JellyfinUnavailable(str(exc)) from exc
+    return list(found.values())
+
+
 def _items(medium: str, item_type: str, fields: str) -> list[dict]:
     """Every item of one type across a medium's libraries."""
     out: list[dict] = []
