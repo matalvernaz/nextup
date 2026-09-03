@@ -121,12 +121,23 @@ def capabilities(user: jellyfin.User = Depends(caller)) -> dict:
         })
     log.info("capabilities user=%s keyholder=%s media=%s",
              user.key, user.is_admin, [b["medium"] for b in blocks])
-    try:
-        recommendation_libraries = list(recommendations.library_ids())
-    except jellyfin.JellyfinUnavailable:
-        # Capabilities are discovery, not the recommendation request itself.
-        # A temporary Jellyfin failure must not make every other medium vanish.
-        recommendation_libraries = []
+    recommendation_media = []
+    for medium_key in recommendations.SUPPORTED_MEDIA:
+        try:
+            recommendation_libraries = list(
+                recommendations.library_ids(medium_key))
+        except jellyfin.JellyfinUnavailable:
+            # Capabilities are discovery, not the recommendation request
+            # itself. One temporary library failure must not make request
+            # support or the other recommendation medium vanish.
+            continue
+        if recommendation_libraries:
+            recommendation_media.append({
+                "medium": medium_key,
+                "libraryIds": recommendation_libraries,
+                "surfaces": ["owned"],
+                "limit": recommendations.limit(medium_key),
+            })
     return {
         "version": config.API_VERSION,
         "service": "nextup",
@@ -136,12 +147,7 @@ def capabilities(user: jellyfin.User = Depends(caller)) -> dict:
         "search": {"supported": True, "limit": config.SEARCH_LIMIT},
         "cancel": {"supported": True},
         "recommendations": {
-            "media": ([{
-                "medium": media.SERIES,
-                "libraryIds": recommendation_libraries,
-                "surfaces": ["owned"],
-                "limit": config.SERIES_RECOMMENDATION_LIMIT,
-            }] if recommendation_libraries else []),
+            "media": recommendation_media,
         },
     }
 
@@ -183,15 +189,17 @@ def get_requests(medium: str | None = None,
 def get_recommendations(
     medium: str,
     library_id: str = Query(default="", alias="libraryId"),
+    refresh: bool = Query(default=False),
     user: jellyfin.User = Depends(caller),
 ) -> dict:
     """Owned recommendations for one medium and one authenticated account."""
-    if medium != media.SERIES:
+    if medium not in recommendations.SUPPORTED_MEDIA:
         raise HTTPException(
             status_code=404,
             detail=f"This server does not recommend {medium} yet.")
     try:
-        shelf = recommendations.result(user, library_id)
+        shelf = recommendations.result(
+            user, library_id, force=refresh, medium=medium)
     except recommendations.UnknownLibrary as exc:
         raise HTTPException(
             status_code=404,

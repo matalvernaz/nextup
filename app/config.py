@@ -139,10 +139,13 @@ TOKEN_CACHE_SECONDS = _int("TOKEN_CACHE_SECONDS", 60)
 # reused. Arrival is only ever as fresh as this.
 OWNED_INDEX_TTL_SECONDS = _int("OWNED_INDEX_TTL_SECONDS", 900)
 
-# The first recommendation surface is deliberately small and owned-only. It
-# reads series already in Jellyfin, so it adds no catalogue account or API key
-# to an installation. The result is cached per user and library: building it
-# means asking Jellyfin for every series with that user's play state attached.
+# Owned recommendation surfaces read Jellyfin only, so they add no catalogue
+# account or API key to an installation. Results are cached per user, medium,
+# and library: building one means asking Jellyfin for every eligible item with
+# that user's play state attached.
+MOVIE_RECOMMENDATION_LIMIT = _int("MOVIE_RECOMMENDATION_LIMIT", 20)
+MOVIE_RECOMMENDATION_CACHE_SECONDS = _int(
+    "MOVIE_RECOMMENDATION_CACHE_SECONDS", 3600)
 SERIES_RECOMMENDATION_LIMIT = _int("SERIES_RECOMMENDATION_LIMIT", 20)
 SERIES_RECOMMENDATION_CACHE_SECONDS = _int(
     "SERIES_RECOMMENDATION_CACHE_SECONDS", 3600)

@@ -300,14 +300,21 @@ def episode_count(item_id: str) -> int | None:
     return count if isinstance(count, int) else None
 
 
-def series_for_user(uid: str, libraries: list[str] | tuple[str, ...]) -> list[dict]:
-    """Every series in these libraries with one user's play state attached.
+def recommendation_items_for_user(
+    medium: str,
+    uid: str,
+    libraries: list[str] | tuple[str, ...],
+) -> list[dict]:
+    """Every recommendable item with one user's play state attached.
 
     This is intentionally separate from ``owned_index``. Arrival checks need
     only provider ids and must stay cheap; recommendations need descriptive
     metadata and, critically, ``userId`` so one account's watching does not
     become another account's taste profile.
     """
+    item_type = {"movie": "Movie", "series": "Series"}.get(medium)
+    if not item_type:
+        return []
     fields = "Genres,People,Studios,CommunityRating,DateCreated,UserData"
     found: dict[str, dict] = {}
     try:
@@ -315,7 +322,7 @@ def series_for_user(uid: str, libraries: list[str] | tuple[str, ...]) -> list[di
             for library in libraries:
                 data = c.get("/Items", params={
                     "parentId": library,
-                    "includeItemTypes": "Series",
+                    "includeItemTypes": item_type,
                     "recursive": "true",
                     "fields": fields,
                     "userId": uid,
@@ -325,8 +332,8 @@ def series_for_user(uid: str, libraries: list[str] | tuple[str, ...]) -> list[di
                     if item_id := item.get("Id"):
                         found[normalise_id(item_id)] = item
     except (httpx.HTTPError, ValueError) as exc:
-        log.error("series recommendation library read failed user=%s (%s)",
-                  uid, exc)
+        log.error("%s recommendation library read failed user=%s (%s)",
+                  medium, uid, exc)
         raise JellyfinUnavailable(str(exc)) from exc
     return list(found.values())
 

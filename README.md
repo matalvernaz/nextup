@@ -4,9 +4,9 @@ Ask a Jellyfin server for a film, a series or some music — from a phone, with
 no second account.
 
 Nextup is a small companion service between a Jellyfin client and the server's
-media tools. It recommends unstarted TV already in Jellyfin, holds request
-lists and daily allowances, and answers "has it arrived yet?". It does not
-keep a second library and it is not a media server.
+media tools. It recommends unstarted films and TV already in Jellyfin, holds
+request lists and daily allowances, and answers "has it arrived yet?". It
+does not keep a second library and it is not a media server.
 
 ## Why it exists
 
@@ -28,8 +28,9 @@ asking and how much they have asked for today.
   television.
 - **Cancel** a request, which calls the acquisition off — unless somebody else
   in the household is still waiting for the same thing.
-- **Recommend owned TV series** from the signed-in user's watching history,
-  without another catalogue account or API key.
+- **Recommend owned films and TV series** from the signed-in user's playback,
+  favourites, and 1-10 ratings, without another catalogue account or API key.
+  Ratings below 5 reduce related results; ratings above 5 strengthen them.
 
 ## Authentication
 
@@ -74,7 +75,7 @@ does not list them, and a client shows no control for what is not listed.
 | `GET` | `/api/v1/capabilities` | What this server serves, and this account's allowances |
 | `GET` | `/api/v1/search?medium=&q=&unit=` | Catalogue hits, marked with what the library holds |
 | `GET` | `/api/v1/requests?medium=` | This account's requests and their states |
-| `GET` | `/api/v1/recommendations?medium=series&libraryId=` | Unstarted series from this account's library, ranked from its watching |
+| `GET` | `/api/v1/recommendations?medium=movie\|series&libraryId=` | Unstarted films or series from this account's library, ranked from its history |
 | `POST` | `/api/v1/want` | Ask for one thing |
 | `POST` | `/api/v1/cancel` | Take one back |
 
@@ -89,9 +90,14 @@ no JavaScript in any path that does something — a screen reader is the primary
 interface here.
 
 `capabilities.recommendations.media` is independent of `capabilities.media`.
-A TV library can offer an owned recommendation shelf without Sonarr; Sonarr is
-needed only to search for and acquire an unowned series. Older servers omit the
-recommendation block and existing clients continue to use requests unchanged.
+A film or TV library can offer an owned recommendation shelf without Radarr or
+Sonarr; those services are needed only to search for and acquire something
+unowned. Older servers omit the recommendation block and existing clients
+continue to use requests unchanged.
+
+Recommendation results are cached per account, medium, and library. A client
+that has just changed playback, favourite, or rating evidence can add
+`refresh=true` to rebuild that shelf immediately.
 
 ## Deploying
 
