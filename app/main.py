@@ -17,7 +17,8 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import api, config, jellyfin, logs, media, selfcheck, store, wants
+from . import (api, compat_nextread, config, jellyfin, logs, media, selfcheck,
+               store, wants)
 
 log = logs.get("main")
 
@@ -55,7 +56,19 @@ def _rekey_ledger_once() -> None:
 
 
 app = FastAPI(title="nextup", lifespan=lifespan)
+
+# One API, answered on three prefixes, because a client's address is derived
+# rather than typed. EchoFin resolves it as
+# `override ?? companion + "/nextup" ?? jellyfinOrigin + "/nextup"` and then
+# appends `/api/v1/...`, so a direct address arrives at the first of these and
+# every derived one at the second.
 app.include_router(api.router)
+app.include_router(api.router, prefix="/nextup")
+
+# The audiobook service's own protocol, at the prefix its clients derive. Not
+# a translation layer over this API: mostly its original handlers, mounted
+# here and calling the engine from its new home. See the module.
+app.include_router(compat_nextread.router)
 
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS", "TRACE"}
 
@@ -150,7 +163,8 @@ def index(request: Request, q: str = "", medium: str = "", unit: str = "",
     unit = unit if found and unit in found.units else (
         found.units[0] if found else "")
 
-    results = wants.search(q.strip(), medium, unit) if q.strip() and found else []
+    results = (wants.search(q.strip(), medium, unit, user)
+               if q.strip() and found else [])
     return templates.TemplateResponse(
         request=request, name="index.html",
         context={

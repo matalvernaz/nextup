@@ -8,6 +8,7 @@ quietly skips half of it.
 import time
 
 from . import buskarr, config, jellyfin, logs, media, radarr, sonarr, store
+from .books import adapter as books
 
 log = logs.get("wants")
 
@@ -44,8 +45,17 @@ def allowance(user: jellyfin.User, medium: str) -> int | None:
     return max(0, found.daily_cap - spent)
 
 
-def search(query: str, medium: str, unit: str = "") -> list[dict]:
-    """Catalogue hits for one medium, marked with what the library already has."""
+def search(query: str, medium: str, unit: str = "",
+           user: jellyfin.User | None = None) -> list[dict]:
+    """Catalogue hits for one medium, marked with what the library already has.
+
+    The caller is optional because three of the four media do not need one:
+    what a household owns in films, series and music is the same answer for
+    everybody, and it comes from a shared index. Books are per-account -- the
+    audiobook library read carries `userId`, because play state and ratings are
+    what its shelf is built from -- so the book path is given the account and
+    the others ignore it.
+    """
     if media.get(medium) is None:
         return []
     limit = config.SEARCH_LIMIT
@@ -53,6 +63,8 @@ def search(query: str, medium: str, unit: str = "") -> list[dict]:
         return radarr.search(query, limit, media.owned().movie_tmdb)
     if medium == media.SERIES:
         return sonarr.search(query, limit, media.owned().series_tvdb)
+    if medium == media.BOOK:
+        return books.search_hits(user, query, unit or "book")
     return buskarr.search(query, unit or "track", limit)
 
 
@@ -68,6 +80,13 @@ def want(user: jellyfin.User, medium: str, item_key: str, unit: str = "",
     found = media.get(medium)
     if found is None:
         raise Denied("That kind of thing cannot be asked for on this server.")
+    if medium == media.BOOK:
+        # Delegated whole rather than branch by branch. A book does not arrive
+        # under the ASIN it was asked for, a series is a bounded batch of
+        # requests rather than one, and both of those were got right once
+        # already -- reimplementing them here as four more `if medium ==` arms
+        # would be a second chance to get them wrong.
+        return books.want(user, item_key, unit or "book", hit or {})
     unit = unit or found.units[0]
     if unit not in found.units:
         raise Denied(f"{unit!r} is not something that can be asked for.")
@@ -292,6 +311,8 @@ def cancel(user: jellyfin.User, medium: str, item_key: str) -> tuple[bool, str]:
     * the day's allowance is refunded, which does mean a capped account can
       cancel and re-ask around the cap. That is the cheaper mistake.
     """
+    if medium == media.BOOK:
+        return books.cancel(user, item_key)
     row = store.get(user.key, medium, item_key)
     if row is None:
         return False, "That is not on your list."
