@@ -1,7 +1,53 @@
 {% extends "base.html" %}
-{% block title %}Nextup — not signed in{% endblock %}
+{% block title %}Sign in to Nextup{% endblock %}
 {% block main %}
-<h2>Not signed in</h2>
-<p>Nextup could not work out which account you are. {{ detail }}</p>
-<p>This usually means the sign-in proxy did not pass an identity through.</p>
+<h2>Sign in</h2>
+
+{# Present on every load rather than added by the response that has something
+   to say. A live region inserted at the moment it gains text is not announced
+   by every screen reader; one that was already in the page is. #}
+<p role="status" aria-live="polite">{{ detail }}</p>
+
+{% if proxied %}
+<p>
+  A sign-in proxy is in front of this page but did not pass an identity
+  through, so there is nobody to be. That is a proxy configuration to fix
+  rather than something to work around here.
+</p>
+{% else %}
+<p>
+  Use your Jellyfin username and password. Nextup does not have accounts of
+  its own: it asks Jellyfin, keeps the access token Jellyfin hands back, and
+  never stores your password.
+</p>
+
+{% if not encrypted %}
+<p>
+  <strong>This connection is not encrypted.</strong> Your password will cross
+  the network as typed. That is usually fine on your own home network and is
+  not fine over the internet — put this behind HTTPS before you expose it.
+</p>
+{% endif %}
+
+<form method="post" action="/signin">
+  <p>
+    <label for="username">Jellyfin username</label><br>
+    <input type="text" id="username" name="username" autocomplete="username"
+           autocapitalize="none" autocorrect="off" spellcheck="false" required>
+  </p>
+  <p>
+    <label for="password">Password</label><br>
+    <input type="password" id="password" name="password"
+           autocomplete="current-password" required>
+  </p>
+  <p><button type="submit">Sign in</button></p>
+</form>
+{% endif %}
+
+{% if configured_user %}
+<p>
+  This installation also has a single configured account. If you meant to use
+  that, the page will resolve it once no session cookie is present.
+</p>
+{% endif %}
 {% endblock %}

@@ -5,8 +5,12 @@ path that does something. That is not minimalism for its own sake -- a screen
 reader is the primary interface here, and a page that has already finished
 rendering when it arrives is one a reader can simply read.
 
-Identity for these pages comes from the sign-in proxy's forwarded header.
-Identity for the JSON API does not, and never may: see `api.caller`.
+Identity for these pages comes from three places, in this order: a
+forward-auth proxy's header where one is in front, then this app's own signed
+session cookie, then the configured single-user fallback. The middle one is
+what makes the pages usable on an installation with no proxy at all -- see
+`app/sessions.py`. Identity for the JSON API comes from none of them and never
+may: see `api.caller`.
 """
 import os
 from contextlib import asynccontextmanager
@@ -17,8 +21,8 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import (api, compat_nextread, config, jellyfin, logs, media, selfcheck,
-               store, wants)
+from . import (api, compat_nextread, config, jellyfin, logs, media,
+               selfcheck, sessions, store, wants)
 
 log = logs.get("main")
 
@@ -116,14 +120,96 @@ store.init()
 
 
 def viewer(request: Request) -> jellyfin.User:
-    """Who is looking at this page, according to the sign-in proxy.
+    """Who is looking at this page.
 
-    Falls back to `JELLYFIN_USER` so a local or direct deployment still works.
-    That fallback is why this resolver is not shared with the JSON API, which
-    is not behind the proxy: there it would hand any caller the owner's list.
+    A forward-auth proxy's header first, because where one is deployed it is
+    the authority and this app has no business second-guessing it. Then this
+    app's own session cookie, which is how an installation with no proxy signs
+    anybody in at all. Then `JELLYFIN_USER`, for a single-person deployment
+    that wants neither.
+
+    Raises `LookupError` when none of the three resolves, which the pages turn
+    into the sign-in form. That fallback chain is why this resolver is not
+    shared with the JSON API: there it would hand any caller the owner's list.
     """
     name = (request.headers.get(config.AUTH_USER_HEADER) or "").strip()
-    return jellyfin.user(name or None)
+    if name:
+        return jellyfin.user(name)
+    token = sessions.read(request.cookies.get(sessions.COOKIE_NAME))
+    if token:
+        try:
+            return jellyfin.user_from_token(token)
+        except jellyfin.TokenRejected:
+            # The cookie verified but Jellyfin has since revoked the token
+            # inside it. Signing out is the honest answer; carrying on to the
+            # configured fallback would silently show one account's list to
+            # whoever's session had just expired.
+            log.info("a session's Jellyfin token is no longer accepted")
+            raise LookupError("Your session has expired. Please sign in again.")
+    return jellyfin.user(config.JELLYFIN_USER or None)
+
+
+def _signin_page(request: Request, detail: str = "", status: int = 200):
+    """The sign-in form, and why it is being shown."""
+    proxied = bool(request.headers.get(config.AUTH_USER_HEADER))
+    return templates.TemplateResponse(
+        request=request, name="signin.html", status_code=status,
+        context={
+            "detail": detail,
+            "proxied": proxied,
+            "encrypted": sessions.is_secure(
+                request.headers.get("x-forwarded-proto"), request.url.scheme),
+            "configured_user": bool(config.JELLYFIN_USER),
+        })
+
+
+@app.get("/signin", response_class=HTMLResponse)
+def get_signin(request: Request, msg: str = ""):
+    return _signin_page(request, detail=msg)
+
+
+@app.post("/signin")
+def post_signin(request: Request, username: str = Form(""),
+                password: str = Form("")):
+    """Sign in against Jellyfin and keep the token it hands back.
+
+    No password is stored, logged, or sent anywhere but Jellyfin. What is kept
+    is the access token, in a cookie this app signs.
+    """
+    try:
+        cookie, user = sessions.sign_in(username.strip(), password)
+    except jellyfin.TokenRejected as exc:
+        return _signin_page(request, detail=str(exc), status=401)
+    except jellyfin.JellyfinUnavailable as exc:
+        return _signin_page(
+            request,
+            detail=f"Jellyfin could not be reached, so nobody can sign in "
+                   f"yet. ({exc})",
+            status=503)
+    response = RedirectResponse(url="/", status_code=303)
+    response.set_cookie(
+        sessions.COOKIE_NAME, cookie, max_age=sessions.SESSION_SECONDS,
+        httponly=True, samesite="lax",
+        # Only where the request really arrived over HTTPS. Setting it on a
+        # plain-HTTP install would stop the cookie coming back at all, and a
+        # first installation on a home network is exactly that install.
+        secure=sessions.is_secure(
+            request.headers.get("x-forwarded-proto"), request.url.scheme))
+    log.info("session started for %s", user.key)
+    return response
+
+
+@app.post("/signout")
+def post_signout(request: Request):
+    """Forget this browser's session. Jellyfin's own token is left alone.
+
+    Deliberately not a Jellyfin sign-out: the same account may be signed in on
+    a phone with the same token, and closing a browser tab is no reason to
+    stop somebody's audiobook.
+    """
+    response = RedirectResponse(url="/signin", status_code=303)
+    response.delete_cookie(sessions.COOKIE_NAME)
+    return response
 
 
 @app.get("/healthz", response_class=PlainTextResponse)
@@ -153,9 +239,7 @@ def index(request: Request, q: str = "", medium: str = "", unit: str = "",
     try:
         user = viewer(request)
     except LookupError as exc:
-        return templates.TemplateResponse(
-            request=request, name="signin.html", status_code=403,
-            context={"detail": str(exc)})
+        return _signin_page(request, detail=str(exc), status=401)
 
     offered = media.available()
     medium = medium if medium in offered else (next(iter(offered), ""))

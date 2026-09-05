@@ -470,3 +470,57 @@ def set_playlist(uid: str, name: str, item_ids: list[str]) -> str | None:
                    params={"ids": ",".join(item_ids), "userId": uid}
                    ).raise_for_status()
     return pid
+
+
+# --- Signing in as a person, rather than as this service ---------------------
+
+#: What this service calls itself in Jellyfin's session list. A person looking
+#: at the dashboard should be able to tell what authenticated.
+_CLIENT_NAME = "Nextup"
+_CLIENT_VERSION = "1"
+
+
+def _handshake(device: str) -> str:
+    """Jellyfin's authorisation header for a client that has no token yet."""
+    return (f'MediaBrowser Client="{_CLIENT_NAME}", Device="{_CLIENT_NAME}", '
+            f'DeviceId="{device}", Version="{_CLIENT_VERSION}"')
+
+
+def authenticate(username: str, password: str,
+                 device: str) -> tuple[str, User]:
+    """Exchange a username and password for that account's access token.
+
+    Used only by the browser pages. The JSON API never sees a password: its
+    callers already hold a token, which is the whole reason it can be reached
+    without a sign-in proxy in front of it.
+
+    A refusal and an unreachable Jellyfin are different exceptions on purpose.
+    "That password is wrong" and "the server is not answering" are different
+    things to do next, and a page that says the first when it means the second
+    sends somebody to reset a password that was never the problem.
+    """
+    if not username or not password:
+        raise TokenRejected("A username and a password are both needed.")
+    try:
+        with httpx.Client(base_url=config.JELLYFIN_URL, timeout=_TIMEOUT,
+                          headers={"Authorization": _handshake(device),
+                                   "Accept": "application/json"}) as c:
+            resp = c.post("/Users/AuthenticateByName",
+                          json={"Username": username, "Pw": password})
+    except httpx.HTTPError as exc:
+        log.error("sign-in could not reach Jellyfin (%s)", exc)
+        raise JellyfinUnavailable(str(exc)) from exc
+    if resp.status_code in (400, 401, 403):
+        log.warning("sign-in refused for %r (%d)", username, resp.status_code)
+        raise TokenRejected("Jellyfin did not accept that username and password.")
+    if resp.status_code >= 400:
+        log.error("sign-in got %d from Jellyfin", resp.status_code)
+        raise JellyfinUnavailable(f"Jellyfin answered {resp.status_code}.")
+    try:
+        body = resp.json()
+        token = body["AccessToken"]
+        dto = body["User"]
+    except (ValueError, KeyError, TypeError) as exc:
+        log.error("sign-in answer from Jellyfin would not parse (%s)", exc)
+        raise JellyfinUnavailable("Jellyfin's answer could not be read.") from exc
+    return token, _to_user(dto)
