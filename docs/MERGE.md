@@ -150,7 +150,9 @@ Three details are decided rather than left to the implementation:
 
 ## Where this has got to
 
-Slices 1 to 8 are done and the suite is green at 25 files. Verified by running
+Slices 1 to 8 are done, plus a ninth that was not in the original plan and
+turned out to matter more than several that were: **setting the thing up no
+longer means editing a file.** The suite is green at 26 files. Verified by running
 the merged service: all three prefixes answer with the right service name, the
 sign-in page renders with its unencrypted-connection warning, a proxy header
 alone is refused on every prefix, and `/healthz` stays healthy while Jellyfin
