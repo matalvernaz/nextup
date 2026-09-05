@@ -71,7 +71,7 @@ rows = {r["asin"]: r for r in wants.states(kadija.key, (set(), {}))}
 assert rows["ASIN0"]["state"] == wants.ON_ITS_WAY
 
 # Old enough to stop claiming to be arriving.
-stale = time.time() - (config.STILL_LOOKING_AFTER_HOURS * 3600) - 60
+stale = time.time() - (config.BOOK_STILL_LOOKING_AFTER_HOURS * 3600) - 60
 with store.db() as conn:
     conn.execute("UPDATE requests SET requested_at=? WHERE user_key=? AND medium='book' AND item_key=?",
                  (stale, kadija.key, "ASIN1"))

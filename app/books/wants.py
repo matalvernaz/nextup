@@ -291,6 +291,6 @@ def _state(row: dict) -> str:
     if row["fulfilled_at"] is not None:
         return IN_LIBRARY
     waited = time.time() - row["requested_at"]
-    if waited > config.STILL_LOOKING_AFTER_HOURS * 3600:
+    if waited > config.BOOK_STILL_LOOKING_AFTER_HOURS * 3600:
         return STILL_LOOKING
     return ON_ITS_WAY

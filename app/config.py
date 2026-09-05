@@ -204,6 +204,19 @@ ATTRIBUTION_RETENTION_DAYS = _int("ATTRIBUTION_RETENTION_DAYS", 180)
 
 BOOK_DAILY_CAP = _int("BOOK_DAILY_CAP", 3)
 
+# How long a book reads as "on its way" before it reads "still looking".
+#
+# Its own setting rather than the shared one, because the four media are
+# acquired on different rhythms and this number means "long enough that a
+# normal acquisition never trips it". Listenarr sweeps every six hours, so two
+# cycles is twelve; a film or an episode is a different question and keeps
+# STILL_LOOKING_AFTER_HOURS.
+#
+# Not a failure state either way: the request stays monitored and the
+# acquisition tool's own sweep keeps retrying.
+BOOK_STILL_LOOKING_AFTER_HOURS = _int(
+    "BOOK_STILL_LOOKING_AFTER_HOURS", 12)
+
 DB_PATH = _text("DB_PATH", "/data/nextup.db")
 
 # How many catalogue hits to return. What a person can stand to hear read out
