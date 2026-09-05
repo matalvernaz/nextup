@@ -150,7 +150,7 @@ Three details are decided rather than left to the implementation:
 
 ## Where this has got to
 
-Slices 1 to 8 are done and the suite is green at 23 files. Verified by running
+Slices 1 to 8 are done and the suite is green at 25 files. Verified by running
 the merged service: all three prefixes answer with the right service name, the
 sign-in page renders with its unencrypted-connection warning, a proxy header
 alone is refused on every prefix, and `/healthz` stays healthy while Jellyfin
@@ -159,6 +159,21 @@ is unreachable rather than restart-looping.
 Slice 9, this homelab's own cutover, is deliberately not done. It stops a live
 stack and migrates two live databases, so it waits for a decision rather than
 happening at the end of a coding session.
+
+Three decisions are Matt's rather than mine, and none of them has been made:
+
+- **Merging to master does not deploy this**, verified: both live stacks carry
+  `com.centurylinklabs.watchtower.enable=false` and run locally built images.
+  So the merge and the deployment are separate acts, which is the right way
+  round.
+- **There is still no release tag**, and `compose.yaml` still says `:latest`.
+  `publish.yml` has handled `v*` semver tags from the start and none has ever
+  been pushed, so the README currently tells a stranger to pull an image that
+  today is the *old* service. Tag `v0.1.0` at merge and pin the compose file
+  to `:0.1`.
+- **Slice 9 has not run.** `python -m app.migrate_nextread` exists and is
+  tested, including a dry run that writes nothing, but pointing it at the live
+  database is a decision rather than a step.
 
 Two things are knowingly left for later, neither blocking:
 
