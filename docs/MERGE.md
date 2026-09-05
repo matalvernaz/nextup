@@ -182,7 +182,8 @@ Left for later, neither blocking:
 - **Two of the audiobook suite's fifteen files are still unported**:
   `test_multiuser` and `test_template`. The first needs nothing this repo does
   not now have; the second duplicates checks made here already. `test_api_auth`
-  and `test_selfcheck` came across.
+  came across under its own name, and `test_selfcheck`'s checks live in
+  `test_deployment.py`.
 
 ## Order of work
 
