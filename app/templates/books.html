@@ -35,8 +35,9 @@
 <p>Nothing yet. This fills in once you have finished a few books here.</p>
 {% else %}
 <p>{{ own | length }} book{{ '' if own | length == 1 else 's' }}, best first.
-  They are also written into the &ldquo;{{ playlist_name }}&rdquo; playlist, so
-  they can be played from any Jellyfin app.</p>
+  They are also kept in Jellyfin as a reading list called
+  &ldquo;{{ playlist_name }}&rdquo;, so you can pick one up from any Jellyfin
+  app rather than only from here.</p>
 <ol class="shelf">
   {% for row in own %}
   <li>

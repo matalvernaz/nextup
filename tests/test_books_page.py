@@ -93,6 +93,10 @@ check.that("Ask for Already On The Way" not in body,
            "a book already on the way has no button")
 check.that("Already asked for" in body, "and says why instead")
 
+check.that("reading list" in body and "playlist" not in body.lower(),
+           "the list is named for what it holds: Jellyfin stores it as a "
+           "playlist item, but a list of books is not a playlist to the "
+           "person reading it")
 check.that('<ol class="shelf"' in body,
            "the shelves are ordered lists, because the order IS the "
            "recommendation")

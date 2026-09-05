@@ -40,9 +40,9 @@ typed — the page says so when it is not encrypted.
 Where Listenarr is connected and Jellyfin has a books library, `/books` carries
 two ranked shelves: what to read next from what the library already holds, and
 what to add that it does not. Each row says why it is there. The first shelf is
-also written into a Jellyfin playlist, so it can be played from any Jellyfin
-app rather than only from this one — refreshed on a schedule, not when somebody
-happens to visit.
+also kept in Jellyfin as a reading list, so you can pick one up from any
+Jellyfin app rather than only from this one — refreshed on a schedule, not when
+somebody happens to visit.
 
 Books are the only medium with recommendations. The other three are search and
 request.
