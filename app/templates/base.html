@@ -20,6 +20,20 @@
     </form>
   </p>
   {% endif %}
+  {#
+    One nav, rendered only where there is somewhere to go. A recommendation
+    page nobody can find is a page that does not exist -- and the last time
+    this shelf had no page, the playlist it writes silently stopped being
+    written for a day and nothing said so.
+  #}
+  {% if books_offered() %}
+  <nav aria-label="Sections">
+    <ul>
+      <li><a href="/">Search and requests</a></li>
+      <li><a href="/books">Book recommendations</a></li>
+    </ul>
+  </nav>
+  {% endif %}
 </header>
 {#
   The live region is rendered on every page whether or not there is anything in

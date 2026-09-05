@@ -35,6 +35,18 @@ Put HTTPS in front of it before letting it out of your own network. Signing in
 sends a Jellyfin password, and over plain HTTP that crosses the network as
 typed — the page says so when it is not encrypted.
 
+### Books
+
+Where Listenarr is connected and Jellyfin has a books library, `/books` carries
+two ranked shelves: what to read next from what the library already holds, and
+what to add that it does not. Each row says why it is there. The first shelf is
+also written into a Jellyfin playlist, so it can be played from any Jellyfin
+app rather than only from this one — refreshed on a schedule, not when somebody
+happens to visit.
+
+Books are the only medium with recommendations. The other three are search and
+request.
+
 ### Versions
 
 That compose file pins `ghcr.io/matalvernaz/nextup:0.1`, so `docker compose

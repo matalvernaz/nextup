@@ -410,6 +410,16 @@ def _sims_key(asin: str, axis: str) -> str:
     return f"{asin}:{axis}"
 
 
+def shelf_keys() -> list[str]:
+    """Accounts with a persisted shelf, which is to say every account that has
+    ever asked for one. Upkeep works from this rather than from the Jellyfin
+    account list: nobody wants a shelf built for a household member who has
+    never opened the feature."""
+    with db() as conn:
+        return [row["user_key"] for row in
+                conn.execute("SELECT user_key FROM shelves ORDER BY user_key")]
+
+
 def get_shelf(user_key: str) -> tuple[dict, float] | None:
     """The last shelf computed for this account, and when, or None.
 

@@ -36,3 +36,22 @@ input[type="text"], select { font-size: 1rem; padding: 0.3rem; min-width: 18rem;
     font-weight: bold;
     padding: 0.6rem;
 }
+
+/* The book shelves. An ordered list because the order is the recommendation --
+   a reader hearing "1 of 40" is being told something true about the ranking. */
+.shelf { padding-left: 1.6rem; }
+.shelf > li { border-top: 1px solid #ccc; padding: 0.75rem 0; }
+.shelf h4 { margin: 0 0 0.2rem; }
+.by { margin: 0 0 0.4rem; }
+
+/* Why a book is on the shelf: a real list, so it can be skipped as one. */
+.why { margin: 0 0 0.5rem; padding-left: 1.2rem; }
+
+/* Side by side where there is room, stacked where there is not, and in DOM
+   order either way -- "ask for" before "not this" is deliberate. */
+.row-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+
+.asked { font-style: italic; margin: 0; }
+.undo { margin: 0 0 1rem; }
+
+nav ul { list-style: none; display: flex; gap: 1rem; padding: 0; margin: 0.5rem 0; }

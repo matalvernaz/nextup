@@ -13,6 +13,7 @@ what makes the pages usable on an installation with no proxy at all -- see
 may: see `api.caller`.
 """
 import os
+import time
 from contextlib import asynccontextmanager
 from urllib.parse import quote, urlsplit
 
@@ -23,6 +24,10 @@ from fastapi.templating import Jinja2Templates
 
 from . import (api, backends, compat_nextread, config, jellyfin, logs, media,
                selfcheck, sessions, settings, setup, store, throttle, wants)
+from .books import shelves as book_shelves
+from .books import store as book_store
+from .books import upkeep
+from .books import wants as book_wants
 
 log = logs.get("main")
 
@@ -31,6 +36,7 @@ log = logs.get("main")
 async def lifespan(_: FastAPI):
     _rekey_ledger_once()
     selfcheck.watch()
+    upkeep.watch()
     yield
 
 
@@ -120,6 +126,11 @@ templates = Jinja2Templates(directory="app/templates")
 # it is one page that says everything is fine while nothing is.
 templates.env.globals["credential_rejected"] = (
     lambda: jellyfin.credential_rejected(force=False))
+
+# Whether to draw the link to the book shelves at all. Books are the only
+# medium with recommendations, and an installation without Listenarr or a
+# books library should not be offered a page that has nothing on it.
+templates.env.globals["books_offered"] = lambda: "book" in media.available()
 
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
@@ -465,6 +476,131 @@ def post_cancel(request: Request, medium: str = Form(...),
         return _back(medium, f"Nextup could not work out who you are. {exc}")
     _, message = wants.cancel(user, medium, item_key)
     return _back(medium, message)
+
+
+BOOK = "book"
+
+
+def _back_to_books(message: str = "", **extra: str) -> RedirectResponse:
+    """Back to the books page, carrying one sentence about what just happened."""
+    query = {"msg": message, **{k: v for k, v in extra.items() if v}}
+    trail = "&".join(f"{k}={quote(v)}" for k, v in query.items() if v)
+    return RedirectResponse(f"/books{'?' + trail if trail else ''}",
+                            status_code=303)
+
+
+@app.get("/books", response_class=HTMLResponse)
+def get_books(request: Request, msg: str = "", undo_asin: str = "",
+              undo_title: str = ""):
+    """The two book shelves: what to read next, and what to add.
+
+    Its own page rather than a section of the search page. The search page's
+    shape is "ask for a thing"; this one is "here is what was chosen for you",
+    and eighty ranked rows with their reasons underneath the search form would
+    bury the form for everybody and bury it worst for somebody reading top to
+    bottom.
+
+    Books are the only medium with shelves, so nothing here is written to be
+    reused by the other three. Two of them may never have any.
+    """
+    if setup.needs_setup():
+        return RedirectResponse(url="/setup", status_code=303)
+    try:
+        user = viewer(request)
+    except LookupError as exc:
+        return _signin_page(request, detail=str(exc), status=401)
+    if BOOK not in media.available():
+        return templates.TemplateResponse(
+            request=request, name="books.html", status_code=404,
+            context={"user": user, "own": [], "discover": [], "asked_for": set(),
+                     "allowance": 0, "playlist_name": config.PLAYLIST_NAME,
+                     "computed_at": "", "undo_asin": "", "undo_title": "",
+                     "message": "This installation does not serve books. "
+                                "Connect Listenarr and add a books library to "
+                                "Jellyfin."})
+
+    data = book_shelves.result(user)
+    asked_for = {row["asin"] for row in book_store.requests_for(user.key)
+                 if not row["fulfilled_at"]}
+    return templates.TemplateResponse(
+        request=request, name="books.html",
+        context={
+            "user": user,
+            "own": data.get("own") or [],
+            "discover": data.get("discover") or [],
+            "asked_for": asked_for,
+            "allowance": wants.allowance(user, BOOK),
+            "playlist_name": data.get("playlist_name") or config.PLAYLIST_NAME,
+            "computed_at": _when(book_store.last_run(user.key)),
+            "undo_asin": undo_asin,
+            "undo_title": undo_title,
+            "message": msg,
+        })
+
+
+def _when(run) -> str:
+    """A finished run as a plain sentence fragment, or nothing at all."""
+    if not run or not run["finished_at"]:
+        return ""
+    return time.strftime("on %d %B at %H:%M", time.localtime(run["finished_at"]))
+
+
+@app.post("/books/want")
+def post_book_want(request: Request, asin: str = Form(...),
+                   title: str = Form("")):
+    try:
+        user = viewer(request)
+    except LookupError as exc:
+        return _back_to_books(f"Nextup could not work out who you are. {exc}")
+    try:
+        _, message = wants.want(user, BOOK, asin, BOOK, {"title": title})
+    except wants.Denied as denied:
+        message = str(denied)
+    book_shelves.forget_asin(asin)
+    return _back_to_books(message)
+
+
+@app.post("/books/dismiss")
+def post_book_dismiss(request: Request, asin: str = Form(...),
+                      title: str = Form("")):
+    """Hide one suggestion, and offer to put it back."""
+    try:
+        user = viewer(request)
+    except LookupError as exc:
+        return _back_to_books(f"Nextup could not work out who you are. {exc}")
+    book_wants.dismiss(user, asin)
+    book_shelves.invalidate(user.key)
+    return _back_to_books(
+        f"Hidden: {title or asin}.", undo_asin=asin, undo_title=title)
+
+
+@app.post("/books/restore")
+def post_book_restore(request: Request, asin: str = Form(...)):
+    try:
+        user = viewer(request)
+    except LookupError as exc:
+        return _back_to_books(f"Nextup could not work out who you are. {exc}")
+    restored = book_wants.restore(user, asin)
+    book_shelves.invalidate(user.key)
+    return _back_to_books("Put back." if restored
+                          else "That book was not hidden.")
+
+
+@app.post("/books/refresh")
+def post_book_refresh(request: Request):
+    """Throw away this account's shelves so the next load rebuilds them.
+
+    Not a rebuild in front of the person who asked: it is twelve seconds, nine
+    of them one Jellyfin listing, and a page that hangs that long reads as
+    broken. The next load serves the stale answer and rebuilds behind it.
+    """
+    try:
+        user = viewer(request)
+    except LookupError as exc:
+        return _back_to_books(f"Nextup could not work out who you are. {exc}")
+    book_shelves.invalidate(user.key)
+    return _back_to_books("Working out new recommendations. They will appear "
+                          "here shortly.")
 
 
 def _back(medium: str, message: str) -> RedirectResponse:

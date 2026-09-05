@@ -38,6 +38,7 @@ from ..store import (  # noqa: F401  (re-exported for the book engine)
     put_shelf,
     put_sims,
     put_vectors,
+    shelf_keys,
     user_key_scheme,
 )
 

@@ -149,6 +149,15 @@ PLAYLIST_NAME = _text("PLAYLIST_NAME", "Next Read")
 # the old behaviour.
 PLAYLIST_OWNER = _text("PLAYLIST_OWNER") or JELLYFIN_USER
 
+# How often the book shelves -- and so the playlist they are written into --
+# are refreshed for accounts that have one. Zero turns the pass off, leaving
+# the playlist written only when something asks for a shelf.
+#
+# Six hours rather than the shelf cache's one, because this is upkeep for
+# readers who are not waiting: a person opening the page or the app gets a
+# rebuild on their own timing regardless.
+BOOK_UPKEEP_HOURS = _int("BOOK_UPKEEP_HOURS", 6)
+
 # How long a cached Audible similar-products response stays fresh. That
 # endpoint is unauthenticated and must never be hit on a page load.
 SIMS_TTL_HOURS = _int("SIMS_TTL_HOURS", 168)
