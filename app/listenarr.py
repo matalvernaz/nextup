@@ -16,6 +16,25 @@ log = logs.get("listenarr")
 _TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 _API = "/api/v1"
 
+MEDIUM = "book"
+
+#: What can be asked for. A single book, or the rest of a series -- which is
+#: not one acquisition but a bounded batch of them, priced and recorded per
+#: book, so it is a unit here rather than a separate screen.
+UNITS = ("book", "series")
+
+
+def configured() -> bool:
+    """Whether this deployment can acquire books at all.
+
+    The URL alone, and it has no default. The audiobook service this came from
+    defaulted to "http://listenarr:4545", which was right while it was the
+    only thing running and wrong the moment the code shipped elsewhere: a
+    default URL makes a backend read as configured on an install where nothing
+    is listening, so books were offered and every search came back empty.
+    """
+    return bool(config.LISTENARR_URL)
+
 
 def _client() -> httpx.Client:
     return httpx.Client(base_url=config.LISTENARR_URL, timeout=_TIMEOUT)

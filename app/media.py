@@ -10,13 +10,15 @@ import threading
 import time
 from dataclasses import dataclass
 
-from . import buskarr, config, jellyfin, logs, radarr, sonarr
+from . import (backends, buskarr, config, jellyfin, listenarr, logs,
+               radarr, sonarr)
 
 log = logs.get("media")
 
 MOVIE = radarr.MEDIUM
 SERIES = sonarr.MEDIUM
 MUSIC = buskarr.MEDIUM
+BOOK = listenarr.MEDIUM
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +31,11 @@ class Medium:
     units: tuple[str, ...]
     daily_cap: int
     library_ids: tuple[str, ...]
+    #: Whether this medium's acquisition backend answered when last asked.
+    #: True is the ordinary case; False means configured and silent.
+    backend_reachable: bool = True
+    #: One sentence about why not, or "" when there is nothing to say.
+    backend_detail: str = ""
 
 
 #: Cost of one request, by medium and unit. Film and TV are one apiece; music
@@ -45,6 +52,8 @@ _BACKENDS = (
     (MOVIE, "Films", ("movie",), radarr.configured, lambda: config.MOVIE_DAILY_CAP),
     (SERIES, "Series", ("series",), sonarr.configured, lambda: config.SERIES_DAILY_CAP),
     (MUSIC, "Music", buskarr.UNITS, buskarr.configured, lambda: config.MUSIC_DAILY_CAP),
+    (BOOK, "Books", listenarr.UNITS, listenarr.configured,
+     lambda: config.BOOK_DAILY_CAP),
 )
 
 
@@ -81,7 +90,23 @@ def _build() -> tuple[dict[str, Medium], bool]:
                 log.warning("%s has no matching Jellyfin library; requests "
                             "will work but nothing will read as arrived", key)
                 complete = False
-        found[key] = Medium(key, label, tuple(units), cap(), libraries)
+        # Configured and silent is reported, not hidden. Dropping the medium
+        # would take away the list of what somebody has already asked for at
+        # exactly the moment they want to know what happened to it -- and an
+        # acquisition tool restarting is a normal minute in a homelab. So the
+        # medium stays, carrying the reason, and the registry stays unsettled
+        # so the next build asks again rather than caching an outage.
+        probe = backends.status(key)
+        reachable = True
+        detail = ""
+        if probe is not None and probe.reachable is False:
+            reachable = False
+            detail = probe.detail
+            complete = False
+            log.error("%s is offered but its backend is not answering: %s",
+                      key, detail)
+        found[key] = Medium(key, label, tuple(units), cap(), libraries,
+                            reachable, detail)
     return found, complete
 
 
@@ -128,6 +153,7 @@ def forget() -> None:
         _registry = None
         _registry_settled = False
     _owned.forget()
+    backends.forget()
 
 
 def get(medium: str) -> Medium | None:
