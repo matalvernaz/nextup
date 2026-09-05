@@ -216,6 +216,15 @@ def ledger_is_empty() -> bool:
         return conn.execute("SELECT 1 FROM requests LIMIT 1").fetchone() is None
 
 
+#: Every table whose `user_key` names an account. All of them move together in
+#: the rekeying below: leaving one behind would rekey somebody's requests and
+#: not their shelf, so their list would read empty while their recommendations
+#: stayed put -- a half-migrated account is harder to notice than an
+#: unmigrated one.
+USER_SCOPED_TABLES = ("requests", "submitted", "dismissed", "runs",
+                      "recommendation_items", "feedback_events", "shelves")
+
+
 def rekey_users(name_to_id: dict[str, str]) -> int:
     """Move the ledger from casefolded display names onto account ids.
 
@@ -234,19 +243,26 @@ def rekey_users(name_to_id: dict[str, str]) -> int:
         if conn.execute("SELECT value FROM meta WHERE key=?",
                         (USER_KEY_SCHEME,)).fetchone():
             return 0
-        existing = {row["user_key"] for row in
-                    conn.execute("SELECT DISTINCT user_key FROM requests")}
-        for key in sorted(existing):
-            item_id = name_to_id.get(key)
-            if item_id is None:
-                if key not in name_to_id.values():
-                    log.warning(
-                        "ledger rows for %r match no Jellyfin account; left as they are",
-                        key)
-                continue
-            cur = conn.execute(
-                "UPDATE requests SET user_key=? WHERE user_key=?", (item_id, key))
-            moved += cur.rowcount
+        unmatched: set[str] = set()
+        for table in USER_SCOPED_TABLES:
+            existing = {row["user_key"] for row in conn.execute(
+                f"SELECT DISTINCT user_key FROM {table}")}
+            for key in sorted(existing):
+                item_id = name_to_id.get(key)
+                if item_id is None:
+                    if key not in name_to_id.values():
+                        unmatched.add(key)
+                    continue
+                # OR REPLACE rather than a plain UPDATE: `shelves` is keyed on
+                # user_key alone, so an account that already has an id-keyed
+                # row would otherwise fail the whole migration on a conflict.
+                cur = conn.execute(
+                    f"UPDATE OR REPLACE {table} SET user_key=? WHERE user_key=?",
+                    (item_id, key))
+                moved += cur.rowcount
+        for key in sorted(unmatched):
+            log.warning("rows for %r match no Jellyfin account; "
+                        "left as they are", key)
         conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
                      (USER_KEY_SCHEME, "id"))
     log.info("ledger rekeyed onto account ids, %d row(s) moved", moved)
