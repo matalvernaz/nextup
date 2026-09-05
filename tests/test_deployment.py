@@ -37,19 +37,50 @@ del os.environ["A_TEST_NUMBER"]
 
 
 # --- a credential Jellyfin has stopped accepting ----------------------------
-# The failure this covers ran for days on the service this one is modelled on:
-# every route failing because the API key had been retired, with the container
-# reporting healthy throughout, because nothing the health check touched had
-# stopped working.
+# Two failures pull in opposite directions here.
+#
+# The first ran for days on the service this one is modelled on: every route
+# failing because the API key had been retired, with the container reporting
+# healthy throughout, because nothing the health check touched had stopped
+# working. That is why the state is reported at all.
+#
+# The second is what reporting it through `/healthz` cost. Traefik's Docker
+# provider drops an unhealthy container -- verified against the live proxy on
+# 2026-09-05: same container, same labels, healthcheck `exit 0` answers 200
+# through it and `exit 1` answers 404, with nothing in any log. The compose
+# healthcheck hits `/healthz`, so a retired key deleted every router including
+# `/setup`, which is the page that issues a new key. The fault made itself
+# unrepairable from outside.
 client = TestClient(main.app, raise_server_exceptions=False)
 
-jellyfin.credential_rejected = lambda: False
-check.equal(client.get("/healthz").status_code, 200, "healthy when the key works")
+jellyfin.credential_rejected = lambda force=True: True
+check.equal(client.get("/healthz").status_code, 200,
+            "liveness stays 200 while the process answers, whatever Jellyfin "
+            "thinks of this service's key")
 
-jellyfin.credential_rejected = lambda: True
-check.equal(client.get("/healthz").status_code, 503,
-            "unhealthy when Jellyfin refuses this service's key")
-jellyfin.credential_rejected = lambda: False
+ready = client.get("/readyz")
+check.equal(ready.status_code, 503, "readiness says so instead")
+check.equal(ready.json()["reason"], "jellyfin_credential_rejected",
+            "naming the state a person has to act on")
+check.equal(ready.json()["repair"], "/setup",
+            "and where they act on it, because a reason with no address is a "
+            "puzzle rather than an instruction")
+
+# And the pages say it, which is the only channel somebody sees without asking:
+# a refused key leaves them rendering with an empty library behind them, which
+# reads as "there is nothing here" rather than as a fault.
+page = client.get("/signin")
+check.that("refusing this service" in page.text,
+           "the pages carry the fault where a person will meet it")
+check.that('role="alert"' in page.text,
+           "as an alert rather than in the polite region, because it "
+           "displaces whatever else was being announced")
+
+jellyfin.credential_rejected = lambda force=True: False
+check.equal(client.get("/readyz").status_code, 200,
+            "and a working key is ready")
+check.that("refusing this service" not in client.get("/signin").text,
+           "with no banner when there is nothing wrong")
 
 
 # --- the route clients actually look for ------------------------------------

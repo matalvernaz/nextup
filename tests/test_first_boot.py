@@ -48,5 +48,29 @@ check.raises(RuntimeError, main._rekey_ledger_once,
 check.raises(httpx.HTTPError, jellyfin.all_users,
              "because Jellyfin cannot be reached at all")
 
+# --- and the pages read like an outage, not like a bug ----------------------
+#
+# Every page resolves its viewer through Jellyfin. The five routes that do
+# caught only "nobody resolved", so a Jellyfin that was merely down raised
+# through them and became a 500 with a traceback -- on the same container that
+# deliberately keeps reporting healthy through exactly that outage.
+from fastapi.testclient import TestClient  # noqa: E402
+
+from app import sessions  # noqa: E402
+
+pages = TestClient(main.app, raise_server_exceptions=False)
+signed_in = pages.post("/signin", data={"username": "matt", "password": "x"})
+check.equal(signed_in.status_code, 503,
+            "signing in against an absent Jellyfin says so")
+
+# A cookie that verifies, carrying a token nothing can be asked about.
+store.set_user_key_scheme("id")
+pages.cookies.set(sessions.COOKIE_NAME, sessions.issue("a-token", "u1"))
+landing = pages.get("/")
+check.equal(landing.status_code, 503,
+            "and so does the ordinary page, rather than raising")
+check.that("Jellyfin cannot be reached" in landing.text,
+           "in words, on a page, with nothing lost")
+
 harness.cleanup()
 raise SystemExit(check.report())

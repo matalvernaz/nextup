@@ -240,6 +240,12 @@ def prune_attribution() -> None:
             "SELECT 1 FROM feedback_events AS feedback "
             "WHERE feedback.recommendation_id="
             "recommendation.recommendation_id)", (cutoff,))
+        # The run log alongside them. Nothing reads further back than the last
+        # finished run per account, and a row per rebuild per account is the
+        # one table here that otherwise only grows. Unfinished rows go too
+        # once they are older than the cutoff: a run that never finished is a
+        # process that died mid-rebuild, and it will never be completed now.
+        conn.execute("DELETE FROM runs WHERE started_at<?", (cutoff,))
 
 
 def last_run(user_key: str):

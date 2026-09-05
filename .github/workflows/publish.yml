@@ -4,10 +4,29 @@ on:
   push:
     branches: [master]
     tags: ["v*"]
+  # Weekly, so the base image's security fixes reach the published image
+  # without waiting for somebody to have something to commit. Master only:
+  # `latest` and nothing else moves.
+  schedule:
+    - cron: "17 5 * * 1"
   workflow_dispatch:
 
 jobs:
+  # The suite, before anything is published. Duplicated from ci.yml rather than
+  # depended on across workflows: `workflow_run` does not block a publish, it
+  # merely happens after one, which is the opposite of what is wanted here.
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install --no-cache-dir -r requirements.txt
+      - run: ./run-tests.sh
+
   publish:
+    needs: tests
     runs-on: ubuntu-latest
     permissions:
       contents: read

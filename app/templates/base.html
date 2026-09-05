@@ -27,6 +27,20 @@
   reader has to have been watching an element that already existed.
 #}
 <p id="flash" role="status" aria-live="polite">{{ message|default('') }}</p>
+{#
+  Rendered on every page, because a refused key breaks the pages quietly: they
+  still draw, with an empty library behind them, which reads as "there is
+  nothing here" rather than as a fault. `role="alert"` and not the polite
+  region above: this one displaces whatever else was being said, and it is the
+  only message on the site that a person has to act on.
+#}
+{% if credential_rejected() %}
+<p class="fault" role="alert">
+  Jellyfin is refusing this service&rsquo;s API key, so it cannot see the
+  library. Nothing here will work until it is replaced.
+  <a href="/setup">Connect to Jellyfin again</a>.
+</p>
+{% endif %}
 <main id="main">
 {% block main %}{% endblock %}
 </main>

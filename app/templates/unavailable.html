@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Jellyfin cannot be reached — Nextup{% endblock %}
+{% block main %}
+<h2>Jellyfin cannot be reached</h2>
+{# `role="alert"` and not the polite region: the page has nothing else on it,
+   and the reader arrived here expecting their own list. #}
+<p role="alert">
+  This service asks Jellyfin who you are, and Jellyfin did not answer, so it
+  cannot show you anything yet. Nothing is lost — reload once it is back.
+</p>
+<p>{{ detail }}</p>
+<p><a href="/">Try again</a></p>
+{% endblock %}

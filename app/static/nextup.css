@@ -27,3 +27,12 @@ input[type="text"], select { font-size: 1rem; padding: 0.3rem; min-width: 18rem;
     display: block;
     font-size: 0.9em;
 }
+
+/* The one message on the site a person has to act on. Not colour alone: the
+   border and the weight carry it too, so it does not depend on being seen. */
+.fault {
+    border: 2px solid #a00;
+    background: #fee;
+    font-weight: bold;
+    padding: 0.6rem;
+}

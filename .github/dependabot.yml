@@ -1,0 +1,16 @@
+# Security fixes for things this repository pins by hand. The image's own base
+# layer is covered by publish.yml's weekly rebuild instead, because a pinned
+# `python:3.12-slim` moves without its tag changing.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

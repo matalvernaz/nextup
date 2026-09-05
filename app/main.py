@@ -22,7 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from . import (api, backends, compat_nextread, config, jellyfin, logs, media,
-               selfcheck, sessions, settings, setup, store, wants)
+               selfcheck, sessions, settings, setup, store, throttle, wants)
 
 log = logs.get("main")
 
@@ -114,6 +114,13 @@ async def block_cross_origin_writes(request: Request, call_next):
             status_code=403)
     return await call_next(request)
 templates = Jinja2Templates(directory="app/templates")
+
+# A global rather than a context key on five routes: the banner it draws is
+# about the installation, not about the page, and one route forgetting to pass
+# it is one page that says everything is fine while nothing is.
+templates.env.globals["credential_rejected"] = (
+    lambda: jellyfin.credential_rejected(force=False))
+
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 store.init()
@@ -149,11 +156,13 @@ def viewer(request: Request) -> jellyfin.User:
     return jellyfin.user(config.JELLYFIN_USER or None)
 
 
-def _signin_page(request: Request, detail: str = "", status: int = 200):
+def _signin_page(request: Request, detail: str = "", status: int = 200,
+                 headers: dict[str, str] | None = None):
     """The sign-in form, and why it is being shown."""
     proxied = bool(request.headers.get(config.AUTH_USER_HEADER))
     return templates.TemplateResponse(
         request=request, name="signin.html", status_code=status,
+        headers=headers,
         context={
             "detail": detail,
             "proxied": proxied,
@@ -176,9 +185,26 @@ def post_signin(request: Request, username: str = Form(""),
     No password is stored, logged, or sent anywhere but Jellyfin. What is kept
     is the access token, in a cookie this app signs.
     """
+    name = username.strip()
+    keys = (throttle.caller_address(request), f"user:{name.casefold()}")
+    wait = throttle.retry_after(*keys)
+    if wait:
+        log.warning("refusing a sign-in attempt for %r: too many failures",
+                    name)
+        minutes = max(1, round(wait / 60))
+        return _signin_page(
+            request, status=429,
+            detail=f"Too many failed sign-in attempts. Try again in about "
+                   f"{minutes} minute{'' if minutes == 1 else 's'}.",
+            headers={"Retry-After": str(wait)})
     try:
-        cookie, user = sessions.sign_in(username.strip(), password)
+        cookie, user = sessions.sign_in(name, password)
     except jellyfin.TokenRejected as exc:
+        # Counted here and not on an unreachable Jellyfin: a server that is
+        # down says nothing about whether the password was right, and counting
+        # it would lock the household out of a service that is about to work
+        # again on its own.
+        throttle.record_failure(*keys)
         return _signin_page(request, detail=str(exc), status=401)
     except jellyfin.JellyfinUnavailable as exc:
         return _signin_page(
@@ -186,6 +212,7 @@ def post_signin(request: Request, username: str = Form(""),
             detail=f"Jellyfin could not be reached, so nobody can sign in "
                    f"yet. ({exc})",
             status=503)
+    throttle.clear(*keys)
     response = RedirectResponse(url="/", status_code=303)
     response.set_cookie(
         sessions.COOKIE_NAME, cookie, max_age=sessions.SESSION_SECONDS,
@@ -212,24 +239,68 @@ def post_signout(request: Request):
     return response
 
 
-@app.get("/healthz", response_class=PlainTextResponse)
-def healthz(response: Response) -> str:
-    """Liveness, plus the one upstream fault that needs a person.
+@app.exception_handler(jellyfin.JellyfinUnavailable)
+def jellyfin_unavailable(request: Request, exc: Exception):
+    """A readable page when Jellyfin cannot be asked who somebody is.
 
-    A check that fails whenever a downstream is unreachable turns one outage
-    into a restart loop, so this does not probe for reachability: an arr being
-    down, or Jellyfin being slow, is not this container's problem to report. A
-    credential Jellyfin has stopped accepting is different. Every route here
-    resolves a caller through Jellyfin, none of them can work, and it will not
-    come right on its own -- and without this the container reports healthy for
-    the whole time it is useless. The share gateway this service borrowed its
-    shape from ran that way for days.
+    Every page resolves its viewer through Jellyfin, and the five routes that
+    do caught only the "nobody resolved" case -- so a Jellyfin that was merely
+    down raised through them and became a 500 with a traceback. The container
+    stays healthy through an outage on purpose; the pages should read like an
+    outage too, not like a bug in this service.
+
+    Registered on the application rather than repeated per route so a route
+    added later cannot forget it. The JSON API resolves its caller through its
+    own dependency, which answers 503 in JSON before this is reached.
+    """
+    log.warning("Jellyfin could not be reached for %s: %s", request.url.path, exc)
+    return templates.TemplateResponse(
+        request=request, name="unavailable.html", status_code=503,
+        context={"detail": str(exc)})
+
+
+@app.get("/healthz", response_class=PlainTextResponse)
+def healthz() -> str:
+    """Liveness, and only that: whether this process is still answering.
+
+    Deliberately says nothing about Jellyfin, an arr, or this service's own
+    credential. A check that fails on a downstream fault turns one outage into
+    a restart loop -- and, worse here, a proxy takes an unhealthy container out
+    of its pool. Verified against Traefik's Docker provider: the same container
+    with the same labels answers 200 through the proxy while healthy and 404
+    while unhealthy, with no log line either way.
+
+    So a refused API key must not fail this. `/setup` is the page that issues a
+    new one, and a check that can delete `/setup`'s router is a check that
+    makes the fault unrepairable from outside. `/readyz` reports that state
+    instead, and nothing routes on it.
+    """
+    return "ok"
+
+
+@app.get("/readyz")
+def readyz(response: Response) -> dict:
+    """Whether this service can actually do its work, for a person to read.
+
+    Split from `/healthz` on purpose, and nothing in the shipped compose points
+    a healthcheck at it: a proxy that drops a container on this answer would
+    take away the page that fixes it.
+
+    Only the credential is reported. Everything else -- a refused connection, a
+    timeout, an arr that is down -- is somebody else's outage, passes on its
+    own, and would make this flap.
     """
     if jellyfin.credential_rejected():
-        log.warning("unhealthy: Jellyfin is refusing this service's API key")
+        log.warning("not ready: Jellyfin is refusing this service's API key")
         response.status_code = 503
-        return "Jellyfin is refusing this service's API key."
-    return "ok"
+        return {
+            "ready": False,
+            "reason": "jellyfin_credential_rejected",
+            "detail": "Jellyfin is refusing this service's API key. Sign in "
+                      "again at /setup to issue a new one.",
+            "repair": "/setup",
+        }
+    return {"ready": True}
 
 
 @app.get("/setup", response_class=HTMLResponse)

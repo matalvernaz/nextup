@@ -155,6 +155,13 @@ CREATE INDEX IF NOT EXISTS feedback_events_recommendation
 def db():
     conn = sqlite3.connect(config.DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
+    # Write-ahead logging, so a reader is not held behind a writer. A shelf
+    # rebuild is twelve seconds of work that writes as it goes, and under the
+    # rollback journal every request arriving during one waits on the lock it
+    # takes. Set per connection because it is a property of the database file
+    # and reasserting it is free.
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
     try:
         yield conn
         conn.commit()

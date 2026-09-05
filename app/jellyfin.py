@@ -11,6 +11,7 @@ Two things here are load-bearing:
   on a title instead would reintroduce a whole class of near-miss that exact
   ids simply do not have.
 """
+import time
 from dataclasses import dataclass, field
 
 import httpx
@@ -107,22 +108,42 @@ class JellyfinUnavailable(Exception):
     """Jellyfin could not be reached, so no token can be judged either way."""
 
 
-def credential_rejected() -> bool:
+#: How long a credential verdict is reused for. Only the browser pages ask for
+#: a cached answer: they ask on every page load, and a Jellyfin round trip per
+#: load to render a banner that is almost always absent is not worth paying.
+CREDENTIAL_CACHE_SECONDS = 60
+
+_credential_verdict: tuple[float, bool] | None = None
+
+
+def credential_rejected(force: bool = True) -> bool:
     """Whether Jellyfin is actively refusing this service's own API key.
 
     True means a person has to act: the key was revoked, or the server stopped
     accepting the form it is sent in. Everything else -- a refused connection,
     a timeout, a 5xx -- is Jellyfin having a moment, which this service cannot
     fix and which passes on its own, so it reads as False rather than flapping
-    the health state on somebody else's restart.
+    on somebody else's restart.
+
+    `force=False` accepts an answer up to `CREDENTIAL_CACHE_SECONDS` old.
     """
+    global _credential_verdict
+    if not force and _credential_verdict is not None:
+        asked_at, verdict = _credential_verdict
+        if time.monotonic() - asked_at < CREDENTIAL_CACHE_SECONDS:
+            return verdict
     try:
         with httpx.Client(base_url=config.JELLYFIN_URL, headers=_headers(),
                           timeout=_CREDENTIAL_TIMEOUT) as c:
             resp = c.get("/System/Info")
     except httpx.HTTPError:
+        # Not cached. An unreachable Jellyfin is not a verdict about the
+        # credential, and storing it as one would keep saying "fine" for a
+        # minute after the server comes back refusing.
         return False
-    return resp.status_code in (401, 403)
+    verdict = resp.status_code in (401, 403)
+    _credential_verdict = (time.monotonic(), verdict)
+    return verdict
 
 
 def all_users() -> dict[str, str]:

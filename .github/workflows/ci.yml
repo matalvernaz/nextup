@@ -3,6 +3,11 @@ name: Tests
 on:
   push:
     branches: [master]
+    # Tags too. A tag push does not match a branch filter, so without this line
+    # a release builds and publishes without a single test having run -- which
+    # is exactly what happened to v0.1.0, tagged green only because it was
+    # checked by hand first.
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
