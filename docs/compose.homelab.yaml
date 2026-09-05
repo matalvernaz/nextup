@@ -1,0 +1,212 @@
+services:
+  nextup:
+    # The published image, and the source it is built from. Both, deliberately:
+    # `docker compose up -d --build` builds locally and tags it with this name,
+    # so this host runs the same image everybody else would pull rather than a
+    # private variant nobody would notice breaking.
+    image: ghcr.io/matalvernaz/nextup:latest
+    build: .
+    container_name: nextup
+    restart: unless-stopped
+    environment:
+      # Jellyfin is the single library of record. Its own API key, not
+      # Nextread's: a shared key makes one revocation break two services.
+      JELLYFIN_URL: "http://jellyfin:8096"
+      JELLYFIN_TOKEN: "${JELLYFIN_TOKEN}"
+      # Supplied by the sso@file chain in front of the browser pages. The JSON
+      # API never reads it.
+      AUTH_USER_HEADER: "X-Auth-Request-Preferred-Username"
+      # Empty on purpose. This is a household service, so a fallback naming
+      # one person would hand his allowance to anyone whose header went
+      # missing. With none, the pages refuse instead of guessing.
+      JELLYFIN_USER: ""
+      # Where clients reach the API at the Jellyfin origin. Used only to check
+      # that route is really there -- leaving the router out is the easiest
+      # half of this deployment to forget and the only one with no symptom.
+      PUBLIC_URL: "https://jellyfin.thealvernaz.space/nextup"
+
+      # Libraries are discovered by collection type -- Movies, TV Shows and
+      # Music are found without their ids being written down anywhere that
+      # could go stale.
+
+      RADARR_URL: "http://radarr:7878"
+      RADARR_API_KEY: "${RADARR_API_KEY}"
+      # 6 = "HD - 720p/1080p". Stated rather than defaulted: which profile a
+      # household wants is a real choice about disk and bandwidth.
+      RADARR_QUALITY_PROFILE_ID: "6"
+
+      SONARR_URL: "http://sonarr:8989"
+      SONARR_API_KEY: "${SONARR_API_KEY}"
+      SONARR_QUALITY_PROFILE_ID: "6"
+      # Somebody asking for a series they do not have means the series.
+      SONARR_MONITOR: "all"
+
+      BUSKARR_URL: "http://buskarr:8000"
+      BUSKARR_API_KEY: "${BUSKARR_API_KEY}"
+
+      # Books, moved here when the audiobook service was merged in. The
+      # library ids are stated rather than discovered because there are two of
+      # them and only some of what is under a "books" collection type on this
+      # server is an audiobook.
+      LISTENARR_URL: "http://listenarr:4545"
+      LISTENARR_QUALITY_PROFILE_ID: "1"
+      BOOK_LIBRARY_IDS: "3aeb99515c5a4d67fe12f482a99e3d6c,37d6a841204ee1d6e58b0d35b973f7cc"
+      BOOK_DAILY_CAP: "3"
+      # Updated in place so its Jellyfin item id survives, which is what keeps
+      # a client's view of it from resetting every run.
+      PLAYLIST_NAME: "Next Read"
+      # Both, and in this order. This library spans two marketplaces: a book on
+      # one and not the other answers with an empty product from the wrong
+      # store, and an empty product is what once filled a request with the
+      # wrong book.
+      AUDIBLE_REGIONS: "ca,us"
+      # One rating this library cannot correct: a 1 written to "The Grief of
+      # Stones" while verifying the write path, judging a 0.2 MB ebook
+      # mislabelled as an eight-hour audiobook rather than the book. Jellyfin
+      # has no route that clears a rating, only one that overwrites it, so
+      # until a real one is given this is excluded from the seed set and the
+      # rating count. Empty by default in the code, because naming one
+      # library's item id there would discount whichever book happened to
+      # share it on somebody else's server.
+      IGNORED_RATING_ITEM_IDS: "7905477C-A118-4F4E-16CE-142C5175547B"
+      # Whose rating that is. Named separately from JELLYFIN_USER,
+      # which stays empty here and answers a different question.
+      IGNORED_RATING_USER: "matt"
+
+      # Per account per day. Jellyfin administrators are uncapped, and matt is
+      # the only administrator of ten accounts.
+      MOVIE_DAILY_CAP: "3"
+      SERIES_DAILY_CAP: "1"
+      MUSIC_DAILY_CAP: "3"
+      MUSIC_ARTIST_COST: "3"
+      MUSIC_ALBUM_COST: "1"
+      MUSIC_TRACK_COST: "1"
+
+      STILL_LOOKING_AFTER_HOURS: "24"
+      ARRIVED_VISIBLE_HOURS: "48"
+      LOG_LEVEL: "INFO"
+      DB_PATH: "/data/nextup.db"
+      TZ: "America/Vancouver"
+    volumes:
+      - ./data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/healthz',timeout=5).status==200 else 1)\""]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    networks:
+      - traefik
+    labels:
+      - traefik.enable=true
+      # Watchtower is disabled: this image is built locally and a registry
+      # pull would replace it with whatever is published.
+      - com.centurylinklabs.watchtower.enable=false
+      - "traefik.http.routers.nextup.rule=Host(`nextup.thealvernaz.space`) || Host(`www.nextup.thealvernaz.space`)"
+      - traefik.http.routers.nextup.entrypoints=websecure
+      # Explicit, and low. Traefik's default priority is the rule's character
+      # length, so this two-Host rule would otherwise outrank the API router
+      # below and swallow /api/ behind the sign-in challenge.
+      - traefik.http.routers.nextup.priority=10
+      - traefik.http.routers.nextup.middlewares=www-to-nonwww@file,access-nextup@file
+      - traefik.http.routers.nextup.tls=true
+      - traefik.http.routers.nextup.tls.certresolver=le-dns
+      - traefik.http.routers.nextup.tls.domains[0].main=nextup.thealvernaz.space
+      - traefik.http.routers.nextup.tls.domains[0].sans=www.nextup.thealvernaz.space
+      # The JSON API authenticates its callers itself and must NOT sit behind
+      # the sign-in proxy: EchoFin cannot complete an oauth2 flow. It carries
+      # no access middleware for exactly that reason.
+      - "traefik.http.routers.nextup-api.rule=Host(`nextup.thealvernaz.space`) && PathPrefix(`/api/`)"
+      - traefik.http.routers.nextup-api.entrypoints=websecure
+      - traefik.http.routers.nextup-api.priority=100
+      - traefik.http.routers.nextup-api.service=nextup
+      - traefik.http.routers.nextup-api.tls=true
+      - traefik.http.routers.nextup-api.tls.certresolver=le-dns
+      - traefik.http.routers.nextup-api.tls.domains[0].main=nextup.thealvernaz.space
+      # The same API, reachable at the Jellyfin origin under /nextup.
+      #
+      # This is what a client finds with nothing typed in Settings, and without
+      # it the app probes a path nothing serves, gets Jellyfin's own 404, and
+      # concludes there is no request server at all -- which shows up as the
+      # menu row simply not being there, with nothing anywhere saying why.
+      #
+      # Both hosts: EchoFin moves between them, and the derived address follows
+      # whichever one it is on, which keeps the traffic on the LAN at home
+      # instead of out through Cloudflare and back.
+      #
+      # Only /nextup/api. The browser pages stay on their own host behind the
+      # sign-in proxy; this path carries no cookie and authenticates every
+      # request on the caller's own Jellyfin token.
+      - "traefik.http.routers.nextup-jellyfin.rule=(Host(`jellyfin.thealvernaz.space`) || Host(`jellyfin-lan.thealvernaz.space`)) && PathPrefix(`/nextup/api`)"
+      - traefik.http.routers.nextup-jellyfin.entrypoints=websecure
+      # 200: it has to outrank Jellyfin's own Host() router, whose rule is
+      # shorter but which would otherwise take the path.
+      - traefik.http.routers.nextup-jellyfin.priority=200
+      # A docker label, not an @file middleware. A middleware named @file that
+      # does not exist drops the router silently and the host 404s with nothing
+      # in the log, which is a documented way to lose an afternoon here.
+      - traefik.http.routers.nextup-jellyfin.middlewares=nextup-strip
+      - traefik.http.middlewares.nextup-strip.stripprefix.prefixes=/nextup
+      - traefik.http.routers.nextup-jellyfin.service=nextup
+      - traefik.http.routers.nextup-jellyfin.tls=true
+      - traefik.http.routers.nextup-jellyfin.tls.certresolver=le-dns
+      - traefik.http.routers.nextup-jellyfin.tls.domains[0].main=jellyfin.thealvernaz.space
+      - traefik.http.routers.nextup-jellyfin.tls.domains[1].main=jellyfin-lan.thealvernaz.space
+      # Favicon bypass, to avoid the CSRF race on concurrent requests.
+      - "traefik.http.routers.nextup-public.rule=Host(`nextup.thealvernaz.space`) && PathPrefix(`/favicon`)"
+      - traefik.http.routers.nextup-public.entrypoints=websecure
+      - traefik.http.routers.nextup-public.tls=true
+      - traefik.http.routers.nextup-public.tls.certresolver=le-dns
+      - traefik.http.routers.nextup-public.service=nextup
+      - traefik.http.routers.nextup-public.priority=100
+      # --- The audiobook service's addresses, which this now answers -------
+      #
+      # Moved here on 2026-09-05 when the two became one. They live on this
+      # container rather than that one because two containers carrying a
+      # router of the same name is a conflict with no good outcome, which is
+      # why they moved in the same step that stopped it.
+
+      # The Jellyfin origin, which is where a client with nothing typed in its
+      # settings looks. Deliberately NOT stripped: the old service was mounted
+      # at /api/v1 and needed the prefix removed, and this one serves
+      # /nextread/api/v1 itself. Stripping it here would 404 every audiobook
+      # request from every build already on somebody's phone.
+      - "traefik.http.routers.nextread-jellyfin.rule=(Host(`jellyfin.thealvernaz.space`) || Host(`jellyfin-lan.thealvernaz.space`)) && PathPrefix(`/nextread/api`)"
+      - traefik.http.routers.nextread-jellyfin.entrypoints=websecure
+      # 200, to outrank Jellyfin's own shorter Host() rule.
+      - traefik.http.routers.nextread-jellyfin.priority=200
+      - traefik.http.routers.nextread-jellyfin.service=nextup
+      - traefik.http.routers.nextread-jellyfin.tls=true
+      - traefik.http.routers.nextread-jellyfin.tls.certresolver=le-dns
+      - traefik.http.routers.nextread-jellyfin.tls.domains[0].main=jellyfin.thealvernaz.space
+      - traefik.http.routers.nextread-jellyfin.tls.domains[1].main=jellyfin-lan.thealvernaz.space
+
+      # The old hostname. Here the prefix has to be ADDED: a client with that
+      # address typed in asks for /api/v1/..., and this service answers the
+      # audiobook protocol at /nextread/api/v1/... .
+      - traefik.http.middlewares.nextread-prefix.addprefix.prefix=/nextread
+      - "traefik.http.routers.nextread.rule=Host(`nextread.thealvernaz.space`) || Host(`www.nextread.thealvernaz.space`)"
+      - traefik.http.routers.nextread.entrypoints=websecure
+      - traefik.http.routers.nextread.priority=10
+      - traefik.http.routers.nextread.middlewares=www-to-nonwww@file,access-nextread@file,nextread-prefix
+      - traefik.http.routers.nextread.service=nextup
+      - traefik.http.routers.nextread.tls=true
+      - traefik.http.routers.nextread.tls.certresolver=le-dns
+      - traefik.http.routers.nextread.tls.domains[0].main=nextread.thealvernaz.space
+      - traefik.http.routers.nextread.tls.domains[0].sans=www.nextread.thealvernaz.space
+      # No access chain, for the same reason nextup-api has none: a native
+      # client cannot complete an oauth2 flow.
+      - "traefik.http.routers.nextread-api.rule=Host(`nextread.thealvernaz.space`) && PathPrefix(`/api/`)"
+      - traefik.http.routers.nextread-api.entrypoints=websecure
+      - traefik.http.routers.nextread-api.priority=100
+      - traefik.http.routers.nextread-api.middlewares=nextread-prefix
+      - traefik.http.routers.nextread-api.service=nextup
+      - traefik.http.routers.nextread-api.tls=true
+      - traefik.http.routers.nextread-api.tls.certresolver=le-dns
+      - traefik.http.routers.nextread-api.tls.domains[0].main=nextread.thealvernaz.space
+
+      - traefik.http.services.nextup.loadbalancer.server.port=8080
+
+networks:
+  traefik:
+    external: true

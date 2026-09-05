@@ -94,3 +94,39 @@ Nothing is deleted. To reverse: `docker compose up -d` in
 `up -d`, and restore `nextup.db` from the backup taken in step 2 if the
 migration itself is what went wrong. The old ledger is untouched throughout --
 the migration opens it read-only.
+
+
+## What actually happened, 2026-09-05
+
+Run in the order above. Both phase-C gates failed the first time, which is
+what the gates were for -- neither difference was visible in either deployment
+on its own, and both would have shipped silently.
+
+**The ignore list had been coupled to the wrong setting.** Comparing the two
+services on the same ledger and the same similarity cache gave 25 seeds
+against 24, and the extra one was the item whose rating is meant to be
+ignored. That list was gated on `JELLYFIN_USER` -- which names the identity a
+browser request falls back to, and which this deployment leaves empty on
+purpose so a missing proxy header cannot hand one person's allowance to
+anybody. Empty for that reason, the ignore silently applied to nobody.
+`IGNORED_RATING_USER` now names the account.
+
+**Four books would have claimed to be arriving for half a day longer.**
+`STILL_LOOKING_AFTER_HOURS` was one number for four media, and it means "long
+enough that a normal acquisition never trips this" -- twelve hours for
+Listenarr's six-hourly sweep, twenty-four as this deployment had set it for
+films. Books have their own now.
+
+With both fixed, and given the same ledger and the same cache, the two
+services produced **byte-identical shelves**: the same forty owned items in
+the same order with the same scores, the same forty suggestions likewise, and
+the same twenty-nine request rows in the same states.
+
+Other differences seen and correctly *not* acted on: the similarity graph
+drifts, because Audible's neighbours move and one side was serving a
+two-and-a-half-day-old cache. That accounted for eight of the ten discover
+differences before the real bugs were found, and it is not a defect.
+
+The migration ran twice -- once from a snapshot while nextread was still
+serving, and once from its final state after it stopped. The second found
+nothing new, which is what "no writes were lost" looks like.
