@@ -86,7 +86,14 @@ def want(user: jellyfin.User, medium: str, item_key: str, unit: str = "",
         # requests rather than one, and both of those were got right once
         # already -- reimplementing them here as four more `if medium ==` arms
         # would be a second chance to get them wrong.
-        return books.want(user, item_key, unit or "book", hit or {})
+        try:
+            return books.want(user, item_key, unit or "book", hit or {})
+        except books.Denied as denied:
+            # The adapter cannot import this module -- that is the cycle -- so
+            # it raises its own refusal and this is where the two names meet.
+            # Without it a capped account's fourth book, and an unresolvable
+            # series name, both leave as a 500.
+            raise Denied(str(denied)) from denied
     unit = unit or found.units[0]
     if unit not in found.units:
         raise Denied(f"{unit!r} is not something that can be asked for.")
@@ -170,6 +177,18 @@ def states(user: jellyfin.User, medium: str | None = None) -> list[dict]:
     if not rows:
         return []
 
+    # Books are settled by the book path, not by the chain below. That chain's
+    # last arm is music, so a book row would otherwise be asked about by
+    # buskarr under an empty backend id -- which answers nothing, forever, and
+    # leaves an arrived book reading "on its way" for good.
+    book_rows = [row for row in rows if row["medium"] == media.BOOK]
+    rows = [row for row in rows if row["medium"] != media.BOOK]
+    # Asked for only when there is a book row to ask about: it costs a Jellyfin
+    # listing of the whole audiobook library.
+    book_states = books.states(user) if book_rows else []
+    if not rows:
+        return book_states
+
     index = media.owned()
     # Counted once, for exactly the series on this list. Jellyfin says what is
     # playable; Sonarr supplies the currently aired total and queued work.
@@ -203,7 +222,11 @@ def states(user: jellyfin.User, medium: str | None = None) -> list[dict]:
         store.mark_arrived(user.key, medium_key, keys)
         log.info("arrived user=%s medium=%s count=%d",
                  user.key, medium_key, len(keys))
-    return out
+    if not book_states:
+        return out
+    # One list, newest first, however many paths settled it.
+    return sorted(out + book_states, key=lambda entry: entry["requestedAt"],
+                  reverse=True)
 
 
 def _state(row, medium: str, index: jellyfin.Owned | None = None,

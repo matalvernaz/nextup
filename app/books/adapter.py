@@ -65,16 +65,39 @@ def _series_hits(user: jellyfin.User, query: str) -> list[dict]:
     except (book_series.Unresolvable, book_series.Unavailable) as exc:
         log.info("series search unresolved query=%r (%s)", query, exc)
         return []
+    name = planned.get("series") or query.strip()
+    missing = int(planned.get("missing") or 0)
+    have = len(planned.get("have") or ())
+    on_order = len(planned.get("onOrder") or ())
     return [{
         "medium": "book",
         "unit": SERIES_UNIT,
-        "item_key": planned.get("series") or query.strip(),
-        "title": planned.get("series") or query.strip(),
+        "item_key": name,
+        "title": name,
         "year": "",
-        "authors": planned.get("authors") or [],
-        "owned": False,
-        "detail": planned.get("sentence") or "",
+        "authors": [],
+        # Owned when there is nothing left to ask for. A series row is not a
+        # book: what "owned" means for it is that the library already holds
+        # everything Audible lists.
+        "owned": missing == 0,
+        "detail": _series_detail(have, on_order, missing),
     }]
+
+
+def _series_detail(have: int, on_order: int, missing: int) -> str:
+    """What the row says about a series, before anybody asks for it.
+
+    Deliberately not `series.sentence`, which describes what one tap just did
+    and reads as a past tense. This describes the state a person is choosing
+    from.
+    """
+    if not missing:
+        return f"You already have all {have} that Audible lists."
+    parts = [f"{have} of {have + on_order + missing} in your library"]
+    if on_order:
+        parts.append(f"{on_order} already on order")
+    parts.append(f"{missing} to ask for")
+    return ", ".join(parts) + "."
 
 
 def _as_hit(row: dict) -> dict:
@@ -118,9 +141,31 @@ def _want_series(user: jellyfin.User, name: str) -> tuple[str, str]:
         raise Denied(str(denied)) from denied
     # The sentence is the answer here, not a row: a series request becomes
     # several ledger rows and none of them is the thing that was asked for.
-    return wants.ON_ITS_WAY, outcome.get("sentence") or "Asked for."
+    return wants.ON_ITS_WAY, outcome.get("message") or "Asked for."
 
 
 def cancel(user: jellyfin.User, item_key: str) -> tuple[bool, str]:
     """Take one book off this account's list, and stop looking for it."""
     return wants.cancel(user, item_key)
+
+
+def states(user: jellyfin.User) -> list[dict]:
+    """This account's book requests, in the shared request shape.
+
+    Arrival for a book is not a provider-id match and cannot be made into one.
+    The ASIN a book was asked for is the one issued by whichever marketplace
+    it was found in, and the tagger writes the one the *other* store issued for
+    the same edition -- so the two never meet, and arrival is decided on the
+    title with an author to agree with it. That is what `books.wants.states`
+    does, against the library index the engine builds anyway.
+    """
+    owned = shelves.owned_index(user)
+    return [{
+        "itemKey": row["asin"],
+        "medium": "book",
+        "unit": "book",
+        "title": row["title"],
+        "year": "",
+        "state": row["state"],
+        "requestedAt": row["requested_at"],
+    } for row in wants.states(user.key, owned)]
