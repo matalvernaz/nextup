@@ -99,6 +99,105 @@ BUSKARR_URL = _text("BUSKARR_URL")
 # disables films.
 BUSKARR_API_KEY = _text("BUSKARR_API_KEY")
 
+# --- Books ------------------------------------------------------------------
+#
+# Listenarr acquires; Audible supplies the similarity graph and the blurbs;
+# Jellyfin remains the library of record. As with every other backend, an
+# unset URL means this deployment simply does not offer books.
+
+# No default. The audiobook service this came from defaulted to
+# "http://listenarr:4545", which was right when it was the only thing running
+# and wrong the moment the code shipped to somebody else: a default URL makes
+# `configured` true by shape, so books were offered on installs where nothing
+# was listening.
+LISTENARR_URL = _text("LISTENARR_URL")
+LISTENARR_QUALITY_PROFILE_ID = _int("LISTENARR_QUALITY_PROFILE_ID", 1)
+
+# Which Jellyfin libraries hold audiobooks. Unset means every view whose
+# collection type matches, the same rule the other three media follow.
+BOOK_LIBRARY_IDS = _ids("BOOK_LIBRARY_IDS")
+
+# Marketplaces to consult, in order. A LIST, not one value, because a library
+# can genuinely span two: measured 2026-08-28, B0CWW1L8NL exists on audible.ca
+# and not on .com while B0HC7V8ZR4 exists on .com and not on .ca. Whichever
+# single region were chosen, the other store's books would answer with an
+# empty product -- and an empty product is what let a request be filled with
+# the wrong book. First is preferred: it decides ties and it is the region an
+# item is filed under when both stores have it.
+AUDIBLE_REGIONS = [r.strip().lower()
+                   for r in _text("AUDIBLE_REGIONS", "ca,us").split(",")
+                   if r.strip()] or ["ca"]
+
+#: The preferred marketplace, for callers that can only carry a single value.
+AUDIBLE_REGION = AUDIBLE_REGIONS[0]
+
+# The one persistent Jellyfin playlist the book shelf is written into, updated
+# in place. Recreating it would churn item ids and reset the client's view
+# every run. A playlist and not a collection: collections are server-global
+# and a shelf belongs to one account.
+PLAYLIST_NAME = _text("PLAYLIST_NAME", "Next Read")
+
+# How long a cached Audible similar-products response stays fresh. That
+# endpoint is unauthenticated and must never be hit on a page load.
+SIMS_TTL_HOURS = _int("SIMS_TTL_HOURS", 168)
+
+# A blurb and a runtime, which change about as often as a book is re-issued.
+PRODUCT_TTL_HOURS = _int("PRODUCT_TTL_HOURS", 720)
+
+# Audible caps sims responses; ask for a useful spread per seed.
+SIMS_PER_SEED = _int("SIMS_PER_SEED", 10)
+
+# How many recommendations a book shelf shows.
+MAX_SHELF = _int("MAX_SHELF", 40)
+
+# How many books one "ask for the rest of this series" tap may request. A
+# series can run to forty volumes, and one tap quietly turning into forty
+# acquisitions is not what anybody meant by it. The rest are asked for on the
+# next tap, which skips whatever is already on order. Non-keyholders are
+# bounded by BOOK_DAILY_CAP as well, whichever is smaller.
+SERIES_WANT_LIMIT = _int("SERIES_WANT_LIMIT", 10)
+
+# Signed rating mode -- where a low score pushes a neighbourhood away rather
+# than merely failing to pull it -- begins here and reaches full strength over
+# RATINGS_RAMP_SPAN more ratings. A hard gate was tried first and produced
+# exactly the lurch it was written to prevent: at the threshold every unrated
+# seed dropped from parity with a rated one in a single pass, so half the
+# shelf reordered the moment one rating landed.
+MIN_RATINGS_FOR_SIGNED_MODE = _int("MIN_RATINGS_FOR_SIGNED_MODE", 5)
+RATINGS_RAMP_SPAN = _int("RATINGS_RAMP_SPAN", 15)
+
+# Jellyfin item ids whose rating is known to be wrong and cannot be corrected
+# -- Jellyfin has no route that clears one, only one that overwrites it.
+#
+# Empty by default. It carried one hardcoded id for a long time, which was
+# correct for the library it was written against and meaningless anywhere
+# else: a fresh install elsewhere would have silently discounted whichever of
+# its own books happened to share that id.
+IGNORED_RATING_ITEM_IDS = frozenset(_ids("IGNORED_RATING_ITEM_IDS"))
+
+# Keyword search is the only channel that can surface a book with no
+# connection whatever to a finished one -- and it is OFF, because measured on
+# real data it does not work yet. Audible's genre tags are far too broad
+# ("Children's Audiobooks", inherited from full-cast editions, returned The
+# Gruffalo), and at a small seed count the TF-IDF profile's own top terms are
+# proper nouns and blurb boilerplate rather than a genre signature. What would
+# fix it is more ratings, not more code.
+KEYWORD_PULL_ENABLED = _text("KEYWORD_PULL_ENABLED", "false").lower() == "true"
+KEYWORD_QUERIES_MAX = _int("KEYWORD_QUERIES_MAX", 4)
+KEYWORD_SHELF_SHARE = float(_text("KEYWORD_SHELF_SHARE", "0.25"))
+
+# A dismissal means "not now", not an irreversible judgement. Taste changes,
+# editions change, and an accidental tap must not suppress a book forever.
+DISMISS_TTL_DAYS = _int("DISMISS_TTL_DAYS", 30)
+
+# Recommendation snapshots make requests and dismissals attributable to the
+# ranker run that produced them. Kept long enough to compare outcomes across a
+# few release cycles without turning a small SQLite file into an unbounded
+# ledger.
+ATTRIBUTION_RETENTION_DAYS = _int("ATTRIBUTION_RETENTION_DAYS", 180)
+
+BOOK_DAILY_CAP = _int("BOOK_DAILY_CAP", 3)
+
 DB_PATH = _text("DB_PATH", "/data/nextup.db")
 
 # How many catalogue hits to return. What a person can stand to hear read out

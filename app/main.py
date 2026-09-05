@@ -39,6 +39,13 @@ def _rekey_ledger_once() -> None:
     """
     if store.user_key_scheme() == "id":
         return
+    if store.ledger_is_empty():
+        # Nothing to move, so nothing to ask Jellyfin about. Without this a
+        # fresh install whose Jellyfin is not up yet -- the ordinary ordering
+        # on a one-box bring-up -- dies in lifespan and restart-loops, on a
+        # migration of zero rows.
+        store.set_user_key_scheme("id")
+        return
     try:
         names = jellyfin.all_users()
     except Exception as exc:
