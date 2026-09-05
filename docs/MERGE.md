@@ -148,6 +148,29 @@ Three details are decided rather than left to the implementation:
   `X-Emby-Authorization` does not mint a fresh Jellyfin device row per
   sign-in.
 
+## Where this has got to
+
+Slices 1 to 8 are done and the suite is green at 23 files. Verified by running
+the merged service: all three prefixes answer with the right service name, the
+sign-in page renders with its unencrypted-connection warning, a proxy header
+alone is refused on every prefix, and `/healthz` stays healthy while Jellyfin
+is unreachable rather than restart-looping.
+
+Slice 9, this homelab's own cutover, is deliberately not done. It stops a live
+stack and migrates two live databases, so it waits for a decision rather than
+happening at the end of a coding session.
+
+Two things are knowingly left for later, neither blocking:
+
+- **The book recommendation shelf has no page yet.** Books search, request and
+  report through the unified page; the own/discover shelves are still served
+  only over `/nextread/api/v1/shelves`, which is what EchoFin reads. The web
+  page for them is the next piece of UI, not a merge step.
+- **Four of the audiobook suite's fifteen files are still unported**:
+  `test_api_auth`, `test_multiuser`, `test_selfcheck`, `test_template`. The
+  first two need the merged page and API surface they now have, so they can
+  come across; the last two duplicate checks this repo already makes.
+
 ## Order of work
 
 Each slice leaves the suite green and the service runnable.
