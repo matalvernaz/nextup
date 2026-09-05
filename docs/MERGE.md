@@ -158,35 +158,31 @@ sign-in page renders with its unencrypted-connection warning, a proxy header
 alone is refused on every prefix, and `/healthz` stays healthy while Jellyfin
 is unreachable rather than restart-looping.
 
-Slice 9, this homelab's own cutover, is deliberately not done. It stops a live
-stack and migrates two live databases, so it waits for a decision rather than
-happening at the end of a coding session.
+Slice 9, this homelab's own cutover, **ran on 2026-09-05**. It is written up
+in `docs/CUTOVER.md`, including the three settings the verification caught and
+the one regression it did not.
 
-Three decisions are Matt's rather than mine, and none of them has been made:
+One decision is still Matt's and has not been made:
 
-- **Merging to master does not deploy this**, verified: both live stacks carry
-  `com.centurylinklabs.watchtower.enable=false` and run locally built images.
-  So the merge and the deployment are separate acts, which is the right way
-  round.
 - **There is still no release tag**, and `compose.yaml` still says `:latest`.
   `publish.yml` has handled `v*` semver tags from the start and none has ever
-  been pushed, so the README currently tells a stranger to pull an image that
-  today is the *old* service. Tag `v0.1.0` at merge and pin the compose file
+  been pushed, so the README tells a stranger to pull an image whose `latest`
+  is whatever master last built. Tag `v0.1.0` and pin the compose file
   to `:0.1`.
-- **Slice 9 has not run.** `python -m app.migrate_nextread` exists and is
-  tested, including a dry run that writes nothing, but pointing it at the live
-  database is a decision rather than a step.
 
-Two things are knowingly left for later, neither blocking:
+Left for later, neither blocking:
 
 - **The book recommendation shelf has no page yet.** Books search, request and
-  report through the unified page; the own/discover shelves are still served
-  only over `/nextread/api/v1/shelves`, which is what EchoFin reads. The web
-  page for them is the next piece of UI, not a merge step.
-- **Four of the audiobook suite's fifteen files are still unported**:
-  `test_api_auth`, `test_multiuser`, `test_selfcheck`, `test_template`. The
-  first two need the merged page and API surface they now have, so they can
-  come across; the last two duplicate checks this repo already makes.
+  report through the unified page; the own/discover shelves are served over
+  `/nextread/api/v1/shelves`, which is what EchoFin reads. The web page for
+  them is the next piece of UI, not a merge step. It was thought to cost
+  nothing else, and it cost the Jellyfin playlist: that write was owed to
+  whoever loaded the page, so the API read settles it instead until the page
+  exists.
+- **Two of the audiobook suite's fifteen files are still unported**:
+  `test_multiuser` and `test_template`. The first needs nothing this repo does
+  not now have; the second duplicates checks made here already. `test_api_auth`
+  and `test_selfcheck` came across.
 
 ## Order of work
 
