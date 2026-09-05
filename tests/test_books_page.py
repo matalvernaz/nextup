@@ -112,13 +112,19 @@ import os  # noqa: E402
 
 os.environ["LISTENARR_URL"] = ""
 media.forget()
-# Asked of the sign-in page, which renders whatever else is true of the
-# deployment. The nav lives in the base template, so every page carries it.
+not_served = client.get("/books")
+check.equal(not_served.status_code, 404,
+            "the page says it is not served here, rather than rendering two "
+            "empty shelves")
+check.that("Book recommendations" not in not_served.text,
+           "and no nav offers it")
+
+# The sign-in page must never draw it either, and not because of what it says:
+# `books_offered()` asks the registry, which probes backends on a cache miss,
+# so a signed-out visitor could otherwise make this container reach out to
+# Listenarr and learn from the delay whether it is configured.
 check.that("Book recommendations" not in client.get("/signin").text,
-           "an installation with no Listenarr is not offered the page")
-check.equal(client.get("/books").status_code, 404,
-            "and the page itself says it is not served here, rather than "
-            "rendering two empty shelves")
+           "and a signed-out visitor is told nothing about the backends")
 os.environ["LISTENARR_URL"] = "http://listenarr.invalid:4545"
 media.forget()
 check.equal(client.get("/books").status_code, 200,

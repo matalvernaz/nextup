@@ -19,12 +19,16 @@
       <button type="submit">Sign out {{ user.name }}</button>
     </form>
   </p>
-  {% endif %}
   {#
     One nav, rendered only where there is somewhere to go. A recommendation
     page nobody can find is a page that does not exist -- and the last time
     this shelf had no page, the playlist it writes silently stopped being
     written for a day and nothing said so.
+
+    Inside the signed-in block deliberately: `books_offered()` asks the
+    registry, which probes backends on a cache miss, and a signed-out visitor
+    should not be able to make this container reach out to Listenarr -- nor
+    learn from how long the page took whether it is configured.
   #}
   {% if books_offered() %}
   <nav aria-label="Sections">
@@ -33,6 +37,7 @@
       <li><a href="/books">Book recommendations</a></li>
     </ul>
   </nav>
+  {% endif %}
   {% endif %}
 </header>
 {#
