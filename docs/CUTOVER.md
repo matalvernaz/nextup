@@ -130,3 +130,34 @@ differences before the real bugs were found, and it is not a defect.
 The migration ran twice -- once from a snapshot while nextread was still
 serving, and once from its final state after it stopped. The second found
 nothing new, which is what "no writes were lost" looks like.
+
+### A third thing, found after the cutover rather than by it
+
+**Nothing was writing the Jellyfin playlist any more.** In the audiobook
+service that write was owed to whoever loaded its shelf page. This service does
+not have that page yet -- knowingly, and it was thought to cost nothing because
+the API serves the same shelf -- but the API read was deliberately
+side-effect-free, so the playlist simply stopped being written on the day of
+the cutover. No error, no log line, and a stale list on every client that
+reaches the shelf through Jellyfin rather than through the API. The read
+settles the write now, once per recomputation.
+
+Turning it back on found the third `JELLYFIN_USER` coupling: which account
+keeps the unsuffixed playlist name. Empty here on purpose, so matt's shelf
+would have started writing `Next Read — matt` and left the playlist every
+client is subscribed to stale in place. `PLAYLIST_OWNER` names it. The shelf
+already persisted on disk carried the wrong name in its payload, which would
+have created that orphan from disk on the first request after a restart --
+before the rebuild behind the answer could correct it -- so the write takes
+the name from configuration rather than from the snapshot.
+
+**The pattern is the finding, not the three settings.** `JELLYFIN_USER` is the
+identity a browser request falls back to. Anything else gated on it inherits
+"and this deployment leaves it empty on purpose", which reads as a working
+feature applying to nobody. `User.is_configured_user` had no callers left
+after the third and is gone.
+
+The consequence to expect: every other account whose client polls the shelf
+now gets its own `Next Read — <name>` playlist created in Jellyfin, which is
+what the code has always meant to do and has never done, because only one
+person ever loaded the page. Deleting them is the reversal.

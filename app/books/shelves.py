@@ -187,11 +187,18 @@ def write_playlist(user: jellyfin.User, data: dict) -> None:
     and it now runs on the request that serves the shelf itself -- so an
     account Jellyfin will not let create a playlist must lose the playlist,
     not the shelf.
+
+    The name comes from the configuration rather than from `data`, which is a
+    snapshot: a shelf persisted before PLAYLIST_OWNER was set carries the name
+    that setting exists to correct, and writing it would create the orphan
+    playlist -- from disk, on the first request after a restart, before the
+    rebuild that would have got it right.
     """
-    log.info("settling deferred playlist write user=%s items=%d",
-             user.key, len(data.get("own") or []))
+    name = engine._playlist_name(user)
+    log.info("settling deferred playlist write user=%s name=%r items=%d",
+             user.key, name, len(data.get("own") or []))
     try:
-        jellyfin.set_playlist(user.id, data["playlist_name"],
+        jellyfin.set_playlist(user.id, name,
                               [r["id"] for r in data.get("own") or []])
     except Exception as exc:  # noqa: BLE001 - see the docstring
         log.warning("could not write the playlist user=%s: %s", user.key, exc)

@@ -32,8 +32,12 @@ jellyfin.user_from_token = lambda token: USER
 written: list[list[str]] = []
 
 
+names: list[str] = []
+
+
 def fake_set_playlist(user_id, name, item_ids):
     written.append(list(item_ids))
+    names.append(name)
     return "playlist-1"
 
 
@@ -81,6 +85,27 @@ check.equal(len(written), 1, "a cached read does not rewrite the playlist")
 shelves.invalidate(USER.key)
 client.get("/nextread/api/v1/shelves", headers=AUTH)
 check.equal(len(written), 2, "a rebuilt shelf writes the playlist again")
+
+# --- a shelf persisted under the wrong name is written under the right one ---
+#
+# Every shelf built between the merge and this fix stamped "Next Read — matt"
+# into its payload. A restart empties the process cache, so the first request
+# after one serves that shelf from disk and settles its write immediately --
+# creating the very playlist PLAYLIST_OWNER exists to prevent, before the
+# rebuild behind the answer could get it right. The name is configuration; the
+# stored one is a snapshot of it.
+shelves.invalidate(USER.key)
+client.get("/nextread/api/v1/shelves", headers=AUTH)
+book_store.put_shelf(USER.key, {**fake_run(USER, update_playlist=False),
+                                "playlist_name": "Next Read — matt"})
+shelves._cache.clear()
+written.clear()
+client.get("/nextread/api/v1/shelves", headers=AUTH)
+check.equal(written[:1], [["i1", "i2"]],
+            "a shelf restored from disk still settles its write")
+check.equal(names[:1], ["Next Read"],
+            "under the name the configuration gives, not the one it was "
+            "persisted with")
 
 # --- a playlist Jellyfin refuses must not cost anybody their shelf -----------
 #
