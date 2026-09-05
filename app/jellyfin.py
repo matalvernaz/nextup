@@ -32,7 +32,8 @@ _TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 _CREDENTIAL_TIMEOUT = httpx.Timeout(5.0, connect=3.0)
 
 #: Collection type of a Jellyfin view, per medium this service serves.
-COLLECTION_TYPES = {"movie": "movies", "series": "tvshows", "music": "music"}
+COLLECTION_TYPES = {"movie": "movies", "series": "tvshows",
+                    "music": "music", "book": "books"}
 
 
 def normalise_id(value: str) -> str:
@@ -217,6 +218,7 @@ def library_ids(medium: str) -> list[str]:
         "movie": config.MOVIE_LIBRARY_IDS,
         "series": config.SERIES_LIBRARY_IDS,
         "music": config.MUSIC_LIBRARY_IDS,
+        "book": config.BOOK_LIBRARY_IDS,
     }.get(medium, [])
     if configured:
         return configured
@@ -373,3 +375,98 @@ def _provider(item: dict, name: str) -> str:
         if key.casefold() == name.casefold() and value:
             return str(value).strip()
     return ""
+
+
+# --- Books -------------------------------------------------------------------
+
+#: Everything the book engine needs to both rank and describe an audiobook.
+#: Requested explicitly because Jellyfin omits most of it by default.
+_BOOK_FIELDS = (
+    "ProviderIds,Genres,UserData,DateCreated,People,Overview,RunTimeTicks,"
+    "SeriesName,IndexNumber,ParentIndexNumber,AlbumArtist"
+)
+
+
+def books(uid: str) -> list[dict]:
+    """Every audiobook this account can see, with its own play state attached.
+
+    `userId` is not optional here. The play state, the favourites and the
+    ratings are what the taste model is built from, and a listing fetched
+    without it would make one person's history into everybody's profile.
+
+    The audiobook fork excludes owned multi-part children by default, so this
+    returns whole books rather than parts.
+    """
+    out: list[dict] = []
+    libraries = library_ids("book")
+    if not libraries:
+        return out
+    try:
+        with _client() as c:
+            for lib in libraries:
+                data = c.get("/Items", params={
+                    "parentId": lib,
+                    "includeItemTypes": "AudioBook",
+                    "recursive": "true",
+                    "fields": _BOOK_FIELDS,
+                    "userId": uid,
+                    "limit": 5000,
+                }).raise_for_status().json()
+                out.extend(data.get("Items", []))
+    except (httpx.HTTPError, ValueError) as exc:
+        # Raised rather than returned empty. An empty book library is what
+        # tells the engine there is nothing to recommend, and reporting an
+        # outage as that would quietly empty somebody's shelf.
+        log.error("book library read failed user=%s (%s)", uid, exc)
+        raise JellyfinUnavailable(str(exc)) from exc
+    return out
+
+
+def find_playlist(uid: str, name: str) -> str | None:
+    """Id of this account's playlist with that name, or None."""
+    with _client() as c:
+        data = c.get("/Items", params={
+            "includeItemTypes": "Playlist",
+            "recursive": "true",
+            "userId": uid,
+            "limit": 500,
+        }).raise_for_status().json()
+    for item in data.get("Items", []):
+        if item.get("Name") == name:
+            return item["Id"]
+    return None
+
+
+def set_playlist(uid: str, name: str, item_ids: list[str]) -> str | None:
+    """Create or update a playlist in place, so its id survives between runs.
+
+    A playlist and not a collection: collections are server-global and a shelf
+    belongs to one account. Updated in place because recreating it would churn
+    the item id and reset whatever the client had scrolled to.
+    """
+    pid = find_playlist(uid, name)
+    # Nothing to create from an empty first result. An existing playlist still
+    # has to be cleared below, or a stale shelf survives indefinitely.
+    if pid is None and not item_ids:
+        return None
+    with _client() as c:
+        if pid is None:
+            created = c.post("/Playlists", json={
+                "Name": name, "Ids": item_ids, "UserId": uid,
+                "MediaType": "Audio",
+            }).raise_for_status().json()
+            return created["Id"]
+        existing = c.get(f"/Playlists/{pid}/Items",
+                         params={"userId": uid, "limit": 5000}
+                         ).raise_for_status().json()
+        entry_ids = [i["PlaylistItemId"] for i in existing.get("Items", [])
+                     if i.get("PlaylistItemId")]
+        if entry_ids:
+            c.request("DELETE", f"/Playlists/{pid}/Items",
+                      params={"entryIds": ",".join(entry_ids)}
+                      ).raise_for_status()
+        if item_ids:
+            c.post(f"/Playlists/{pid}/Items",
+                   params={"ids": ",".join(item_ids), "userId": uid}
+                   ).raise_for_status()
+    return pid
