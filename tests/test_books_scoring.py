@@ -21,6 +21,11 @@ harness.use("books-scoring")
 # book happened to share it. So the test supplies its own.
 IGNORED = "7905477ca1184f4e16ce142c5175547b"
 os.environ["IGNORED_RATING_ITEM_IDS"] = IGNORED
+# Whose ratings it applies to. Named separately from JELLYFIN_USER, which is
+# the identity a browser request falls back to and has nothing to do with
+# whose rating is wrong -- a household deployment leaves that empty on
+# purpose, and the two being one setting turned this list silently off there.
+os.environ["IGNORED_RATING_USER"] = "matt"
 
 from app.books import engine, textmodel
 
@@ -82,6 +87,26 @@ check("and unplayed it is not a seed at all",
       engine._is_seed(item(bad_id, 1, played=False)), False)
 check_true("the id is matched with dashes stripped and case ignored",
            engine._rating({"Id": bad_id.upper(), "UserData": {"Rating": 1}}) is None)
+
+print("--- and it applies to one account, not to the deployment ---")
+# This used to be gated on JELLYFIN_USER, which is a different question: that
+# names the identity a browser request falls back to, and a household service
+# leaves it empty so a missing proxy header cannot hand one person's allowance
+# to anybody. Empty for that reason, the ignore list silently stopped working
+# -- which nothing showed, because either deployment on its own looked right.
+from app.jellyfin import User  # noqa: E402
+
+check("the named account's bad rating is still ignored",
+      engine._rating(bad, User(id="u1", name="matt")), None)
+check("a different account's rating of the same book is a real opinion",
+      engine._rating(bad, User(id="u2", name="kadija")), 1)
+check_true("and the name is matched without regard to case",
+           engine._rating(bad, User(id="u1", name="MATT")) is None)
+
+engine.config.IGNORED_RATING_USER = ""
+check("with nobody named, no account's rating is ignored",
+      engine._rating(bad, User(id="u1", name="matt")), 1)
+engine.config.IGNORED_RATING_USER = "matt"
 
 print("--- bigrams ---")
 counts = textmodel.tokenise("a wholesome slice of life dungeon core story")

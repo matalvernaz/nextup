@@ -167,6 +167,20 @@ RATINGS_RAMP_SPAN = _int("RATINGS_RAMP_SPAN", 15)
 # its own books happened to share that id.
 IGNORED_RATING_ITEM_IDS = frozenset(_ids("IGNORED_RATING_ITEM_IDS"))
 
+# Whose ratings the list above applies to, by Jellyfin account name.
+#
+# It used to be whoever JELLYFIN_USER named, which coupled two settings that
+# have nothing to do with each other: JELLYFIN_USER is the identity a browser
+# request falls back to when no proxy header is present, and a household
+# service leaves it empty on purpose so a missing header cannot hand one
+# person's allowance to anybody. Setting it empty for that reason silently
+# turned the ignore list off -- caught by comparing two deployments that
+# differed only in that variable, and invisible in either one alone.
+#
+# Defaults to JELLYFIN_USER so a deployment that had the old coupling keeps
+# the old behaviour.
+IGNORED_RATING_USER = _text("IGNORED_RATING_USER") or JELLYFIN_USER
+
 # Keyword search is the only channel that can surface a book with no
 # connection whatever to a finished one -- and it is OFF, because measured on
 # real data it does not work yet. Audible's genre tags are far too broad

@@ -110,16 +110,24 @@ def _similarity_vote(seed_weight: float, position: int) -> float:
     return seed_weight / math.log2(position + SIMILARITY_RANK_OFFSET)
 
 
+def _ratings_ignored_for(user: "jellyfin.User") -> bool:
+    """Whether IGNORED_RATING_ITEM_IDS applies to this account."""
+    who = config.IGNORED_RATING_USER
+    return bool(who) and user.name.casefold() == who.casefold()
+
+
 def _rating(item: dict, user: "jellyfin.User | None" = None) -> float | None:
     """This listener's score, or None -- including for a rating we refuse to trust.
 
     A known-bad rating reads as unrated everywhere: as a seed weight, in the
     ramp's rating count, and in the decision to treat the book as a seed at all.
     """
-    # A question about the account's NAME: the ignore list is configured for
-    # the account JELLYFIN_USER names, and the database key is an id.
+    # A question about the account's NAME: a rating is wrong for one person,
+    # and the same book rated by somebody else is a real opinion. Asked of
+    # IGNORED_RATING_USER rather than of JELLYFIN_USER, which is a different
+    # question -- see the config note.
     ignored = (config.IGNORED_RATING_ITEM_IDS
-               if user is None or user.is_configured_user else ())
+               if user is None or _ratings_ignored_for(user) else ())
     if (item.get("Id") or "").replace("-", "").lower() in ignored:
         return None
     return (item.get("UserData") or {}).get("Rating")
