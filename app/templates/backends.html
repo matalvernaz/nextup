@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% block title %}Nextup — what this connects to{% endblock %}
+{% block main %}
+<h2>What this connects to</h2>
+
+<p role="status" aria-live="polite">{{ message }}</p>
+
+{% if not readonly %}
+<p>
+  Fill in only the tools you run. Each one is optional and independent: with
+  just Radarr connected, Nextup offers films and says nothing at all about
+  series, music or books.
+</p>
+
+{% for backend in forms %}
+<section>
+  <h3>{{ backend.label }}</h3>
+
+  <p>
+    {% if not backend.status or not backend.status.configured %}
+      Not connected.
+    {% elif backend.status.reachable %}
+      Connected, and answering.
+    {% else %}
+      Connected, but not answering. {{ backend.status.detail }}
+    {% endif %}
+  </p>
+
+  {% if backend.note %}<p>{{ backend.note }}</p>{% endif %}
+
+  <form method="post" action="/backends">
+    {% for field in backend.fields %}
+    <p>
+      <label for="{{ field.name }}">{{ field.label }}</label><br>
+      {% if field.locked %}
+        <input type="text" id="{{ field.name }}" value="{{ field.value }}"
+               readonly aria-describedby="{{ field.name }}-help">
+        <br>
+        <span class="help" id="{{ field.name }}-help">
+          Set in this deployment's environment, so it is not changed here.
+        </span>
+      {% else %}
+        <input type="{{ 'password' if field.secret else 'text' }}"
+               id="{{ field.name }}" name="{{ field.name }}"
+               value="{{ field.value }}" autocomplete="off"
+               autocapitalize="none" autocorrect="off" spellcheck="false"
+               aria-describedby="{{ field.name }}-help">
+        <br>
+        <span class="help" id="{{ field.name }}-help">
+          {{ field.help }}
+          {% if field.secret %}Leave empty to keep the key already saved.{% endif %}
+        </span>
+      {% endif %}
+    </p>
+    {% endfor %}
+
+    {% if backend.profiles %}
+    <p>
+      <label for="{{ backend.profile_field }}">Quality profile</label><br>
+      <select id="{{ backend.profile_field }}" name="{{ backend.profile_field }}">
+        <option value="">Choose one — until you do, {{ backend.label }} is not used</option>
+        {% for choice in backend.profiles %}
+        <option value="{{ choice.value }}"
+          {% if choice.value == backend.profile_value %}selected{% endif %}>
+          {{ choice.label }}
+        </option>
+        {% endfor %}
+      </select>
+      <br>
+      <span class="help">
+        {{ backend.label }}'s own profiles. Which one to use is a real choice
+        about disk and bandwidth, so Nextup does not pick for you.
+      </span>
+    </p>
+    {% endif %}
+
+    {% if backend.roots %}
+    <p>
+      <label for="{{ backend.root_field }}">Root folder</label><br>
+      <select id="{{ backend.root_field }}" name="{{ backend.root_field }}">
+        {% for choice in backend.roots %}
+        <option value="{{ choice.value }}"
+          {% if choice.value == backend.root_value %}selected{% endif %}>
+          {{ choice.label }}
+        </option>
+        {% endfor %}
+      </select>
+      <br>
+      <span class="help">
+        {{ backend.label }} has more than one, so Nextup asks rather than guesses.
+      </span>
+    </p>
+    {% endif %}
+
+    <p><button type="submit">Save {{ backend.label }} and test it</button></p>
+  </form>
+</section>
+{% endfor %}
+
+<p>
+  <a href="/">Back to asking for things</a>
+</p>
+{% endif %}
+{% endblock %}

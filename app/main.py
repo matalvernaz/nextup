@@ -21,8 +21,8 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import (api, compat_nextread, config, jellyfin, logs, media,
-               selfcheck, sessions, store, wants)
+from . import (api, backends, compat_nextread, config, jellyfin, logs, media,
+               selfcheck, sessions, settings, setup, store, wants)
 
 log = logs.get("main")
 
@@ -232,10 +232,97 @@ def healthz(response: Response) -> str:
     return "ok"
 
 
+@app.get("/setup", response_class=HTMLResponse)
+def get_setup(request: Request, msg: str = ""):
+    """Connect to Jellyfin. The only step a first run cannot skip."""
+    return templates.TemplateResponse(
+        request=request, name="setup.html",
+        context={
+            "message": msg,
+            "jellyfin_url": config.JELLYFIN_URL,
+            "locked": settings.held_in_environment("JELLYFIN_TOKEN"),
+            "connected": not setup.needs_setup(),
+        })
+
+
+@app.post("/setup")
+def post_setup(request: Request, jellyfin_url: str = Form(""),
+               username: str = Form(""), password: str = Form("")):
+    try:
+        message = setup.connect_jellyfin(jellyfin_url, username, password)
+    except jellyfin.TokenRejected as exc:
+        return RedirectResponse(url=f"/setup?msg={quote(str(exc))}",
+                                status_code=303)
+    except jellyfin.JellyfinUnavailable as exc:
+        return RedirectResponse(
+            url=f"/setup?msg={quote(f'That Jellyfin could not be reached. {exc}')}",
+            status_code=303)
+    return RedirectResponse(url=f"/backends?msg={quote(message)}",
+                            status_code=303)
+
+
+@app.get("/backends", response_class=HTMLResponse)
+def get_backends(request: Request, msg: str = ""):
+    """Which acquisition tools this household runs, and whether they answer."""
+    if setup.needs_setup():
+        return RedirectResponse(url="/setup", status_code=303)
+    try:
+        user = viewer(request)
+    except LookupError as exc:
+        return _signin_page(request, detail=str(exc), status=401)
+    if not user.is_admin:
+        # A member pointing the household's install at their own Radarr is not
+        # a threat model worth leaving open for the sake of one fewer check.
+        return templates.TemplateResponse(
+            request=request, name="backends.html", status_code=403,
+            context={"user": user, "forms": (), "message":
+                     "Changing where this connects needs a Jellyfin "
+                     "administrator account.", "readonly": True})
+    return templates.TemplateResponse(
+        request=request, name="backends.html",
+        context={"user": user, "forms": setup.forms(), "message": msg,
+                 "readonly": False})
+
+
+@app.post("/backends")
+async def post_backends(request: Request):
+    """Save one backend's settings, then show what it says for itself."""
+    if setup.needs_setup():
+        return RedirectResponse(url="/setup", status_code=303)
+    try:
+        user = viewer(request)
+    except LookupError as exc:
+        return _signin_page(request, detail=str(exc), status=401)
+    if not user.is_admin:
+        return RedirectResponse(
+            url="/backends?msg=" + quote(
+                "Changing where this connects needs a Jellyfin administrator "
+                "account."), status_code=303)
+    form = await request.form()
+    refused = setup.save({key: str(value) for key, value in form.items()})
+    # Probed straight away rather than on the next page load. "Saved" is not
+    # the news anybody wants; "and it answers" is.
+    backends.forget()
+    said = []
+    for status in backends.statuses(force=True):
+        if status.configured:
+            said.append(f"{status.name}: "
+                        + ("answered." if status.reachable
+                           else status.detail or "did not answer."))
+    message = " ".join(refused + said) or "Saved."
+    return RedirectResponse(url=f"/backends?msg={quote(message)}",
+                            status_code=303)
+
+
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request, q: str = "", medium: str = "", unit: str = "",
           msg: str = ""):
     """Search, and everything this account is currently waiting for."""
+    if setup.needs_setup():
+        # Nothing can be asked of a Jellyfin this service has no credential
+        # for -- including who somebody is -- so a first run goes to the one
+        # page that does not need one.
+        return RedirectResponse(url="/setup", status_code=303)
     try:
         user = viewer(request)
     except LookupError as exc:

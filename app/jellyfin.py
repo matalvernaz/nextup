@@ -524,3 +524,48 @@ def authenticate(username: str, password: str,
         log.error("sign-in answer from Jellyfin would not parse (%s)", exc)
         raise JellyfinUnavailable("Jellyfin's answer could not be read.") from exc
     return token, _to_user(dto)
+
+
+#: The item type an audiobook fork files whole books under. Stock Jellyfin has
+#: no such type: its Books libraries hold `Book` items, which are ebooks, and
+#: audiobooks on a stock server live in a music library as albums and tracks.
+AUDIOBOOK_TYPE = "AudioBook"
+
+
+def serves_audiobooks() -> bool | None:
+    """Whether this Jellyfin files audiobooks as whole books.
+
+    True on a fork that has the `AudioBook` item type, False on stock
+    Jellyfin, None when the question could not be asked.
+
+    It matters because a books library exists on both, and on stock Jellyfin it
+    holds ebooks. Offering the book medium there would produce a search box
+    that can ask for audiobooks and a library that can never show one arriving
+    -- the exact silent absence this service is arranged against. Better to say
+    plainly that books need the fork.
+
+    Not folded into `library_ids`: a stock server's books library should still
+    be *found*, so the doctor can say what it found and why it is not offered.
+    """
+    libraries = library_ids("book")
+    if not libraries:
+        return None
+    try:
+        with _client() as c:
+            for lib in libraries:
+                data = c.get("/Items", params={
+                    "parentId": lib,
+                    "includeItemTypes": AUDIOBOOK_TYPE,
+                    "recursive": "true",
+                    "limit": 1,
+                }).raise_for_status().json()
+                if data.get("TotalRecordCount"):
+                    return True
+        # Asked and answered zero. An empty library on a fork looks the same as
+        # a stock server, which is the honest answer: nothing here says books
+        # can be served, so nothing claims they can.
+        return False
+    except (httpx.HTTPError, ValueError) as exc:
+        log.warning("could not ask whether this Jellyfin serves audiobooks (%s)",
+                    exc)
+        return None

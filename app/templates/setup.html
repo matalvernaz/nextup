@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Connect Nextup to Jellyfin{% endblock %}
+{% block main %}
+<h2>Connect to Jellyfin</h2>
+
+<p role="status" aria-live="polite">{{ message }}</p>
+
+{% if locked %}
+<p>
+  This deployment supplies a Jellyfin credential through its environment, so
+  there is nothing to do here. Change <code>JELLYFIN_TOKEN</code> where it is
+  set.
+</p>
+{% else %}
+{% if connected %}
+<p>
+  Already connected. Signing in again replaces the credential this service
+  uses, which is what to do if it has stopped working.
+</p>
+{% endif %}
+
+<p>
+  Sign in with a Jellyfin <strong>administrator</strong> account. Nextup asks
+  Jellyfin for a credential of its own and keeps that — it does not keep your
+  password, and you will not need to visit Jellyfin's dashboard.
+</p>
+
+<form method="post" action="/setup">
+  <p>
+    <label for="jellyfin_url">Jellyfin address</label><br>
+    <input type="url" id="jellyfin_url" name="jellyfin_url"
+           value="{{ jellyfin_url }}" autocomplete="url" required>
+    <br>
+    <span class="help">
+      As this container reaches it. <code>http://jellyfin:8096</code> if it is
+      on the same Docker network, or <code>http://host.docker.internal:8096</code>
+      if it is published on this machine. Not <code>localhost</code>: inside a
+      container that is this container.
+    </span>
+  </p>
+  <p>
+    <label for="username">Jellyfin username</label><br>
+    <input type="text" id="username" name="username" autocomplete="username"
+           autocapitalize="none" autocorrect="off" spellcheck="false" required>
+  </p>
+  <p>
+    <label for="password">Password</label><br>
+    <input type="password" id="password" name="password"
+           autocomplete="current-password" required>
+  </p>
+  <p><button type="submit">Connect</button></p>
+</form>
+{% endif %}
+{% endblock %}

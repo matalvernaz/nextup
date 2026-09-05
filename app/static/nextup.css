@@ -20,3 +20,10 @@ input[type="text"], select { font-size: 1rem; padding: 0.3rem; min-width: 18rem;
 .signout button {
     font: inherit;
 }
+
+/* Guidance under a field, read by a screen reader as part of the field's
+   description rather than as loose text after it. */
+.help {
+    display: block;
+    font-size: 0.9em;
+}

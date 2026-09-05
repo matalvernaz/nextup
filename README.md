@@ -10,33 +10,51 @@ themselves, with the Jellyfin username and password they already use.
 
 ## Getting it running
 
-You need Docker, a Jellyfin server, and at least one of Radarr, Sonarr,
-Listenarr or buskarr. Any subset works — a Jellyfin with none of them still
-gets recommendations.
+You need Docker and a Jellyfin server. Nothing else is required to start.
 
 ```sh
-git clone https://github.com/matalvernaz/nextup.git
-cd nextup
-cp .env.example .env
-$EDITOR .env                                          # a Jellyfin API key, and what you run
-docker compose run --rm nextup python -m app.doctor   # says what is wrong, by name
+curl -O https://raw.githubusercontent.com/matalvernaz/nextup/master/compose.yaml
 docker compose up -d
 ```
 
-Then open `http://<that machine>:8099` and sign in.
+Open `http://<that machine>:8099` and it will ask you two things:
 
-Put HTTPS in front of it before letting it out of your own network: signing in
+1. **Where Jellyfin is, and a Jellyfin administrator's username and password.**
+   Nextup asks Jellyfin for a credential of its own and keeps that. You do not
+   need to create an API key, and your password is not stored.
+2. **Which of Radarr, Sonarr, Listenarr and buskarr you run** — a URL and a
+   key each, with a Test button. Once one answers, its quality profiles are
+   listed *from that server*, so there is no number to go and find. Connect
+   none of them and Nextup still recommends what to play next from what
+   Jellyfin already holds.
+
+That is the whole of it. Everybody else in the household signs in with their
+own Jellyfin username and password; Nextup has no accounts of its own.
+
+Put HTTPS in front of it before letting it out of your own network. Signing in
 sends a Jellyfin password, and over plain HTTP that crosses the network as
-typed. The page says so when it is not encrypted.
+typed — the page says so when it is not encrypted.
 
-### The doctor
+### Configuring it from a file instead
+
+Every setting on those pages is also an environment variable, and **the
+environment wins**: a value in a compose file is a statement about a
+deployment, so the page shows it, says it is held there, and does not offer to
+change it. `.env.example` lists them all with the reasoning attached. Nothing
+in it is required — it is for people who would rather describe a deployment
+than click through one.
+
+### When something is not working
+
+```sh
+docker compose exec nextup python -m app.doctor
+```
 
 Nearly every way this can be misconfigured has no symptom otherwise. A quality
 profile left unset disables a whole medium on a container that starts and
 reports healthy. A Radarr on the wrong port produces a working search box that
-finds nothing. A Jellyfin library that does not exist yet means nothing ever
-reads as arrived. `python -m app.doctor` says all of it in one screen, names
-the variable or the address in each case, and exits non-zero.
+finds nothing. `app.doctor` says all of it in one screen, names the variable or
+the address in each case, and exits non-zero.
 
 ```
 Backends
@@ -49,6 +67,17 @@ Backends
 Media offered
   Books: 2 library(ies), units book, series, 3 per account per day.
 ```
+
+### Stock Jellyfin, and the audiobook fork
+
+Films, television and music work on a stock Jellyfin server.
+
+**Books need the audiobook fork of Jellyfin**, which files a whole audiobook as
+a single `AudioBook` item. Stock Jellyfin has no such type: its Books libraries
+hold ebooks, and audiobooks on a stock server are music albums. Nextup detects
+which it is talking to and simply does not offer books on a stock server —
+the Backends page and `app.doctor` both say so rather than leaving you with a
+search box that can ask for something the library can never show arriving.
 
 ## What it does
 

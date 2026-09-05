@@ -1,19 +1,19 @@
-# Nextup, on its own port, with no reverse proxy and nothing else required.
+# Nextup, on its own port, with no reverse proxy and nothing to configure first.
 #
-# Copy `.env.example` to `.env`, put a Jellyfin API key in it, fill in whichever
-# of Radarr, Sonarr, Listenarr and buskarr you actually run, and:
-#
-#   docker compose run --rm nextup python -m app.doctor   # says what is wrong
 #   docker compose up -d
 #
-# Then open http://<this machine>:8099 and sign in with your Jellyfin username
-# and password. Nextup has no accounts of its own.
+# Then open http://<this machine>:8099. It asks for a Jellyfin administrator
+# sign-in, obtains a credential of its own, and then asks which of Radarr,
+# Sonarr, Listenarr and buskarr you run -- testing each and listing its quality
+# profiles for you. Everybody else signs in with their own Jellyfin account.
 #
-# Every backend is optional and independently so. With only Radarr configured
-# this serves films and says nothing whatever about series, music or books.
+# Every backend is optional and independently so. With only Radarr connected
+# this serves films and says nothing whatever about series, music or books;
+# with none at all it still recommends from what Jellyfin already holds.
 #
-# For a deployment behind Traefik with a sign-in proxy in front, see
-# compose.traefik.yaml instead.
+# `.env` is optional and overrides the pages -- see .env.example. For a
+# deployment behind Traefik with a sign-in proxy in front, see
+# compose.traefik.yaml.
 services:
   nextup:
     image: ghcr.io/matalvernaz/nextup:latest
@@ -24,13 +24,19 @@ services:
       # your own network: the browser sign-in sends a Jellyfin password, and
       # over plain HTTP it crosses the network as typed. The page says so.
       - "${NEXTUP_PORT:-8099}:8080"
-    env_file: .env
+    env_file:
+      # Optional, and the reason this file works on its own: everything in it
+      # can be set from Nextup's own pages instead. Compose refuses to start
+      # over a missing env_file unless it is told not to.
+      - path: .env
+        required: false
     environment:
-      # `host.docker.internal` resolves to this machine from inside the
-      # container, which is what a Jellyfin published on the host looks like.
-      # Change it to a container name if Jellyfin is on the same Docker
-      # network. Never `localhost`: inside a container that is the container.
-      JELLYFIN_URL: "${JELLYFIN_URL:-http://host.docker.internal:8096}"
+      # Passed through only when you actually set it, with no default here.
+      # A default would put JELLYFIN_URL in the environment on every install,
+      # and the environment beats the pages by design -- so the setup page
+      # would show the address it was asking for as locked, and refuse to save
+      # the one you typed. The prefilled value comes from the app instead.
+      JELLYFIN_URL: "${JELLYFIN_URL:-}"
       DB_PATH: /data/nextup.db
       TZ: "${TZ:-UTC}"
     extra_hosts:

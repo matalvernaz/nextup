@@ -78,6 +78,22 @@ def _library_lines() -> tuple[list[str], bool]:
                  "has no matching Jellyfin library, so a client will show no "
                  "controls at all."], False)
     for key, found in sorted(offered.items()):
+        if key == "book" and found.library_ids:
+            # A books library exists on stock Jellyfin too, and there it holds
+            # ebooks. Offering the medium would give a search box that can ask
+            # for audiobooks and a library that can never show one arrive.
+            serves = jellyfin.serves_audiobooks()
+            if serves is False:
+                ok = False
+                lines.append(
+                    "Books: a Books library was found, but this Jellyfin does "
+                    "not file audiobooks as whole books. That needs the "
+                    "audiobook fork; on stock Jellyfin the library holds "
+                    "ebooks and nothing would ever read as arrived.")
+                continue
+            if serves is None:
+                lines.append("Books: could not ask this Jellyfin whether it "
+                             "serves audiobooks; will be retried.")
         if not found.library_ids:
             ok = False
             lines.append(

@@ -173,3 +173,54 @@ def forget() -> None:
     global _cache
     with _guard:
         _cache = None
+
+
+# --- What a backend can tell you about itself --------------------------------
+#
+# The Backends page asks these once a connection has tested good, so that a
+# quality profile is chosen from that server's own list rather than typed in
+# as a number found in another application's URL. That number was the single
+# worst thing about setting this up: unset it disables a whole medium, and the
+# only symptom is a container that starts, reports healthy and offers nothing.
+
+
+@dataclass(frozen=True, slots=True)
+class Choice:
+    """One thing a backend offers, as a form control needs it."""
+    value: str
+    label: str
+
+
+def _list(url: str, path: str, headers: dict) -> list[dict]:
+    try:
+        resp = httpx.get(url.rstrip("/") + path, headers=headers,
+                         timeout=PROBE_TIMEOUT, follow_redirects=True)
+        resp.raise_for_status()
+        rows = resp.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        log.warning("could not list %s from %s (%s)", path, url, exc)
+        return []
+    return rows if isinstance(rows, list) else []
+
+
+def quality_profiles(url: str, api_key: str) -> list[Choice]:
+    """That Radarr's or Sonarr's own profiles, newest API first."""
+    headers = {"X-Api-Key": api_key, "Accept": "application/json"}
+    rows = _list(url, "/api/v3/qualityprofile", headers)
+    return [Choice(str(row["id"]), str(row.get("name") or row["id"]))
+            for row in rows if isinstance(row, dict) and row.get("id")]
+
+
+def root_folders(url: str, api_key: str) -> list[Choice]:
+    """Where that backend puts things. Only worth asking about when several."""
+    headers = {"X-Api-Key": api_key, "Accept": "application/json"}
+    rows = _list(url, "/api/v3/rootfolder", headers)
+    return [Choice(str(row["path"]), str(row["path"]))
+            for row in rows if isinstance(row, dict) and row.get("path")]
+
+
+def listenarr_profiles(url: str) -> list[Choice]:
+    """Listenarr's quality profiles. Its API is v1 and needs no key to read."""
+    rows = _list(url, "/api/v1/qualityprofile", {"Accept": "application/json"})
+    return [Choice(str(row["id"]), str(row.get("name") or row["id"]))
+            for row in rows if isinstance(row, dict) and row.get("id")]

@@ -51,8 +51,7 @@ PUBLIC_URL = _text("PUBLIC_URL").rstrip("/")
 # Jellyfin is the single library of record. Nextup never treats an acquisition
 # tool as a catalogue of what is owned: those tools know only what they
 # themselves fetched, which on an established server is a small fraction of it.
-JELLYFIN_URL = _text("JELLYFIN_URL", "http://jellyfin:8096")
-JELLYFIN_TOKEN = os.environ["JELLYFIN_TOKEN"]
+
 
 # The trusted forward-auth proxy supplies this for browser requests. The JSON
 # API never reads it -- see `api.caller`.
@@ -67,25 +66,19 @@ JELLYFIN_USER = _text("JELLYFIN_USER")
 # Which Jellyfin libraries each medium covers. Unset means "every view whose
 # collection type matches", which is right on almost every server and saves an
 # install from copying ids out of a URL.
-MOVIE_LIBRARY_IDS = _ids("MOVIE_LIBRARY_IDS")
-SERIES_LIBRARY_IDS = _ids("SERIES_LIBRARY_IDS")
-MUSIC_LIBRARY_IDS = _ids("MUSIC_LIBRARY_IDS")
 
-RADARR_URL = _text("RADARR_URL")
-RADARR_API_KEY = _text("RADARR_API_KEY")
+
+
 # No default. Radarr ships seven profiles and which one a household wants is a
 # real choice about disk and bandwidth; picking one here would make that choice
 # silently and wrongly. An unset profile disables films, and the log says so.
-RADARR_QUALITY_PROFILE_ID = _int("RADARR_QUALITY_PROFILE_ID", 0)
+
 # Discovered when there is exactly one, which is the usual arrangement. Unlike
 # the quality profile this is not a judgement call -- there is nothing to choose
 # between -- so discovery is safe and one less thing to configure.
-RADARR_ROOT_FOLDER = _text("RADARR_ROOT_FOLDER")
 
-SONARR_URL = _text("SONARR_URL")
-SONARR_API_KEY = _text("SONARR_API_KEY")
-SONARR_QUALITY_PROFILE_ID = _int("SONARR_QUALITY_PROFILE_ID", 0)
-SONARR_ROOT_FOLDER = _text("SONARR_ROOT_FOLDER")
+
+
 # What to monitor when a series is added. Sonarr's own vocabulary, passed
 # through: `all`, `firstSeason`, `future`, `missing`, `existing`, `none`.
 # `all` is the default because somebody asking for a series they do not have
@@ -93,11 +86,11 @@ SONARR_ROOT_FOLDER = _text("SONARR_ROOT_FOLDER")
 SONARR_MONITOR = _text("SONARR_MONITOR", "all")
 SONARR_SEASON_FOLDER = _text("SONARR_SEASON_FOLDER", "true").lower() != "false"
 
-BUSKARR_URL = _text("BUSKARR_URL")
+
 # Buskarr's JSON API refuses every request unless this matches the key it was
 # started with. Unset here disables music, exactly as an unset Radarr key
 # disables films.
-BUSKARR_API_KEY = _text("BUSKARR_API_KEY")
+
 
 # --- Books ------------------------------------------------------------------
 #
@@ -110,12 +103,11 @@ BUSKARR_API_KEY = _text("BUSKARR_API_KEY")
 # and wrong the moment the code shipped to somebody else: a default URL makes
 # `configured` true by shape, so books were offered on installs where nothing
 # was listening.
-LISTENARR_URL = _text("LISTENARR_URL")
-LISTENARR_QUALITY_PROFILE_ID = _int("LISTENARR_QUALITY_PROFILE_ID", 1)
+
 
 # Which Jellyfin libraries hold audiobooks. Unset means every view whose
 # collection type matches, the same rule the other three media follow.
-BOOK_LIBRARY_IDS = _ids("BOOK_LIBRARY_IDS")
+
 
 # Marketplaces to consult, in order. A LIST, not one value, because a library
 # can genuinely span two: measured 2026-08-28, B0CWW1L8NL exists on audible.ca
@@ -250,3 +242,116 @@ SERIES_RECOMMENDATION_CACHE_SECONDS = _int(
     "SERIES_RECOMMENDATION_CACHE_SECONDS", 3600)
 
 LOG_LEVEL = _text("LOG_LEVEL", "INFO").upper()
+
+
+# --- The settings a page can change ------------------------------------------
+#
+# These are looked up when they are read rather than fixed when this module is
+# imported, because the Backends page can write them and a value that only
+# took effect after a restart would be a page that appears to do nothing.
+#
+# Precedence is environment, then what was saved from a page, then the default.
+# The environment winning is deliberate: a value in a compose file is a
+# statement about a deployment, and a page that silently overrode it would make
+# that file a lie. The page says which settings are held that way instead of
+# offering to change them.
+#
+# Reached through `__getattr__`, which Python calls only when an attribute is
+# not found the ordinary way -- which is why none of these is assigned above.
+# Nothing in this codebase does `from .config import RADARR_URL`, so every read
+# goes through here.
+
+#: name -> (kind, default). `text`, `int`, or `ids`.
+_SETTABLE = {
+    # What the setup form is prefilled with, and what a deployment that says
+    # nothing gets. `host.docker.internal` because the shipped compose file
+    # publishes a port and maps that name to the host, so it is right for a
+    # Jellyfin running on the same machine -- the ordinary first install.
+    # Somebody whose Jellyfin shares a Docker network changes it to the
+    # container name, which the form says.
+    "JELLYFIN_URL": ("text", "http://host.docker.internal:8096"),
+    # No default and no longer required at import. It used to be
+    # `os.environ["JELLYFIN_TOKEN"]`, so a container with nothing configured
+    # could not start at all -- which is exactly the container somebody has
+    # the first time they run this, and it left them with a crash instead of a
+    # setup page.
+    "JELLYFIN_TOKEN": ("text", ""),
+
+    "RADARR_URL": ("text", ""),
+    "RADARR_API_KEY": ("text", ""),
+    # No default. Radarr ships seven profiles and which one a household wants
+    # is a real choice about disk and bandwidth, so it is asked rather than
+    # guessed -- but it is asked with a list of that Radarr's own profiles to
+    # choose from, not as a number to be found in another application's URL.
+    "RADARR_QUALITY_PROFILE_ID": ("int", 0),
+    "RADARR_ROOT_FOLDER": ("text", ""),
+
+    "SONARR_URL": ("text", ""),
+    "SONARR_API_KEY": ("text", ""),
+    "SONARR_QUALITY_PROFILE_ID": ("int", 0),
+    "SONARR_ROOT_FOLDER": ("text", ""),
+
+    "BUSKARR_URL": ("text", ""),
+    "BUSKARR_API_KEY": ("text", ""),
+
+    "LISTENARR_URL": ("text", ""),
+    "LISTENARR_QUALITY_PROFILE_ID": ("int", 1),
+
+    # Unset means every Jellyfin view whose collection type matches, which is
+    # right on almost every server and saves an install from copying ids out
+    # of a browser URL.
+    "MOVIE_LIBRARY_IDS": ("ids", ()),
+    "SERIES_LIBRARY_IDS": ("ids", ()),
+    "MUSIC_LIBRARY_IDS": ("ids", ()),
+    "BOOK_LIBRARY_IDS": ("ids", ()),
+}
+
+
+def _coerce(name: str, kind: str, raw: str, default, from_env: bool):
+    if kind == "ids":
+        return [x.strip().replace("-", "").lower()
+                for x in raw.split(",") if x.strip()]
+    if kind == "int":
+        try:
+            return int(raw)
+        except ValueError:
+            if from_env:
+                # The same refusal as before: a container that will not start
+                # and names the variable is far easier to find than one that
+                # starts, reports healthy, and quietly stops offering films
+                # because `six` read as zero.
+                raise RuntimeError(
+                    f"{name} must be a whole number, not {raw!r}") from None
+            # Saved from a page, where it was validated at the time. If it is
+            # broken now, something else broke it, and raising here would make
+            # every page a 500 with no way to reach the one that fixes it.
+            log_broken_setting(name, raw)
+            return default
+    return raw
+
+
+def log_broken_setting(name: str, raw: str) -> None:
+    from . import logs
+    logs.get("config").error(
+        "stored %s is %r, which is not a whole number; using the default",
+        name, raw)
+
+
+def __getattr__(name: str):
+    spec = _SETTABLE.get(name)
+    if spec is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    kind, default = spec
+    raw = os.environ.get(name, "").strip()
+    if raw:
+        return _coerce(name, kind, raw, default, from_env=True)
+    from . import settings
+    stored = settings.get(name)
+    if stored:
+        return _coerce(name, kind, stored, default, from_env=False)
+    return list(default) if kind == "ids" else default
+
+
+def settable_names() -> tuple[str, ...]:
+    """Every setting a page may change, in a stable order."""
+    return tuple(_SETTABLE)
