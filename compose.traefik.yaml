@@ -15,7 +15,9 @@
 # at all about series, music or books.
 services:
   nextup:
-    image: ghcr.io/matalvernaz/nextup:latest
+    # Pinned to a minor series rather than `latest`, so a patch release
+    # reaches you and a breaking one waits until you change this line.
+    image: ghcr.io/matalvernaz/nextup:0.1
     build: .
     container_name: nextup
     restart: unless-stopped

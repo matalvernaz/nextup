@@ -35,6 +35,17 @@ Put HTTPS in front of it before letting it out of your own network. Signing in
 sends a Jellyfin password, and over plain HTTP that crosses the network as
 typed — the page says so when it is not encrypted.
 
+### Versions
+
+That compose file pins `ghcr.io/matalvernaz/nextup:0.1`, so `docker compose
+pull` brings you fixes within the 0.1 series and nothing that would change how
+your deployment behaves. Move the line to `:0.2` when you want the next one.
+`:latest` is whatever master last built, which is the right thing to run only
+if you are following development.
+
+Images are published for `linux/amd64` and `linux/arm64`, because a homelab is
+as likely to be a small ARM box as an x86 server.
+
 ### Configuring it from a file instead
 
 Every setting on those pages is also an environment variable, and **the
