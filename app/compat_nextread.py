@@ -30,6 +30,11 @@ log = logs.get("compat.nextread")
 #: that read it cannot be updated to read anything else.
 LEGACY_PROTOCOL = 1
 
+#: The name `/info` answers with under this prefix, which is the old service's
+#: rather than this one's: clients and the same-origin check both compare it,
+#: and answering `nextup` here would read as the wrong service on the route.
+LEGACY_SERVICE = "nextread"
+
 router = APIRouter(prefix="/nextread/api/v1")
 
 
@@ -48,7 +53,7 @@ def info() -> dict:
     features: `/capabilities` negotiates those, per account, and a second list
     here would be one to keep in step for no gain.
     """
-    return {"service": "nextread", "protocol": LEGACY_PROTOCOL}
+    return {"service": LEGACY_SERVICE, "protocol": LEGACY_PROTOCOL}
 
 
 @router.get("/capabilities")
@@ -97,8 +102,17 @@ def get_shelves(user: jellyfin.User = Depends(caller)) -> dict:
     hydrates them through its ordinary item request, so resume position,
     downloads and play-on-activation all keep working. Only the unowned half
     has to be described here, because it has no library item to describe.
+
+    This read settles the Jellyfin playlist, which a GET was deliberately not
+    doing before. In the audiobook service that write was owed to whoever
+    loaded its shelf page, and this service does not have that page yet -- so
+    with the read staying side-effect-free the playlist simply stopped being
+    written, silently, leaving a stale list on every client that reaches the
+    shelf through Jellyfin rather than through this API. The cost is one write
+    per recomputation, not per request: a cached shelf carries whether its
+    write is still outstanding, and settles it once.
     """
-    data = shelves.result(user, update_playlist=False)
+    data = shelves.result(user, update_playlist=True)
     log.info("shelves served user=%s owned=%d suggestions=%d",
              user.key, len(data["own"]), len(data["discover"]))
     return {

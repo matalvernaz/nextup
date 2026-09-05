@@ -181,11 +181,21 @@ def result(user: jellyfin.User, force: bool = False,
 
 
 def write_playlist(user: jellyfin.User, data: dict) -> None:
-    """Settle a cached result's outstanding playlist write, without recomputing."""
+    """Settle a cached result's outstanding playlist write, without recomputing.
+
+    Best-effort. This is upkeep on a second, optional way of reading the shelf,
+    and it now runs on the request that serves the shelf itself -- so an
+    account Jellyfin will not let create a playlist must lose the playlist,
+    not the shelf.
+    """
     log.info("settling deferred playlist write user=%s items=%d",
              user.key, len(data.get("own") or []))
-    jellyfin.set_playlist(user.id, data["playlist_name"],
-                          [r["id"] for r in data.get("own") or []])
+    try:
+        jellyfin.set_playlist(user.id, data["playlist_name"],
+                              [r["id"] for r in data.get("own") or []])
+    except Exception as exc:  # noqa: BLE001 - see the docstring
+        log.warning("could not write the playlist user=%s: %s", user.key, exc)
+        return
     with _cache_guard:
         entry = _cache.get(user.key)
         if entry is not None:

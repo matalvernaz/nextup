@@ -43,10 +43,16 @@ SERVICE_NAME = "nextup"
 API_VERSION = 1
 
 # Where clients reach this service at the Jellyfin origin, e.g.
-# "https://jellyfin.example.com/nextup". Optional, and used only to check that
-# route is really there -- see app/selfcheck.py. Unset means the check does not
-# run, which is right for an install serving only the browser pages.
-PUBLIC_URL = _text("PUBLIC_URL").rstrip("/")
+# "https://jellyfin.example.com/nextup". Optional, and used only to check those
+# routes are really there -- see app/selfcheck.py. Unset means the check does
+# not run, which is right for an install serving only the browser pages.
+#
+# Comma-separated, because a deployment that also answers the audiobook
+# service's old prefix has a second same-origin route, and it fails the same
+# silent way as the first: a client reads Jellyfin's own 404 as "not
+# installed" and says nothing.
+PUBLIC_URLS = [x.strip().rstrip("/")
+               for x in _text("PUBLIC_URL").split(",") if x.strip()]
 
 # Jellyfin is the single library of record. Nextup never treats an acquisition
 # tool as a catalogue of what is owned: those tools know only what they
@@ -128,6 +134,20 @@ AUDIBLE_REGION = AUDIBLE_REGIONS[0]
 # every run. A playlist and not a collection: collections are server-global
 # and a shelf belongs to one account.
 PLAYLIST_NAME = _text("PLAYLIST_NAME", "Next Read")
+
+# Whose shelf gets that bare name. Everybody else's is suffixed with their
+# account name, because a playlist belongs to one account and ten accounts
+# writing one playlist is ten accounts overwriting each other.
+#
+# The same coupling IGNORED_RATING_USER was cut out of, and it bites the same
+# way: gated on JELLYFIN_USER, a household that leaves that empty on purpose
+# has no configured account at all, so the existing playlist every client is
+# already subscribed to stops being the one written and goes stale in place
+# while a second one fills up beside it.
+#
+# Defaults to JELLYFIN_USER so a deployment that had the old coupling keeps
+# the old behaviour.
+PLAYLIST_OWNER = _text("PLAYLIST_OWNER") or JELLYFIN_USER
 
 # How long a cached Audible similar-products response stays fresh. That
 # endpoint is unauthenticated and must never be hit on a page load.

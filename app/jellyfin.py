@@ -68,17 +68,6 @@ class User:
         """
         return self.id
 
-    @property
-    def is_configured_user(self) -> bool:
-        """Whether this is the account named by JELLYFIN_USER.
-
-        A question about the NAME, deliberately: the setting is a name, and
-        the ledger key is no longer one.
-        """
-        return bool(config.JELLYFIN_USER) and (
-            self.name.casefold() == config.JELLYFIN_USER.casefold()
-        )
-
 
 @dataclass(frozen=True, slots=True)
 class Owned:

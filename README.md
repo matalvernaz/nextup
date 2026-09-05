@@ -191,6 +191,7 @@ curl -s https://your-jellyfin-host/nextup/api/v1/info
 `{"service":"nextup","protocol":1,"protocols":[1,2]}` is right. A 404 means no
 client will ever find it. Set `PUBLIC_URL` and Nextup runs that check itself, a
 minute after start and hourly after, logging an error that names the address.
+Comma-separate it to watch more than one prefix.
 Never a health-check failure: your proxy would drop a container that is still
 serving its own hostname perfectly well.
 

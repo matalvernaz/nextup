@@ -23,7 +23,9 @@ services:
       # Where clients reach the API at the Jellyfin origin. Used only to check
       # that route is really there -- leaving the router out is the easiest
       # half of this deployment to forget and the only one with no symptom.
-      PUBLIC_URL: "https://jellyfin.thealvernaz.space/nextup"
+      # Both same-origin routes. The second is the one whose failure has no
+      # symptom: the books row is simply absent on every client.
+      PUBLIC_URL: "https://jellyfin.thealvernaz.space/nextup,https://jellyfin.thealvernaz.space/nextread"
 
       # Libraries are discovered by collection type -- Movies, TV Shows and
       # Music are found without their ids being written down anywhere that
@@ -55,6 +57,9 @@ services:
       # Updated in place so its Jellyfin item id survives, which is what keeps
       # a client's view of it from resetting every run.
       PLAYLIST_NAME: "Next Read"
+      # The account already subscribed to the unsuffixed playlist. Not derived
+      # from JELLYFIN_USER, which is empty here on purpose.
+      PLAYLIST_OWNER: "matt"
       # Both, and in this order. This library spans two marketplaces: a book on
       # one and not the other answers with an empty product from the wrong
       # store, and an empty product is what once filled a request with the

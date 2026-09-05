@@ -107,16 +107,22 @@ def _library_lines() -> tuple[list[str], bool]:
     return lines, ok
 
 
-def _route_line() -> tuple[str, bool]:
-    """The same-origin route, which is the easiest half to leave out."""
-    if not config.PUBLIC_URL:
-        return ("Same-origin route: PUBLIC_URL is unset, so it is not "
-                "checked. Set it to where clients reach this service at the "
-                "Jellyfin origin and this line becomes useful.", True)
-    problem = selfcheck.check(config.PUBLIC_URL)
-    if problem:
-        return f"Same-origin route: {problem}", False
-    return f"Same-origin route: {config.PUBLIC_URL} answers.", True
+def _route_lines() -> tuple[list[str], bool]:
+    """The same-origin routes, which are the easiest half to leave out."""
+    if not config.PUBLIC_URLS:
+        return (["Same-origin route: PUBLIC_URL is unset, so it is not "
+                 "checked. Set it to where clients reach this service at the "
+                 "Jellyfin origin and this line becomes useful."], True)
+    lines: list[str] = []
+    ok = True
+    for url in config.PUBLIC_URLS:
+        problem = selfcheck.check(url)
+        if problem:
+            lines.append(f"Same-origin route: {problem}")
+            ok = False
+        else:
+            lines.append(f"Same-origin route: {url} answers.")
+    return lines, ok
 
 
 def report() -> str:
@@ -136,9 +142,10 @@ def report() -> str:
     healthy &= ok
     sections.append("Media offered\n  " + "\n  ".join(lines))
 
-    line, ok = _route_line()
+    lines, ok = _route_lines()
     healthy &= ok
-    sections.append("Discovery\n  " + line.removeprefix("Same-origin route: "))
+    sections.append("Discovery\n  " + "\n  ".join(
+        line.removeprefix("Same-origin route: ") for line in lines))
 
     verdict = ("Everything this installation is configured for is answering."
                if healthy else

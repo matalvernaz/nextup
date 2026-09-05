@@ -85,8 +85,11 @@ check.that(missing is not None and "404" in missing and "Jellyfin origin" in mis
 # like, and it must not read as a working route.
 imposter = answering(lambda req: httpx.Response(
     200, json={"service": "jellyfin"}, request=req))
-check.that(imposter is not None and "not this service" in imposter,
-           "somebody else answering 200 is not this service answering")
+check.that(imposter is not None and "'jellyfin'" in imposter
+           and "'nextup'" in imposter,
+           "somebody else answering 200 is not this service answering, and "
+           "both names are given because with two routes watched the expected "
+           "one differs per route")
 
 challenged = answering(lambda req: httpx.Response(401, text="", request=req))
 check.that(challenged is not None and "401" in challenged,
@@ -105,10 +108,24 @@ check.that(unreachable is not None and "could not be reached" in unreachable,
 # and it must cost that install nothing at all.
 import threading  # noqa: E402
 
-config.PUBLIC_URL = ""
+config.PUBLIC_URLS = []
 selfcheck.watch()
 check.that(not any(t.name == "same-origin-check" for t in threading.enumerate()),
            "no PUBLIC_URL means no thread and no requests")
+
+# --- more than one route, because this deployment answers the old prefix too --
+#
+# The second route is the one whose failure has no symptom at all: the books
+# row is simply absent on every client, with nothing in any log.
+check.equal(selfcheck.expected_service("https://jf.example.com/nextup"),
+            "nextup", "the ordinary prefix expects this service's name")
+check.equal(selfcheck.expected_service("https://jf.example.com/nextread/"),
+            "nextread",
+            "and the old audiobook prefix expects the old name, which is what "
+            "it really answers with -- comparing it against this service's "
+            "name would report a working route as somebody else's")
+check.equal(selfcheck.expected_service("https://nextup.example.com"),
+            "nextup", "a bare host is this service")
 
 harness.cleanup()
 raise SystemExit(check.report())

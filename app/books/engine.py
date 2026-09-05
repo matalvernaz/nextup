@@ -844,8 +844,9 @@ def _keyword_candidates(queries: list[str], owned_check) -> dict[str, dict]:
 
 
 def _playlist_name(user: jellyfin.User) -> str:
-    """Keep the legacy user's playlist stable; make every other name unique."""
-    if user.is_configured_user:
+    """Keep the owning account's playlist stable; make every other name unique."""
+    owner = config.PLAYLIST_OWNER
+    if owner and user.name.casefold() == owner.casefold():
         return config.PLAYLIST_NAME
     return f"{config.PLAYLIST_NAME} — {user.name}"
 
@@ -1053,9 +1054,16 @@ def run(user: jellyfin.User, update_playlist: bool = True) -> dict:
     playlist_id = None
     playlist_name = _playlist_name(user)
     if update_playlist:
-        playlist_id = jellyfin.set_playlist(
-            user.id, playlist_name, [r["id"] for r in own]
-        )
+        # Best-effort: the playlist is a second way of reading a shelf that has
+        # already been built, and this now runs on the request that serves it.
+        # Losing it costs one account its Jellyfin-side list; raising here
+        # would cost them the shelf as well, and throw away the build.
+        try:
+            playlist_id = jellyfin.set_playlist(
+                user.id, playlist_name, [r["id"] for r in own]
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not write the playlist user=%s: %s", user.key, exc)
 
     log.info("run user=%s library=%d seeds=%d ratings=%d blend=%.2f "
              "own=%d unowned=%d playlist=%s",
