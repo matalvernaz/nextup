@@ -1,0 +1,57 @@
+# Nextup, on its own port, with no reverse proxy and nothing else required.
+#
+# Copy `.env.example` to `.env`, put a Jellyfin API key in it, fill in whichever
+# of Radarr, Sonarr, Listenarr and buskarr you actually run, and:
+#
+#   docker compose run --rm nextup python -m app.doctor   # says what is wrong
+#   docker compose up -d
+#
+# Then open http://<this machine>:8099 and sign in with your Jellyfin username
+# and password. Nextup has no accounts of its own.
+#
+# Every backend is optional and independently so. With only Radarr configured
+# this serves films and says nothing whatever about series, music or books.
+#
+# For a deployment behind Traefik with a sign-in proxy in front, see
+# compose.traefik.yaml instead.
+services:
+  nextup:
+    image: ghcr.io/matalvernaz/nextup:latest
+    container_name: nextup
+    restart: unless-stopped
+    ports:
+      # Host port only. Put HTTPS in front of this before exposing it beyond
+      # your own network: the browser sign-in sends a Jellyfin password, and
+      # over plain HTTP it crosses the network as typed. The page says so.
+      - "${NEXTUP_PORT:-8099}:8080"
+    env_file: .env
+    environment:
+      # `host.docker.internal` resolves to this machine from inside the
+      # container, which is what a Jellyfin published on the host looks like.
+      # Change it to a container name if Jellyfin is on the same Docker
+      # network. Never `localhost`: inside a container that is the container.
+      JELLYFIN_URL: "${JELLYFIN_URL:-http://host.docker.internal:8096}"
+      DB_PATH: /data/nextup.db
+      TZ: "${TZ:-UTC}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # A named volume, not a bind mount. A bind mount has to be chowned to the
+      # container's user before it will start, and the error when it has not
+      # been is `sqlite3.OperationalError: unable to open database file`, which
+      # names neither the directory nor the permission.
+      - nextup-data:/data
+    healthcheck:
+      # Deliberately not a check on the acquisition tools. One of them being
+      # down is not this container's ill health, and reporting it that way
+      # would drop the container out of a proxy's rotation over somebody
+      # else's outage. A Jellyfin key this service's own requests are refused
+      # with is different, and that is what this catches.
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/healthz',timeout=5).status==200 else 1)\""]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  nextup-data:
