@@ -19,10 +19,18 @@ from . import config, logs
 
 log = logs.get("jellyfin")
 
-_HEADERS = {
-    "Authorization": f'MediaBrowser Token="{config.JELLYFIN_TOKEN}"',
-    "Accept": "application/json",
-}
+def _headers() -> dict:
+    """This service's own credential, read now rather than at import.
+
+    It was a module-level dict, and that made the setup page a lie: signing in
+    stored a credential, every later call went on using the empty string this
+    was built from at boot, and nothing worked until somebody restarted the
+    container. A fresh install is precisely the case with no token at import.
+    """
+    return {
+        "Authorization": f'MediaBrowser Token="{config.JELLYFIN_TOKEN}"',
+        "Accept": "application/json",
+    }
 
 _TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 
@@ -91,7 +99,7 @@ class Owned:
 
 
 def _client() -> httpx.Client:
-    return httpx.Client(base_url=config.JELLYFIN_URL, headers=_HEADERS,
+    return httpx.Client(base_url=config.JELLYFIN_URL, headers=_headers(),
                         timeout=_TIMEOUT)
 
 
@@ -120,7 +128,7 @@ def credential_rejected() -> bool:
     the health state on somebody else's restart.
     """
     try:
-        with httpx.Client(base_url=config.JELLYFIN_URL, headers=_HEADERS,
+        with httpx.Client(base_url=config.JELLYFIN_URL, headers=_headers(),
                           timeout=_CREDENTIAL_TIMEOUT) as c:
             resp = c.get("/System/Info")
     except httpx.HTTPError:

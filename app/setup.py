@@ -248,24 +248,42 @@ def _make_api_key(token: str) -> str | None:
     try:
         with httpx.Client(base_url=base, headers=headers,
                           timeout=backends.PROBE_TIMEOUT) as c:
+            # Read first, so the new key can be told from any this service
+            # made on a previous setup. Jellyfin's POST answers 204 with no
+            # body, so the only way to learn the key is to list them -- and
+            # "the last one" is a guess about ordering rather than a promise.
+            # Setting this up twice is a documented path, so that guess would
+            # eventually hand back a stale key and call it new.
+            before = _key_tokens(c)
             created = c.post("/Auth/Keys", params={"app": config.SERVICE_NAME})
             if created.status_code >= 400:
                 log.info("Jellyfin would not issue an API key (%d); using the "
                          "sign-in token instead", created.status_code)
                 return None
-            listed = c.get("/Auth/Keys").raise_for_status().json()
+            after = _key_tokens(c)
     except (httpx.HTTPError, ValueError) as exc:
         log.info("could not ask Jellyfin for an API key (%s); using the "
                  "sign-in token instead", exc)
         return None
+    fresh = [token for token in after if token not in before]
+    if len(fresh) != 1:
+        # Nothing appeared, or more than one did and there is no telling
+        # which is this one. The sign-in token works, so guessing here would
+        # trade a credential that works for one that might not.
+        log.info("could not identify the API key just created (%d new); "
+                 "using the sign-in token instead", len(fresh))
+        return None
+    log.info("Jellyfin issued an API key for this service")
+    return fresh[0]
+
+
+def _key_tokens(client) -> set[str]:
+    """Every API key Jellyfin currently holds for this service, by token."""
+    listed = client.get("/Auth/Keys").raise_for_status().json()
     rows = listed.get("Items") if isinstance(listed, dict) else listed
-    for row in reversed(rows or []):
-        if isinstance(row, dict) and row.get("AppName") == config.SERVICE_NAME:
-            key = row.get("AccessToken")
-            if key:
-                log.info("Jellyfin issued an API key for this service")
-                return str(key)
-    return None
+    return {str(row["AccessToken"]) for row in rows or []
+            if isinstance(row, dict) and row.get("AccessToken")
+            and row.get("AppName") == config.SERVICE_NAME}
 
 
 def needs_setup() -> bool:

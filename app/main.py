@@ -299,16 +299,24 @@ async def post_backends(request: Request):
                 "Changing where this connects needs a Jellyfin administrator "
                 "account."), status_code=303)
     form = await request.form()
-    refused = setup.save({key: str(value) for key, value in form.items()})
+    submitted = {key: str(value) for key, value in form.items()}
+    refused = setup.save(submitted)
     # Probed straight away rather than on the next page load. "Saved" is not
     # the news anybody wants; "and it answers" is.
     backends.forget()
+    # Only about the backend whose fields were on this form. Every form on the
+    # page posts here, and reporting all four would put three unrelated
+    # "could not be reached" sentences into a live region after somebody saved
+    # one -- burying the answer to the question they actually asked.
+    touched = {name.split("_", 1)[0].lower() for name in submitted
+               if "_" in name and name in settings.WRITABLE}
     said = []
     for status in backends.statuses(force=True):
-        if status.configured:
-            said.append(f"{status.name}: "
-                        + ("answered." if status.reachable
-                           else status.detail or "did not answer."))
+        if status.name not in touched or not status.configured:
+            continue
+        said.append(f"{status.name}: "
+                    + ("answered." if status.reachable
+                       else status.detail or "did not answer."))
     message = " ".join(refused + said) or "Saved."
     return RedirectResponse(url=f"/backends?msg={quote(message)}",
                             status_code=303)

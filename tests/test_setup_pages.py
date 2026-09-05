@@ -87,6 +87,14 @@ check.that("access token" in ok.headers.get("location", "")
            or "access%20token" in ok.headers.get("location", ""),
            "and the fallback credential is named rather than hidden")
 
+# The credential has to be picked up by the very next Jellyfin call. It was
+# baked into a module-level header dict at import, so on a fresh install --
+# the only kind that reaches this page -- setup stored a token and every later
+# call went on using the empty string from boot. Nothing worked until somebody
+# restarted the container, which no page said and nothing logged.
+check.that('token-for-matt' in jellyfin._headers()["Authorization"],
+           "the credential just stored is the one the next call will use")
+
 # --- the backends page is administrators only --------------------------------
 jellyfin.user_from_token = lambda token: (
     ADMIN if token == "token-for-matt" else MEMBER)
@@ -117,6 +125,14 @@ check.equal(config.RADARR_QUALITY_PROFILE_ID, 4,
             "and the profile, as a number")
 check.that("answered" in saved.headers.get("location", ""),
            "and the answer is whether it responded, not merely that it saved")
+check.that("radarr" in saved.headers.get("location", ""),
+           "naming the backend that was saved")
+# Every form on the page posts to the same route. Reporting all four would put
+# three unrelated failures into a live region after somebody saved one, which
+# for a screen reader buries the answer to the question they asked.
+for other in ("sonarr", "listenarr", "buskarr"):
+    check.that(other not in saved.headers.get("location", ""),
+               f"and not {other}, which was not touched")
 
 # The registry has to have been dropped, or a saved backend would not be
 # offered until somebody restarted the container -- a page that appears to do
