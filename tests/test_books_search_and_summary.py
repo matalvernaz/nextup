@@ -1,0 +1,108 @@
+"""Direct search: owned books marked rather than hidden, and blurbs on demand."""
+import os
+import sys
+from pathlib import Path
+
+os.environ.setdefault("JELLYFIN_TOKEN", "test-token")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from tests import harness
+
+DB_PATH = harness.use("books-search")
+
+harness.discard(DB_PATH)
+
+from app import jellyfin, listenarr
+from app.books import engine, search, shelves, store, wants
+
+store.init()
+matt = jellyfin.User(id="user-matt", name="matt", is_admin=True)
+
+LIBRARY = [
+    {"Id": "1", "Name": "Demon World Boba Shop", "AlbumArtist": "RC Joshua",
+     "ProviderIds": {"Audible": "B0DCHQ9QT7"}},
+]
+shelves.owned_index = lambda user: engine._owned_index(LIBRARY)
+
+HITS = [
+    # The one already on disk, under a different edition's ASIN and the other
+    # spelling of the author.
+    {"asin": "B0EDITION2", "title": "Demon World Boba Shop",
+     "authors": [{"name": "R. C. Joshua"}], "narrators": [{"name": "A Reader"}],
+     "lengthMinutes": 700},
+    {"asin": "B0UNOWNED", "title": "Something Else Entirely",
+     "authors": [{"name": "Another Author"}], "lengthMinutes": 500},
+    # A row with no ASIN cannot be requested and must not reach the client as a
+    # tappable result.
+    {"title": "No Identifier Here", "authors": []},
+]
+listenarr.audible_search = lambda query, limit=25: list(HITS)
+
+failures = []
+
+
+def check(label, got, want):
+    if got != want:
+        failures.append(f"{label}: got {got!r}, wanted {want!r}")
+
+
+results = search.search(matt, "boba")
+check("asin-less row dropped", len(results), 2)
+by_asin = {r["asin"]: r for r in results}
+check("owned marked, not hidden", by_asin["B0EDITION2"]["owned"], True)
+check("owned still listed", "B0EDITION2" in by_asin, True)
+check("unowned is unowned", by_asin["B0UNOWNED"]["owned"], False)
+check("authors flattened", by_asin["B0EDITION2"]["authors"], ["R. C. Joshua"])
+check("narrators flattened", by_asin["B0EDITION2"]["narrators"], ["A Reader"])
+check("runtime carried", by_asin["B0EDITION2"]["runtimeMinutes"], 700)
+check("no blurb in a search row", "description" in by_asin["B0UNOWNED"], False)
+
+check("empty query asks nothing", search.search(matt, "   "), [])
+
+# An outstanding request is flagged; one that has arrived is described by
+# `owned` instead, so the two never both claim the book.
+store.record_request(matt.key, "B0UNOWNED", "Something Else Entirely")
+check("outstanding request flagged",
+      {r["asin"]: r["requested"] for r in search.search(matt, "boba")}["B0UNOWNED"], True)
+
+# --- summaries ------------------------------------------------------------
+
+search.store_backed_product = lambda asin: {
+    "title": "Demon World Boba Shop",
+    "authors": [{"name": "RC Joshua"}],
+    "runtime_length_min": 700,
+    "merchandising_summary": "short",
+    "publisher_summary": "the longer one",
+}
+got = search.summary("B0DCHQ9QT7")
+check("prefers the longer blurb", got["summary"], "the longer one")
+check("summary carries the title", got["title"], "Demon World Boba Shop")
+
+search.store_backed_product = lambda asin: None
+check("no product is empty text, not a crash", search.summary("B0MISSING")["summary"], "")
+
+# Both blurbs are HTML, and every surface that shows one renders it as text --
+# `textContent` on the search page, a SwiftUI `Text` in EchoFin -- so the tags
+# were being read out as words.
+search.store_backed_product = lambda asin: {
+    "title": "Ironbound",
+    "publisher_summary":
+        "<p><i>An action-packed epic from </i>Somebody<i>.</i></p> "
+        "<p><b>In the Iron Empire, only the strongest Ascend.</b></p>"
+        "<p>Castor &amp; the Cor Heart&mdash;a trial.<br>Then the attack.</p>",
+}
+got = search.summary("B0FQ65NC2F")["summary"]
+check("no markup survives", "<" in got, False)
+check("entities are resolved", "&amp;" in got or "&mdash;" in got, False)
+check("paragraphs become breaks", got.count("\n\n"), 3)
+check("the text itself is intact",
+      got.splitlines()[0], "An action-packed epic from Somebody.")
+check("a line break inside a paragraph is one too",
+      got.endswith("a trial.\n\nThen the attack."), True)
+
+if failures:
+    print("FAIL")
+    for f in failures:
+        print("  " + f)
+    sys.exit(1)
+print("test_search_and_summary: all checks passed")

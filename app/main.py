@@ -5,8 +5,12 @@ path that does something. That is not minimalism for its own sake -- a screen
 reader is the primary interface here, and a page that has already finished
 rendering when it arrives is one a reader can simply read.
 
-Identity for these pages comes from the sign-in proxy's forwarded header.
-Identity for the JSON API does not, and never may: see `api.caller`.
+Identity for these pages comes from three places, in this order: a
+forward-auth proxy's header where one is in front, then this app's own signed
+session cookie, then the configured single-user fallback. The middle one is
+what makes the pages usable on an installation with no proxy at all -- see
+`app/sessions.py`. Identity for the JSON API comes from none of them and never
+may: see `api.caller`.
 """
 import os
 from contextlib import asynccontextmanager
@@ -17,7 +21,8 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import api, config, jellyfin, logs, media, selfcheck, store, wants
+from . import (api, backends, compat_nextread, config, jellyfin, logs, media,
+               selfcheck, sessions, settings, setup, store, wants)
 
 log = logs.get("main")
 
@@ -39,6 +44,13 @@ def _rekey_ledger_once() -> None:
     """
     if store.user_key_scheme() == "id":
         return
+    if store.ledger_is_empty():
+        # Nothing to move, so nothing to ask Jellyfin about. Without this a
+        # fresh install whose Jellyfin is not up yet -- the ordinary ordering
+        # on a one-box bring-up -- dies in lifespan and restart-loops, on a
+        # migration of zero rows.
+        store.set_user_key_scheme("id")
+        return
     try:
         names = jellyfin.all_users()
     except Exception as exc:
@@ -48,7 +60,19 @@ def _rekey_ledger_once() -> None:
 
 
 app = FastAPI(title="nextup", lifespan=lifespan)
+
+# One API, answered on three prefixes, because a client's address is derived
+# rather than typed. EchoFin resolves it as
+# `override ?? companion + "/nextup" ?? jellyfinOrigin + "/nextup"` and then
+# appends `/api/v1/...`, so a direct address arrives at the first of these and
+# every derived one at the second.
 app.include_router(api.router)
+app.include_router(api.router, prefix="/nextup")
+
+# The audiobook service's own protocol, at the prefix its clients derive. Not
+# a translation layer over this API: mostly its original handlers, mounted
+# here and calling the engine from its new home. See the module.
+app.include_router(compat_nextread.router)
 
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS", "TRACE"}
 
@@ -96,14 +120,96 @@ store.init()
 
 
 def viewer(request: Request) -> jellyfin.User:
-    """Who is looking at this page, according to the sign-in proxy.
+    """Who is looking at this page.
 
-    Falls back to `JELLYFIN_USER` so a local or direct deployment still works.
-    That fallback is why this resolver is not shared with the JSON API, which
-    is not behind the proxy: there it would hand any caller the owner's list.
+    A forward-auth proxy's header first, because where one is deployed it is
+    the authority and this app has no business second-guessing it. Then this
+    app's own session cookie, which is how an installation with no proxy signs
+    anybody in at all. Then `JELLYFIN_USER`, for a single-person deployment
+    that wants neither.
+
+    Raises `LookupError` when none of the three resolves, which the pages turn
+    into the sign-in form. That fallback chain is why this resolver is not
+    shared with the JSON API: there it would hand any caller the owner's list.
     """
     name = (request.headers.get(config.AUTH_USER_HEADER) or "").strip()
-    return jellyfin.user(name or None)
+    if name:
+        return jellyfin.user(name)
+    token = sessions.read(request.cookies.get(sessions.COOKIE_NAME))
+    if token:
+        try:
+            return jellyfin.user_from_token(token)
+        except jellyfin.TokenRejected:
+            # The cookie verified but Jellyfin has since revoked the token
+            # inside it. Signing out is the honest answer; carrying on to the
+            # configured fallback would silently show one account's list to
+            # whoever's session had just expired.
+            log.info("a session's Jellyfin token is no longer accepted")
+            raise LookupError("Your session has expired. Please sign in again.")
+    return jellyfin.user(config.JELLYFIN_USER or None)
+
+
+def _signin_page(request: Request, detail: str = "", status: int = 200):
+    """The sign-in form, and why it is being shown."""
+    proxied = bool(request.headers.get(config.AUTH_USER_HEADER))
+    return templates.TemplateResponse(
+        request=request, name="signin.html", status_code=status,
+        context={
+            "detail": detail,
+            "proxied": proxied,
+            "encrypted": sessions.is_secure(
+                request.headers.get("x-forwarded-proto"), request.url.scheme),
+            "configured_user": bool(config.JELLYFIN_USER),
+        })
+
+
+@app.get("/signin", response_class=HTMLResponse)
+def get_signin(request: Request, msg: str = ""):
+    return _signin_page(request, detail=msg)
+
+
+@app.post("/signin")
+def post_signin(request: Request, username: str = Form(""),
+                password: str = Form("")):
+    """Sign in against Jellyfin and keep the token it hands back.
+
+    No password is stored, logged, or sent anywhere but Jellyfin. What is kept
+    is the access token, in a cookie this app signs.
+    """
+    try:
+        cookie, user = sessions.sign_in(username.strip(), password)
+    except jellyfin.TokenRejected as exc:
+        return _signin_page(request, detail=str(exc), status=401)
+    except jellyfin.JellyfinUnavailable as exc:
+        return _signin_page(
+            request,
+            detail=f"Jellyfin could not be reached, so nobody can sign in "
+                   f"yet. ({exc})",
+            status=503)
+    response = RedirectResponse(url="/", status_code=303)
+    response.set_cookie(
+        sessions.COOKIE_NAME, cookie, max_age=sessions.SESSION_SECONDS,
+        httponly=True, samesite="lax",
+        # Only where the request really arrived over HTTPS. Setting it on a
+        # plain-HTTP install would stop the cookie coming back at all, and a
+        # first installation on a home network is exactly that install.
+        secure=sessions.is_secure(
+            request.headers.get("x-forwarded-proto"), request.url.scheme))
+    log.info("session started for %s", user.key)
+    return response
+
+
+@app.post("/signout")
+def post_signout(request: Request):
+    """Forget this browser's session. Jellyfin's own token is left alone.
+
+    Deliberately not a Jellyfin sign-out: the same account may be signed in on
+    a phone with the same token, and closing a browser tab is no reason to
+    stop somebody's audiobook.
+    """
+    response = RedirectResponse(url="/signin", status_code=303)
+    response.delete_cookie(sessions.COOKIE_NAME)
+    return response
 
 
 @app.get("/healthz", response_class=PlainTextResponse)
@@ -126,16 +232,109 @@ def healthz(response: Response) -> str:
     return "ok"
 
 
+@app.get("/setup", response_class=HTMLResponse)
+def get_setup(request: Request, msg: str = ""):
+    """Connect to Jellyfin. The only step a first run cannot skip."""
+    return templates.TemplateResponse(
+        request=request, name="setup.html",
+        context={
+            "message": msg,
+            "jellyfin_url": config.JELLYFIN_URL,
+            "locked": settings.held_in_environment("JELLYFIN_TOKEN"),
+            "connected": not setup.needs_setup(),
+        })
+
+
+@app.post("/setup")
+def post_setup(request: Request, jellyfin_url: str = Form(""),
+               username: str = Form(""), password: str = Form("")):
+    try:
+        message = setup.connect_jellyfin(jellyfin_url, username, password)
+    except jellyfin.TokenRejected as exc:
+        return RedirectResponse(url=f"/setup?msg={quote(str(exc))}",
+                                status_code=303)
+    except jellyfin.JellyfinUnavailable as exc:
+        return RedirectResponse(
+            url=f"/setup?msg={quote(f'That Jellyfin could not be reached. {exc}')}",
+            status_code=303)
+    return RedirectResponse(url=f"/backends?msg={quote(message)}",
+                            status_code=303)
+
+
+@app.get("/backends", response_class=HTMLResponse)
+def get_backends(request: Request, msg: str = ""):
+    """Which acquisition tools this household runs, and whether they answer."""
+    if setup.needs_setup():
+        return RedirectResponse(url="/setup", status_code=303)
+    try:
+        user = viewer(request)
+    except LookupError as exc:
+        return _signin_page(request, detail=str(exc), status=401)
+    if not user.is_admin:
+        # A member pointing the household's install at their own Radarr is not
+        # a threat model worth leaving open for the sake of one fewer check.
+        return templates.TemplateResponse(
+            request=request, name="backends.html", status_code=403,
+            context={"user": user, "forms": (), "message":
+                     "Changing where this connects needs a Jellyfin "
+                     "administrator account.", "readonly": True})
+    return templates.TemplateResponse(
+        request=request, name="backends.html",
+        context={"user": user, "forms": setup.forms(), "message": msg,
+                 "readonly": False})
+
+
+@app.post("/backends")
+async def post_backends(request: Request):
+    """Save one backend's settings, then show what it says for itself."""
+    if setup.needs_setup():
+        return RedirectResponse(url="/setup", status_code=303)
+    try:
+        user = viewer(request)
+    except LookupError as exc:
+        return _signin_page(request, detail=str(exc), status=401)
+    if not user.is_admin:
+        return RedirectResponse(
+            url="/backends?msg=" + quote(
+                "Changing where this connects needs a Jellyfin administrator "
+                "account."), status_code=303)
+    form = await request.form()
+    submitted = {key: str(value) for key, value in form.items()}
+    refused = setup.save(submitted)
+    # Probed straight away rather than on the next page load. "Saved" is not
+    # the news anybody wants; "and it answers" is.
+    backends.forget()
+    # Only about the backend whose fields were on this form. Every form on the
+    # page posts here, and reporting all four would put three unrelated
+    # "could not be reached" sentences into a live region after somebody saved
+    # one -- burying the answer to the question they actually asked.
+    touched = {name.split("_", 1)[0].lower() for name in submitted
+               if "_" in name and name in settings.WRITABLE}
+    said = []
+    for status in backends.statuses(force=True):
+        if status.name not in touched or not status.configured:
+            continue
+        said.append(f"{status.name}: "
+                    + ("answered." if status.reachable
+                       else status.detail or "did not answer."))
+    message = " ".join(refused + said) or "Saved."
+    return RedirectResponse(url=f"/backends?msg={quote(message)}",
+                            status_code=303)
+
+
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request, q: str = "", medium: str = "", unit: str = "",
           msg: str = ""):
     """Search, and everything this account is currently waiting for."""
+    if setup.needs_setup():
+        # Nothing can be asked of a Jellyfin this service has no credential
+        # for -- including who somebody is -- so a first run goes to the one
+        # page that does not need one.
+        return RedirectResponse(url="/setup", status_code=303)
     try:
         user = viewer(request)
     except LookupError as exc:
-        return templates.TemplateResponse(
-            request=request, name="signin.html", status_code=403,
-            context={"detail": str(exc)})
+        return _signin_page(request, detail=str(exc), status=401)
 
     offered = media.available()
     medium = medium if medium in offered else (next(iter(offered), ""))
@@ -143,7 +342,8 @@ def index(request: Request, q: str = "", medium: str = "", unit: str = "",
     unit = unit if found and unit in found.units else (
         found.units[0] if found else "")
 
-    results = wants.search(q.strip(), medium, unit) if q.strip() and found else []
+    results = (wants.search(q.strip(), medium, unit, user)
+               if q.strip() and found else [])
     return templates.TemplateResponse(
         request=request, name="index.html",
         context={

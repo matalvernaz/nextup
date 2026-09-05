@@ -96,3 +96,30 @@ class Check:
             print(f"  FAIL {failure}")
         print(f"{self.name}: {self.passed} passed, {len(self.failures)} failed")
         return 1 if self.failures else 0
+
+
+def use(name: str) -> str:
+    """Point one test at its own database, whatever the environment says.
+
+    The other shape of the same guard as `setup`, kept because the audiobook
+    suite that came across with the book engine is written against it. Named
+    rather than temporary-directoried so a failing run leaves something to
+    look at, and `discard` is what deletes it.
+    """
+    path = os.path.join(tempfile.gettempdir(), f"{TEST_DB_PREFIX}{name}.db")
+    if os.path.exists(path):
+        os.remove(path)
+    os.environ["DB_PATH"] = path
+    os.environ.setdefault("JELLYFIN_URL", "http://jellyfin.invalid:8096")
+    os.environ.setdefault("JELLYFIN_TOKEN", "test-token-not-a-real-one")
+    os.environ.setdefault("JELLYFIN_USER", "")
+    return path
+
+
+def discard(path: str) -> None:
+    """Delete a test database, and refuse anything that is not one."""
+    if not os.path.basename(path).startswith(TEST_DB_PREFIX):
+        raise SystemExit(
+            f"refusing to delete {path}: that is not a test database")
+    if os.path.exists(path):
+        os.remove(path)

@@ -17,12 +17,20 @@ from app import api, config, jellyfin  # noqa: E402
 check = harness.Check("api auth")
 
 
-def client_with(monkeypatched):
-    """A test client whose Jellyfin introspection is `monkeypatched`."""
+def client_with(monkeypatched, prefixes=False):
+    """A test client whose Jellyfin introspection is `monkeypatched`.
+
+    `prefixes` mounts the three the real application mounts, for the few
+    assertions that are about routing rather than about authentication.
+    """
     from fastapi import FastAPI
     jellyfin.user_from_token = monkeypatched
     app = FastAPI()
     app.include_router(api.router)
+    if prefixes:
+        from app import compat_nextread
+        app.include_router(api.router, prefix="/nextup")
+        app.include_router(compat_nextread.router)
     return TestClient(app, raise_server_exceptions=False)
 
 
@@ -107,8 +115,35 @@ check.equal(caps["states"], ["on_its_way", "still_looking", "in_library"],
 # server that simply does not run this.
 found = client_with(rejects).get("/api/v1/info")
 check.equal(found.status_code, 200, "/info answers without a token")
-check.equal(found.json(), {"service": "nextup", "protocol": 1},
-            "/info names the service and the protocol")
+body = found.json()
+check.equal(body["service"], "nextup", "/info names the service")
+check.equal(body["protocol"], 1,
+            "and the protocol a client that knows nothing else will read")
+check.equal(body["protocols"], [1, 2],
+            "with every shape it can answer in, which is additive")
+
+# --- three prefixes, one app -------------------------------------------------
+#
+# A client's address is derived rather than typed: an explicit override lands
+# on /api/v1, and a Companion or same-origin address on /nextup/api/v1. The
+# audiobook protocol keeps its own prefix because every build in the field
+# derives that one too, and none of them can be updated to stop.
+probe = client_with(rejects, prefixes=True)
+check.equal(probe.get("/nextup/api/v1/info").json()["service"], "nextup",
+            "the derived nextup prefix answers as nextup")
+check.equal(probe.get("/nextread/api/v1/info").json()["service"], "nextread",
+            "and the audiobook prefix answers as nextread")
+check.equal(probe.get("/nextread/api/v1/info").json()["protocol"], 1,
+            "on the frozen protocol its clients were built against")
+
+# The auth hazard holds under every prefix. The proxy header alone must never
+# resolve anybody here: these routes are not behind the proxy, so the HTML
+# resolver's fallback to JELLYFIN_USER would hand any caller the owner's list.
+for path in ("/api/v1/capabilities", "/nextup/api/v1/capabilities",
+             "/nextread/api/v1/capabilities"):
+    header_only = probe.get(path, headers={config.AUTH_USER_HEADER: "matt"})
+    check.equal(header_only.status_code, 401,
+                f"a proxy header alone is refused at {path}")
 check.that("user" not in found.json(),
            "/info says nothing about anybody, having asked for nothing")
 

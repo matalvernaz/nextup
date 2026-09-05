@@ -10,3 +10,20 @@ body { font-family: system-ui, sans-serif; line-height: 1.5; margin: 0 auto;
 .owned { font-style: italic; }
 button { font-size: 1rem; padding: 0.4rem 0.8rem; }
 input[type="text"], select { font-size: 1rem; padding: 0.3rem; min-width: 18rem; }
+
+/* The sign-out control sits in the same line as who is signed in, without
+   becoming a separate landmark a reader has to pass through. */
+.signout {
+    display: inline;
+}
+
+.signout button {
+    font: inherit;
+}
+
+/* Guidance under a field, read by a screen reader as part of the field's
+   description rather than as loose text after it. */
+.help {
+    display: block;
+    font-size: 0.9em;
+}

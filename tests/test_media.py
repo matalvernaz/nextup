@@ -10,9 +10,17 @@ import harness
 harness.setup(RADARR_URL="http://radarr.invalid", RADARR_API_KEY="k",
               RADARR_QUALITY_PROFILE_ID="6")
 
-from app import config, jellyfin, media  # noqa: E402
+from app import backends, config, jellyfin, media  # noqa: E402
 
 check = harness.Check("media")
+
+# The registry asks whether a configured backend is actually answering, and
+# `radarr.invalid` never will. That question is tested on its own in
+# test_backends.py; here it is held to "yes" so this file stays about the
+# library ids, and turned back on at the end.
+REACHABLE = backends.Status("movie", "radarr", configured=True, reachable=True)
+backends.status = lambda medium, force=False: (
+    REACHABLE if medium == "movie" else None)
 
 LIBRARIES: dict[str, list[str]] = {"movie": []}
 
@@ -73,6 +81,29 @@ asked = []
 media.jellyfin.library_ids = lambda medium: asked.append(medium) or []
 media.available()
 check.equal(asked, [], "an unsettled registry is cached for the retry window")
+
+
+# --- a backend that is configured and not answering --------------------------
+#
+# The medium stays. Dropping it would take away the list of what somebody has
+# already asked for at exactly the moment they want to know what became of it,
+# and an acquisition tool restarting is a normal minute in a homelab.
+SILENT = backends.Status("movie", "radarr", configured=True, reachable=False,
+                         detail="http://radarr.invalid/... could not be reached")
+backends.status = lambda medium, force=False: (
+    SILENT if medium == "movie" else None)
+media.forget()
+LIBRARIES["movie"] = ["lib-films"]
+media.jellyfin.library_ids = fake_library_ids
+silent = media.available()
+check.that("movie" in silent,
+           "a medium whose backend is silent is still offered")
+check.equal(silent["movie"].backend_reachable, False,
+            "and says so rather than looking healthy")
+check.that("could not be reached" in silent["movie"].backend_detail,
+           "carrying the reason, so a client can name it")
+check.that(not media._registry_settled,
+           "an outage is not a settled fact, so it is asked again")
 
 harness.cleanup()
 raise SystemExit(check.report())

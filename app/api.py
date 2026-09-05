@@ -90,11 +90,30 @@ def info() -> dict:
     media: `/capabilities` settles those per account, and a second list here
     would be one more to keep in step for no gain.
     """
-    return {"service": config.SERVICE_NAME, "protocol": config.API_VERSION}
+    return {"service": config.SERVICE_NAME,
+            "protocol": config.API_VERSION,
+            # Additive. A shipped client reads `protocol`, ignores unknown
+            # keys, and goes on speaking 1; a newer one sees that 2 is
+            # available and asks for it. See `capabilities`.
+            "protocols": list(SUPPORTED_PROTOCOLS)}
+
+
+#: Every shape this server can answer in. 1 is what shipped: films, series and
+#: music. 2 adds books, which is the whole of the difference.
+SUPPORTED_PROTOCOLS = (1, 2)
+
+#: Media a protocol-1 client is told about. Books are withheld deliberately,
+#: and not because a fourth medium would fail to decode -- it decodes fine. A
+#: books library named for requests here, while the audiobook protocol also
+#: names it for recommendations, makes a shipped client draw two rows for the
+#: one feature from the one server. The merge exists to stop that, not to ship
+#: it to builds already in the field.
+PROTOCOL_1_MEDIA = ("movie", "series", "music")
 
 
 @router.get("/capabilities")
-def capabilities(user: jellyfin.User = Depends(caller)) -> dict:
+def capabilities(protocol: int = 1,
+                 user: jellyfin.User = Depends(caller)) -> dict:
     """What this server serves, and what this account may ask for.
 
     Reports configured support rather than live reachability. A probe would
@@ -107,8 +126,22 @@ def capabilities(user: jellyfin.User = Depends(caller)) -> dict:
     is how a deployment with only Radarr in it says "films, and nothing else"
     without the client knowing anything about acquisition tools.
     """
+    if protocol not in SUPPORTED_PROTOCOLS:
+        # Refused rather than served the nearest shape. A client asking for a
+        # protocol this server does not have is either newer than the server
+        # or has a typo, and quietly handing it the legacy answer would make
+        # both of those look like a server that simply has fewer media.
+        raise HTTPException(
+            status_code=400,
+            detail=f"This server speaks protocol "
+                   f"{', '.join(str(v) for v in SUPPORTED_PROTOCOLS)}, "
+                   f"not {protocol}.")
+    offered = media.available()
+    if protocol == 1:
+        offered = {key: value for key, value in offered.items()
+                   if key in PROTOCOL_1_MEDIA}
     blocks = []
-    for found in media.available().values():
+    for found in offered.values():
         blocks.append({
             "medium": found.key,
             "label": found.label,
@@ -165,7 +198,7 @@ def get_search(medium: str, q: str = "", unit: str = "",
         raise HTTPException(
             status_code=404, detail=f"This server does not serve {medium}.")
     query = q.strip()
-    results = wants.search(query, medium, unit) if query else []
+    results = wants.search(query, medium, unit, user) if query else []
     log.info("search user=%s medium=%s unit=%s q=%r hits=%d",
              user.key, medium, unit or "-", query, len(results))
     return {"version": config.API_VERSION, "medium": medium,

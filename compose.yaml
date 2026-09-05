@@ -1,0 +1,63 @@
+# Nextup, on its own port, with no reverse proxy and nothing to configure first.
+#
+#   docker compose up -d
+#
+# Then open http://<this machine>:8099. It asks for a Jellyfin administrator
+# sign-in, obtains a credential of its own, and then asks which of Radarr,
+# Sonarr, Listenarr and buskarr you run -- testing each and listing its quality
+# profiles for you. Everybody else signs in with their own Jellyfin account.
+#
+# Every backend is optional and independently so. With only Radarr connected
+# this serves films and says nothing whatever about series, music or books;
+# with none at all it still recommends from what Jellyfin already holds.
+#
+# `.env` is optional and overrides the pages -- see .env.example. For a
+# deployment behind Traefik with a sign-in proxy in front, see
+# compose.traefik.yaml.
+services:
+  nextup:
+    image: ghcr.io/matalvernaz/nextup:latest
+    container_name: nextup
+    restart: unless-stopped
+    ports:
+      # Host port only. Put HTTPS in front of this before exposing it beyond
+      # your own network: the browser sign-in sends a Jellyfin password, and
+      # over plain HTTP it crosses the network as typed. The page says so.
+      - "${NEXTUP_PORT:-8099}:8080"
+    env_file:
+      # Optional, and the reason this file works on its own: everything in it
+      # can be set from Nextup's own pages instead. Compose refuses to start
+      # over a missing env_file unless it is told not to.
+      - path: .env
+        required: false
+    environment:
+      # Passed through only when you actually set it, with no default here.
+      # A default would put JELLYFIN_URL in the environment on every install,
+      # and the environment beats the pages by design -- so the setup page
+      # would show the address it was asking for as locked, and refuse to save
+      # the one you typed. The prefilled value comes from the app instead.
+      JELLYFIN_URL: "${JELLYFIN_URL:-}"
+      DB_PATH: /data/nextup.db
+      TZ: "${TZ:-UTC}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # A named volume, not a bind mount. A bind mount has to be chowned to the
+      # container's user before it will start, and the error when it has not
+      # been is `sqlite3.OperationalError: unable to open database file`, which
+      # names neither the directory nor the permission.
+      - nextup-data:/data
+    healthcheck:
+      # Deliberately not a check on the acquisition tools. One of them being
+      # down is not this container's ill health, and reporting it that way
+      # would drop the container out of a proxy's rotation over somebody
+      # else's outage. A Jellyfin key this service's own requests are refused
+      # with is different, and that is what this catches.
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/healthz',timeout=5).status==200 else 1)\""]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  nextup-data:

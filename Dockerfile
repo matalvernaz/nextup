@@ -14,4 +14,6 @@ RUN useradd -u 1000 -m nextup && mkdir -p /data && chown nextup:nextup /data
 USER nextup
 
 EXPOSE 8080
+# The doctor is reachable as `docker compose run --rm nextup python -m app.doctor`
+# without overriding anything else about the image.
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]

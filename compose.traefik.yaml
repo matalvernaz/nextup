@@ -1,6 +1,18 @@
-# Copy to compose.yaml, fill in the parts your server actually has, and delete
-# the rest. Every backend is optional: with only Radarr configured this serves
-# films and says nothing at all about series or music.
+# Nextup behind Traefik, with a sign-in proxy in front of the browser pages.
+#
+# This is the advanced arrangement, not the starting one. If you do not already
+# run Traefik with an external `traefik` network and an `sso@file` middleware,
+# use compose.yaml instead -- it publishes a port, needs no proxy, and signs
+# people in against Jellyfin itself.
+#
+# Run it in place rather than copying over compose.yaml, which is the simple
+# one and is tracked:
+#
+#   docker compose -f compose.traefik.yaml up -d
+#
+# Fill in the parts your server actually has and delete the rest. Every backend
+# is optional: with only Radarr configured this serves films and says nothing
+# at all about series, music or books.
 services:
   nextup:
     image: ghcr.io/matalvernaz/nextup:latest

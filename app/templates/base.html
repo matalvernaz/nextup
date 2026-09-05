@@ -10,7 +10,16 @@
 <a class="skip" href="#main">Skip to main content</a>
 <header>
   <h1>Nextup</h1>
-  {% if user is defined %}<p class="who">Signed in as {{ user.name }}.</p>{% endif %}
+  {% if user is defined %}
+  <p class="who">
+    Signed in as {{ user.name }}.
+    {# A form and not a link: signing out changes something, and a GET that
+       changes something is one a browser may make on its own. #}
+    <form method="post" action="/signout" class="signout">
+      <button type="submit">Sign out {{ user.name }}</button>
+    </form>
+  </p>
+  {% endif %}
 </header>
 {#
   The live region is rendered on every page whether or not there is anything in
