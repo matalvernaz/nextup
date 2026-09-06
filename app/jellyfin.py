@@ -35,6 +35,12 @@ def _headers() -> dict:
 
 _TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 
+#: How many items one listing request asks for. Every library this has been
+#: pointed at fits in one page, so the paging below costs nothing on them; it
+#: exists so that a library which does not still gets a right answer instead of
+#: a short one.
+_PAGE = 5000
+
 # The credential check answers a health endpoint, and the container's health
 # probe gives that endpoint ten seconds. The ordinary timeout would spend all
 # of them waiting on a server that is merely slow.
@@ -345,15 +351,14 @@ def recommendation_items_for_user(
     try:
         with _client() as c:
             for library in libraries:
-                data = c.get("/Items", params={
+                for item in _all_items(c, {
                     "parentId": library,
                     "includeItemTypes": item_type,
                     "recursive": "true",
                     "fields": fields,
                     "userId": uid,
-                    "limit": 10000,
-                }).raise_for_status().json()
-                for item in data.get("Items", []):
+                    "limit": _PAGE,
+                }):
                     if item_id := item.get("Id"):
                         found[normalise_id(item_id)] = item
     except (httpx.HTTPError, ValueError) as exc:
@@ -372,15 +377,13 @@ def _items(medium: str, item_type: str, fields: str) -> list[dict]:
     try:
         with _client() as c:
             for lib in libraries:
-                params = {
+                out.extend(_all_items(c, {
                     "parentId": lib,
                     "includeItemTypes": item_type,
                     "recursive": "true",
                     "fields": fields,
-                    "limit": 10000,
-                }
-                data = c.get("/Items", params=params).raise_for_status().json()
-                out.extend(data.get("Items", []))
+                    "limit": _PAGE,
+                }))
     except httpx.HTTPError as exc:
         # Raised, not swallowed into an empty list, for the same reason
         # `library_ids` raises: an empty index is a settled fact about a
@@ -391,6 +394,39 @@ def _items(medium: str, item_type: str, fields: str) -> list[dict]:
         log.error("library index for %s failed (%s)", medium, exc)
         raise JellyfinUnavailable(str(exc)) from exc
     return out
+
+
+def _all_items(client: httpx.Client, params: dict) -> list[dict]:
+    """Every item matching `params`, following Jellyfin's paging to the end.
+
+    `limit` bounds a page, not an answer, and a listing that stopped at the
+    first page was a silent wrong answer rather than a slow one: books past the
+    cap read as not owned, so the library offered to acquire things it already
+    held. The book library here is 3,352 items against a 5,000 page, which is
+    close enough that the failure was a matter of time.
+
+    One request for a library that fits in a page, which is every library this
+    has ever been pointed at -- `TotalRecordCount` says whether there is more
+    before anything asks for it.
+    """
+    collected: list[dict] = []
+    start = 0
+    while True:
+        page = dict(params, startIndex=start)
+        data = client.get("/Items", params=page).raise_for_status().json()
+        items = data.get("Items") or []
+        collected.extend(items)
+        total = data.get("TotalRecordCount")
+        if not items or total is None or len(collected) >= total:
+            if total is not None and len(collected) < total:
+                # A page that came back empty while Jellyfin still claims more.
+                # Stopping is right -- looping would not end -- but the answer
+                # is short and nothing else would say so.
+                log.error("library listing stopped at %d of %d items that "
+                          "Jellyfin reports; the rest will read as absent",
+                          len(collected), total)
+            return collected
+        start = len(collected)
 
 
 def _provider(item: dict, name: str) -> str:
@@ -429,15 +465,14 @@ def books(uid: str) -> list[dict]:
     try:
         with _client() as c:
             for lib in libraries:
-                data = c.get("/Items", params={
+                out.extend(_all_items(c, {
                     "parentId": lib,
                     "includeItemTypes": "AudioBook",
                     "recursive": "true",
                     "fields": _BOOK_FIELDS,
                     "userId": uid,
-                    "limit": 5000,
-                }).raise_for_status().json()
-                out.extend(data.get("Items", []))
+                    "limit": _PAGE,
+                }))
     except (httpx.HTTPError, ValueError) as exc:
         # Raised rather than returned empty. An empty book library is what
         # tells the engine there is nothing to recommend, and reporting an
