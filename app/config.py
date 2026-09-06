@@ -13,7 +13,7 @@ def _text(name: str, default: str = "") -> str:
 
 
 def _int(name: str, default: int) -> int:
-    """A whole number from the environment, or the default when it is unset.
+    """A whole number, not below zero, from the environment.
 
     A value that is present but will not parse raises. Reading
     `RADARR_QUALITY_PROFILE_ID=six` as the default of 0 instead disqualifies
@@ -21,15 +21,25 @@ def _int(name: str, default: int) -> int:
     so films stop being offered at all, on a container that starts, reports
     healthy and logs only that a backend is not configured. A container that
     refuses to start and names the variable is far easier to find.
+
+    A negative number is refused for the same reason rather than a different
+    one. Nothing here has a meaning below zero, and each one fails in its own
+    quiet way: a negative cap reads as an allowance of nothing and refuses every
+    request, a negative interval kills the upkeep thread on its first sleep, and
+    a negative window hides every row it was meant to show. None of those says
+    anything about the setting that caused it.
     """
     raw = _text(name)
     if not raw:
         return default
     try:
-        return int(raw)
+        value = int(raw)
     except ValueError:
         raise RuntimeError(
             f"{name} must be a whole number, not {raw!r}") from None
+    if value < 0:
+        raise RuntimeError(f"{name} cannot be negative, and is {value}")
+    return value
 
 
 def _ids(name: str) -> list[str]:

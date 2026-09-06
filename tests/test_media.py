@@ -154,5 +154,64 @@ media.jellyfin.owned_index = unavailable
 check.equal(media.owned(force=True).movie_tmdb, frozenset({"1"}),
             "and served through an outage rather than replaced by an empty one")
 
+# --- a listing follows Jellyfin's paging to the end --------------------------
+# `limit` bounds a page, not an answer. Stopping at the first one was a silent
+# wrong answer rather than a slow one: books past the cap read as not owned, so
+# the library offered to acquire things it already held. 3,352 books here
+# against a 5,000 page.
+class FakeClient:
+    """Answers /Items in pages, and counts how many times it was asked."""
+
+    def __init__(self, total, page):
+        self.total, self.page, self.calls = total, page, 0
+
+    def get(self, _path, params):
+        self.calls += 1
+        start = params.get("startIndex", 0)
+        items = [{"Id": str(n)} for n in
+                 range(start, min(start + params["limit"], self.total))]
+        return FakeResponse({"Items": items, "TotalRecordCount": self.total})
+
+
+class FakeResponse:
+    def __init__(self, body):
+        self._body = body
+
+    def raise_for_status(self):
+        return self
+
+    def json(self):
+        return self._body
+
+
+one_page = FakeClient(total=3352, page=5000)
+got = jellyfin._all_items(one_page, {"limit": 5000})
+check.equal(len(got), 3352, "a library inside one page comes back whole")
+check.equal(one_page.calls, 1, "and costs exactly one request, as it always did")
+
+many = FakeClient(total=12000, page=5000)
+got = jellyfin._all_items(many, {"limit": 5000})
+check.equal(len(got), 12000, "a library larger than a page comes back whole too")
+check.equal(len({item["Id"] for item in got}), 12000,
+            "with no row fetched twice")
+check.equal(many.calls, 3, "in as many requests as there are pages")
+
+# --- a setting with no meaning below zero is refused at the door -------------
+# Each negative fails in its own quiet way: a cap reads as an allowance of
+# nothing, an interval kills the upkeep thread on its first sleep, a window
+# hides every row it was meant to show. None of them names the setting.
+import os as _os  # noqa: E402
+
+_os.environ["MOVIE_DAILY_CAP"] = "-1"
+refused = None
+try:
+    config._int("MOVIE_DAILY_CAP", 3)
+except RuntimeError as exc:
+    refused = str(exc)
+del _os.environ["MOVIE_DAILY_CAP"]
+check.that(refused is not None and "cannot be negative" in refused,
+           "a negative setting refuses to start and names itself")
+check.equal(config._int("MOVIE_DAILY_CAP", 3), 3, "an unset one still defaults")
+
 harness.cleanup()
 raise SystemExit(check.report())
