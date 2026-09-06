@@ -107,24 +107,37 @@ check("withdrawn book stays withdrawn across a restart",
 # stored shelf as well, so the redirect straight afterwards had nothing to
 # serve and paid for the whole cold rebuild in front of the reader -- the exact
 # wait the button's own docstring says it exists to avoid.
-shelves._cache.clear()
-warm = shelves.result(matt, update_playlist=False)
-builds.clear()
-gate.clear()          # any rebuild now blocks, so a foreground one would hang
+
+
+def settle(user_key):
+    """Wait out any rebuild running behind an answer already served."""
+    deadline = time.time() + 5
+    while user_key in shelves._refreshing and time.time() < deadline:
+        time.sleep(0.01)
+    return user_key not in shelves._refreshing
+
+
+gate.set()
+settle(matt.key)
+warm = shelves.result(matt, force=True, update_playlist=False)
+expected = [r["asin"] for r in warm["discover"]]
+
+gate.clear()          # any rebuild from here on blocks, so a foreground one hangs
 shelves.expire(matt.key)
 served = shelves.result(matt, update_playlist=False)
 check("an expired shelf still answers at once",
-      [r["asin"] for r in served["discover"]], [r["asin"] for r in warm["discover"]])
+      [r["asin"] for r in served["discover"]], expected)
 gate.set()
+check("and the rebuild it scheduled runs behind the answer", settle(matt.key), True)
 
 shelves.invalidate(matt.key)
 check("invalidate still throws the stored copy away", store.get_shelf(matt.key), None)
 
 # --- a dismissal is one account's opinion, not the household's ---------------
 shelves._cache.clear()
-shelves.result(matt, update_playlist=False)
+shelves.result(matt, force=True, update_playlist=False)
 other = jellyfin.User(id="user-kadija", name="kadija", is_admin=False)
-shelves.result(other, update_playlist=False)
+shelves.result(other, force=True, update_playlist=False)
 shelves.forget_asin("A1", user_key=matt.key)
 check("the dismissed book leaves that account's shelf",
       [r["asin"] for r in shelves._cache[matt.key][1]["discover"]], ["A2"])
