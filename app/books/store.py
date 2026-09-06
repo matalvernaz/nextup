@@ -32,6 +32,7 @@ from ..store import (  # noqa: F401  (re-exported for the book engine)
     get_sims,
     get_vectors,
     init,
+    key_lock,
     rekey_users,
     put_audible_alias,
     put_product,
@@ -79,14 +80,35 @@ def record_request(user_key: str, asin: str, title: str,
                         authors=json.dumps(list(authors)))
 
 
+def _as_request(row) -> dict:
+    return {"asin": row["item_key"], "title": row["title"],
+            "authors": _authors_of(row["authors"]),
+            "requested_at": row["requested_at"],
+            "fulfilled_at": row["fulfilled_at"]}
+
+
 def requests_for(user_key: str) -> list[dict]:
-    """Every book this account has asked for, newest first."""
-    rows = store.active(user_key, MEDIUM, arrived_since=0.0)
-    return [{"asin": row["item_key"], "title": row["title"],
-             "authors": _authors_of(row["authors"]),
-             "requested_at": row["requested_at"],
-             "fulfilled_at": row["fulfilled_at"]}
-            for row in rows]
+    """This account's book requests worth showing: outstanding, plus arrived.
+
+    An arrival is the news, so a fulfilled row stays up for a while and then
+    falls off by itself -- the same `ARRIVED_VISIBLE_HOURS` window films,
+    series and music have used all along. This asked for everything since the
+    epoch, so a book that landed a year ago was still on the list, and the
+    service had two answers to what a request list is.
+    """
+    window = time.time() - config.ARRIVED_VISIBLE_HOURS * 3600
+    return [_as_request(row) for row in store.active(user_key, MEDIUM, window)]
+
+
+def request_row(user_key: str, asin: str) -> dict | None:
+    """One request, however old, or None.
+
+    Deliberately not filtered by the window above. That one decides what is
+    worth putting on a screen; this one decides whether asking again would be a
+    second request, and a row that has scrolled off a list is still a row.
+    """
+    row = store.get(user_key, MEDIUM, asin)
+    return _as_request(row) if row is not None else None
 
 
 def requests_since(user_key: str, cutoff: float) -> int:
@@ -112,6 +134,11 @@ def forget_request(user_key: str, asin: str) -> bool:
     it counting against the day's allowance for a book nobody is getting.
     """
     return store.forget(user_key, MEDIUM, asin)
+
+
+def release_request(user_key: str, asin: str) -> tuple[bool, set]:
+    """Drop one book request and say who else is still waiting on it."""
+    return store.release(user_key, MEDIUM, asin)
 
 
 def outstanding_request_users(asin: str) -> set:

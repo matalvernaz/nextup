@@ -77,6 +77,35 @@ r = client.get("/api/v1/capabilities", headers={"X-Emby-Token": "other-token"})
 check.equal(r.status_code, 401,
             "a second, unknown token does not inherit the first one's cache")
 
+# --- a silent backend is published, not merely logged ------------------------
+# The medium stays on offer while its acquisition tool is down, because taking
+# it away would also take away the list of what has already been asked for. So
+# a client needs to be told, or an outage looks exactly like a catalogue with
+# nothing in it.
+from app import buskarr, media, store  # noqa: E402
+
+media._registry = {
+    media.MOVIE: media.Medium(media.MOVIE, "Films", ("movie",), 3,
+                              ("lib-movies",), False, "radarr did not answer."),
+    media.MUSIC: media.Medium(media.MUSIC, "Music", buskarr.UNITS, 3,
+                              ("lib-music",)),
+}
+media._registry_built_at = float("inf")
+media._registry_settled = True
+
+store.init()
+client = client_with(accepts)
+body = client.get("/api/v1/capabilities",
+                  headers={"X-Emby-Token": "good-token"}).json()
+blocks = {block["medium"]: block for block in body["media"]}
+check.equal(blocks["movie"]["backendReachable"], False,
+            "a medium whose backend is silent says so in capabilities")
+check.equal(blocks["movie"]["backendDetail"], "radarr did not answer.",
+            "carrying the reason, so a client can name it")
+check.equal(blocks["music"]["backendReachable"], True,
+            "and a healthy one is not made to look broken")
+media.forget()
+
 # Header parsing: the handshake form clients actually send.
 check.equal(
     jellyfin.token_from_header(

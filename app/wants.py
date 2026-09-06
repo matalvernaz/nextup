@@ -98,6 +98,17 @@ def want(user: jellyfin.User, medium: str, item_key: str, unit: str = "",
     if unit not in found.units:
         raise Denied(f"{unit!r} is not something that can be asked for.")
 
+    # Everything from here to the ledger write is one decision. Read as four
+    # separate steps it let two taps arriving together both find the allowance
+    # unspent, so a cap of one bought two -- and a request the backend had
+    # accepted could be written twice.
+    with store.key_lock(user.key, medium):
+        return _admit(user, found, medium, item_key, unit, hit or {})
+
+
+def _admit(user: jellyfin.User, found: media.Medium, medium: str,
+           item_key: str, unit: str, hit: dict) -> tuple[str, str]:
+    """The guarded half of `want`. Never called without its lock held."""
     if (existing := store.get(user.key, medium, item_key)) is not None:
         state = _state(existing, medium)
         log.info("want repeat user=%s medium=%s key=%s state=%s "
@@ -115,13 +126,12 @@ def want(user: jellyfin.User, medium: str, item_key: str, unit: str = "",
     log.info("want user=%s medium=%s unit=%s key=%s cost=%d remaining=%s",
              user.key, medium, unit, item_key, price,
              "uncapped" if remaining is None else remaining)
-    result = _add(medium, unit, item_key, hit or {}, user)
+    result = _add(medium, unit, item_key, hit, user)
     if not result.ok:
         log.warning("want refused user=%s key=%s reason=%s",
                     user.key, item_key, result.message)
         raise Denied(result.message)
 
-    hit = hit or {}
     store.record(
         user.key, medium, item_key, unit,
         # What the backend resolved it to is preferred over what the caller
@@ -340,16 +350,20 @@ def cancel(user: jellyfin.User, medium: str, item_key: str) -> tuple[bool, str]:
     if row is None:
         return False, "That is not on your list."
 
-    others = store.others_waiting(user.key, medium, item_key)
+    # Dropped and counted in one transaction. Two accounts cancelling the same
+    # film at the same moment each used to read the other as still waiting, so
+    # neither called the acquisition off and both rows went -- leaving a
+    # download running that nothing pointed at.
+    existed, others = store.release(user.key, medium, item_key)
+    if not existed:
+        return False, "That is not on your list."
     if others:
-        store.forget(user.key, medium, item_key)
         log.info("cancel user=%s key=%s kept: %d other(s) still waiting",
                  user.key, item_key, len(others))
         return True, ("Taken off your list. Somebody else is still waiting "
                       "for it, so it is still being looked for.")
 
     stopped = _stop(medium, row)
-    store.forget(user.key, medium, item_key)
     log.info("cancel user=%s medium=%s key=%s backend_stopped=%s",
              user.key, medium, item_key, stopped)
     if not stopped:

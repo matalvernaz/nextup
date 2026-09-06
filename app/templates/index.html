@@ -9,6 +9,22 @@ asked for yet.</p>
 {% else %}
 
 <h2>Ask for something</h2>
+{#
+  Named rather than hidden. The medium stays on offer while its acquisition
+  tool is down, because taking it away would also take away the list of what
+  has already been asked for -- but a search that answers nothing must not
+  read as a catalogue with nothing in it.
+#}
+{% set silent = media | rejectattr('backend_reachable') | list %}
+{% if silent %}
+<div role="alert" class="fault">
+  {% for m in silent %}
+  <p>{{ m.label }}: the tool that fetches these is not answering.
+     {% if m.backend_detail %}{{ m.backend_detail }}{% endif %}
+     Asking will not work until it is back.</p>
+  {% endfor %}
+</div>
+{% endif %}
 <form method="get" action="/" role="search">
   <fieldset>
     <legend>Search</legend>
@@ -52,11 +68,16 @@ asked for yet.</p>
   <li>
     <h4>{{ r.title }}{% if r.year %} ({{ r.year }}){% endif %}</h4>
     {% if r.artist and r.unit != 'artist' %}<p>By {{ r.artist }}.</p>{% endif %}
+    {% if r.narrators %}<p>Read by {{ r.narrators | join(', ') }}.</p>{% endif %}
     {% if r.seasonCount %}<p>{{ r.seasonCount }} season{{ '' if r.seasonCount == 1 else 's' }}{% if r.network %}, {{ r.network }}{% endif %}.</p>{% endif %}
     {% if r.trackCount %}<p>{{ r.trackCount }} tracks.</p>{% endif %}
     {% if r.overview %}<p>{{ r.overview }}</p>{% endif %}
     {% if r.owned %}
     <p class="owned">Already in the library.</p>
+    {# Asking again is free and harmless, but a button offering it says the
+       library has not been asked, which is not true. #}
+    {% elif r.requested %}
+    <p class="owned">Already asked for. It is on its way.</p>
     {% else %}
     <form method="post" action="/want">
       <input type="hidden" name="medium" value="{{ r.medium }}">
@@ -81,13 +102,23 @@ asked for yet.</p>
 {% endif %}
 {% endif %}
 
+{% endif %}
+
+{#
+  Outside the "is anything configured" branch on purpose. Removing the last
+  acquisition tool used to take this section away with it, so whatever was
+  already asked for became invisible and its Stop looking buttons went with
+  it -- at exactly the moment somebody would want them.
+#}
 <h2>What you have asked for</h2>
+{% if media %}
 <p>
   {%- for m in media -%}
   {%- set left = allowance.get(m.key) -%}
   {{ m.label }}: {% if left is none %}no limit{% else %}{{ left }} left today{% endif %}.
   {% endfor %}
 </p>
+{% endif %}
 
 {% if not requests %}
 <p>Nothing outstanding.</p>
@@ -120,7 +151,5 @@ asked for yet.</p>
   </li>
   {% endfor %}
 </ul>
-{% endif %}
-
 {% endif %}
 {% endblock %}

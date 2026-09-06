@@ -172,6 +172,8 @@ def fake_add(asin, monitored=True, metadata=None):
                                (metadata or {}).get("title") or "", ())
 
 
+# Kept so the checks at the bottom can exercise the real one.
+REAL_ADD = listenarr.add
 listenarr.add = fake_add
 listenarr.enqueue_search = lambda audiobook_id: searched.append(audiobook_id) or True
 
@@ -443,6 +445,28 @@ check("no date at all counts as out", series._not_out_yet({}, TODAY), False)
 check("3 and 3.0 are one position", series._position("3.0"), series._position(3))
 check("a half position survives", series._position("3.5"), "3.5")
 check("no position is None", series._position(""), None)
+
+# --- and the add boundary holds the same line -------------------------------
+# The series planner was the only thing checking this, so a placeholder reached
+# through any other door -- an ordinary keyword search, or a client posting an
+# ASIN -- was accepted by Listenarr and then searched for forever. There is no
+# file to find and nothing downstream ever gives up.
+from app import listenarr as _listenarr  # noqa: E402
+
+FUTURE = (TODAY + timedelta(days=30)).isoformat()
+# Nothing is in Listenarr's library here, so the by-asin check finds nothing
+# and the date is what decides.
+_listenarr.find_by_asin = lambda asin: None
+refused = REAL_ADD("B0NOTOUT", metadata={
+    "asin": "B0NOTOUT", "title": "Book Five", "publishedDate": FUTURE})
+check("an unpublished book is refused at the add boundary", refused.ok, False)
+check("and the message says why rather than blaming the catalogue",
+      "not out yet" in refused.message, True)
+
+check("a book that is out is not refused for its date",
+      _listenarr.not_yet_published(TODAY.isoformat()), False)
+check("a timestamp is read off its leading ten characters",
+      _listenarr.not_yet_published(FUTURE + "T00:00:00Z"), True)
 
 harness.discard(DB_PATH)
 if failures:

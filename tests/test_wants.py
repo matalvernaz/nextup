@@ -209,5 +209,81 @@ check.that(store.get(KID.key, media.MOVIE, "tmdb:500") is None,
            "and it is really gone")
 check.that("could not be reached" in message, "and the message says so")
 
+# --- two taps at once buy one thing, not two ---------------------------------
+# The duplicate check, the allowance check, the backend call and the ledger
+# write are four steps with three decisions between them. Read without a lock,
+# two requests arriving together both found the day's allowance unspent.
+import threading  # noqa: E402
+
+RACER = jellyfin.User(id="u-racer", name="racer", is_admin=False)
+adds = []
+
+
+def slow_add(provider_id, title, year=""):
+    # Slow on purpose. This is the window the second caller used to run through
+    # while the first was still waiting on Radarr, and it is the whole race:
+    # both had passed the allowance check and neither had written a row.
+    time.sleep(0.2)
+    adds.append(provider_id)
+    return arr.AddResult(True, "Added", provider_id, title, year)
+
+
+radarr.add = slow_add
+outcomes = []
+
+
+def ask(key):
+    try:
+        outcomes.append(wants.want(RACER, media.MOVIE, key, "movie",
+                                   {"title": "A Film"}))
+    except wants.Denied as denied:
+        outcomes.append(("denied", str(denied)))
+
+
+media._registry[media.MOVIE] = media.Medium(
+    media.MOVIE, "Films", ("movie",), 1, ("lib-movies",))
+threads = [threading.Thread(target=ask, args=(f"tmdb:90{n}",)) for n in (1, 2)]
+for thread in threads:
+    thread.start()
+for thread in threads:
+    thread.join(timeout=5)
+check.equal(store.spent_today(RACER.key, media.MOVIE, 0), 1,
+            "a cap of one is spent once, however many taps arrive together")
+check.equal(len(adds), 1, "and only one film reaches Radarr")
+check.equal(sum(1 for outcome in outcomes if outcome[0] == "denied"), 1,
+            "the second is refused rather than silently dropped")
+media._registry[media.MOVIE] = media.Medium(
+    media.MOVIE, "Films", ("movie",), 3, ("lib-movies",))
+
+# --- two people cancelling the same thing at once ----------------------------
+# Each used to read the other as still waiting, so neither called the
+# acquisition off and both rows went. The download then ran on with nothing
+# pointing at it.
+stopped = []
+radarr.cancel = lambda backend_id: stopped.append(backend_id) or True
+radarr.add = lambda provider_id, title, year="": arr.AddResult(
+    True, "Added", provider_id, title, year)
+for who in (KID, OTHER):
+    wants.want(who, media.MOVIE, "tmdb:777", "movie", {"title": "Shared"})
+
+released = []
+
+
+def drop(who):
+    released.append(wants.cancel(who, media.MOVIE, "tmdb:777"))
+
+
+pair = [threading.Thread(target=drop, args=(who,)) for who in (KID, OTHER)]
+for thread in pair:
+    thread.start()
+for thread in pair:
+    thread.join(timeout=5)
+
+check.equal(len(stopped), 1,
+            "the last one out calls the acquisition off, exactly once")
+check.that(store.get(KID.key, media.MOVIE, "tmdb:777") is None
+           and store.get(OTHER.key, media.MOVIE, "tmdb:777") is None,
+           "and both rows are gone")
+
 harness.cleanup()
 raise SystemExit(check.report())

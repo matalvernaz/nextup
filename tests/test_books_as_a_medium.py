@@ -31,6 +31,11 @@ store.init()
 backends.status = lambda medium, force=False: backends.Status(
     medium, medium, configured=True, reachable=True)
 media.jellyfin.library_ids = lambda medium: ["lib-" + medium]
+# Stated rather than arrived at by letting a Jellyfin call fail. An index built
+# during an outage is not an empty library, and `owned_index` says so by
+# raising now, so a test that wants an empty one has to ask for it.
+media.jellyfin.owned_index = lambda: jellyfin.Owned(
+    frozenset(), frozenset(), frozenset(), {})
 media.forget()
 
 USER = jellyfin.User(id="u1", name="matt", is_admin=False)
@@ -38,6 +43,62 @@ USER = jellyfin.User(id="u1", name="matt", is_admin=False)
 check.that(media.BOOK in media.available(), "books are offered")
 check.equal(sorted(media.available()[media.BOOK].units), ["book", "series"],
             "with a unit for one book and one for the rest of a series")
+
+# --- one search-hit shape for all four media ---------------------------------
+# The results template posts `itemKey` into the hidden field its Ask button
+# carries, and reads `overview` for the line under the title. The book adapter
+# spelled those `item_key` and `detail`, so every book hit posted an empty
+# identifier and the ask came back "could not be identified well enough" -- a
+# refusal that reads like a catalogue problem rather than like this bug.
+adapter.book_search.search = lambda user, query, limit=None: [{
+    "asin": "B0HIT", "title": "A Novel", "authors": ["An Author"],
+    "narrators": ["A Narrator"], "owned": False, "requested": True,
+}]
+hits = wants.search("novel", media.BOOK, "book", USER)
+check.equal(len(hits), 1, "a book search returns its hits")
+check.equal(hits[0].get("itemKey"), "B0HIT",
+            "under the same key name the other three media use")
+check.that("item_key" not in hits[0],
+           "and not under the one the template does not read")
+check.that("overview" in hits[0] and "detail" not in hits[0],
+           "with the description named the way the template reads it")
+check.equal(hits[0].get("requested"), True,
+            "a book already asked for says so, rather than offering the button")
+
+# `plan` answers with the rows, not with counts. Reading `missing` as a number
+# raised TypeError for every series that had a gap, which is the only case this
+# search is for.
+adapter.book_series.plan = lambda user, name: {
+    "series": "A Series", "have": [{}, {}, {}], "onOrder": [{}],
+    "missing": [{"title": "Book Four"}, {"title": "Book Five"}],
+}
+series_hits = wants.search("a series", media.BOOK, "series", USER)
+check.equal(len(series_hits), 1, "a series search answers with one row")
+check.equal(series_hits[0].get("itemKey"), "A Series",
+            "keyed by the name the library spells it with")
+check.equal(series_hits[0].get("owned"), False,
+            "not owned while anything is still missing")
+check.that("2 to ask for" in series_hits[0].get("overview", ""),
+           "and it counts the rows rather than trying to read them as a number")
+
+# --- and the same shape from every adapter, not just this one ----------------
+# Checked together because the defect was a divergence, and a divergence is
+# only visible when the four are read side by side.
+from app import buskarr as _buskarr, radarr as _radarr, sonarr as _sonarr  # noqa: E402
+
+REQUIRED = ("itemKey", "medium", "unit", "title")
+built = {
+    "movie": _radarr._result({"tmdbId": 1, "title": "A Film", "year": 2001},
+                             frozenset()),
+    "series": _sonarr._result({"tvdbId": 2, "title": "A Show", "year": 2002},
+                              frozenset()),
+    "track": _buskarr._result({"title": "A Song", "artist": "A Band"}, "track"),
+    "book": hits[0],
+    "book series": series_hits[0],
+}
+for name, hit in built.items():
+    missing_keys = [key for key in REQUIRED if key not in hit]
+    check.equal(missing_keys, [], f"a {name} hit carries every shared key")
 
 # --- asking ------------------------------------------------------------------
 asked = []

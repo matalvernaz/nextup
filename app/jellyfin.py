@@ -74,13 +74,20 @@ class User:
 class Owned:
     """What the library already holds, keyed the way the arrs identify things.
 
-    `series_item_ids` maps a provider id to Jellyfin's own item id, which is
-    what makes an episode count askable. The count itself is deliberately NOT
-    here: this fork returns neither `RecursiveItemCount` nor `ChildCount` on a
-    Series however they are requested (measured, both come back null), so the
-    only route to it is asking about episodes -- and asking about every
-    episode in the library is a 24 MB, six-second answer to a question only
-    ever asked about the two or three series somebody is waiting on.
+    `series_item_ids` maps a **TVDB** id to Jellyfin's own item id, which is
+    what makes an episode count askable. TVDB alone, because that is what the
+    only reader looks up: a series ledger key is `tvdb:<id>`. It held both TVDB
+    and TMDB ids under bare keys, which is one namespace pretending to be two --
+    both are small integers, so a series whose TMDB id happened to equal another
+    series' TVDB id answered for the wrong show, and its episode count could
+    close somebody else's request.
+
+    The count itself is deliberately NOT here: this fork returns neither
+    `RecursiveItemCount` nor `ChildCount` on a Series however they are requested
+    (measured, both come back null), so the only route to it is asking about
+    episodes -- and asking about every episode in the library is a 24 MB,
+    six-second answer to a question only ever asked about the two or three
+    series somebody is waiting on.
     """
     movie_tmdb: frozenset[str] = frozenset()
     series_tvdb: frozenset[str] = frozenset()
@@ -278,11 +285,9 @@ def owned_index() -> Owned:
     for item in _items("series", "Series", fields="ProviderIds"):
         tvdb = _provider(item, "Tvdb")
         tmdb = _provider(item, "Tmdb")
-        for key in (tvdb, tmdb):
-            if key:
-                item_ids[key] = item["Id"]
         if tvdb:
             series_tvdb.add(tvdb)
+            item_ids[tvdb] = item["Id"]
         if tmdb:
             series_tmdb.add(tmdb)
 
@@ -377,12 +382,14 @@ def _items(medium: str, item_type: str, fields: str) -> list[dict]:
                 data = c.get("/Items", params=params).raise_for_status().json()
                 out.extend(data.get("Items", []))
     except httpx.HTTPError as exc:
-        # An empty index makes everything look unarrived, which shows a request
-        # as still on its way. That is the safe direction to be wrong in, but
-        # it is invisible without this line -- so it is logged loudly.
-        log.error("library index for %s failed; every request will read as "
-                  "not yet arrived (%s)", medium, exc)
-        return []
+        # Raised, not swallowed into an empty list, for the same reason
+        # `library_ids` raises: an empty index is a settled fact about a
+        # library, and an outage is not. Returned as one it made every film and
+        # series read as not owned, which marks things the library already
+        # holds as askable and every outstanding request as not yet arrived --
+        # and the caller then cached that answer for a quarter of an hour.
+        log.error("library index for %s failed (%s)", medium, exc)
+        raise JellyfinUnavailable(str(exc)) from exc
     return out
 
 
@@ -504,8 +511,8 @@ def _handshake(device: str) -> str:
             f'DeviceId="{device}", Version="{_CLIENT_VERSION}"')
 
 
-def authenticate(username: str, password: str,
-                 device: str) -> tuple[str, User]:
+def authenticate(username: str, password: str, device: str,
+                 base_url: str = "") -> tuple[str, User]:
     """Exchange a username and password for that account's access token.
 
     Used only by the browser pages. The JSON API never sees a password: its
@@ -516,11 +523,18 @@ def authenticate(username: str, password: str,
     "That password is wrong" and "the server is not answering" are different
     things to do next, and a page that says the first when it means the second
     sends somebody to reset a password that was never the problem.
+
+    - Parameter base_url: a Jellyfin to try instead of the configured one. The
+      setup page needs this: it used to write the typed address to the settings
+      table *before* authenticating, so a wrong password still left the service
+      pointed somewhere else, and the next library read sent this service's own
+      API key there.
     """
     if not username or not password:
         raise TokenRejected("A username and a password are both needed.")
     try:
-        with httpx.Client(base_url=config.JELLYFIN_URL, timeout=_TIMEOUT,
+        with httpx.Client(base_url=base_url or config.JELLYFIN_URL,
+                          timeout=_TIMEOUT,
                           headers={"Authorization": _handshake(device),
                                    "Accept": "application/json"}) as c:
             resp = c.post("/Users/AuthenticateByName",

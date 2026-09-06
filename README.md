@@ -97,10 +97,16 @@ Films, television and music work on a stock Jellyfin server.
 
 **Books need the audiobook fork of Jellyfin**, which files a whole audiobook as
 a single `AudioBook` item. Stock Jellyfin has no such type: its Books libraries
-hold ebooks, and audiobooks on a stock server are music albums. Nextup detects
-which it is talking to and simply does not offer books on a stock server —
-the Backends page and `app.doctor` both say so rather than leaving you with a
-search box that can ask for something the library can never show arriving.
+hold ebooks, and audiobooks on a stock server are music albums.
+
+Nextup checks and tells you, on the Backends page and in `app.doctor`, but it
+does not refuse the medium on the strength of that check. It cannot: the same
+question that distinguishes a stock server from the fork also cannot
+distinguish the fork from a fork whose books library is simply empty, which is
+every fresh installation. Refusing there would make the first request
+impossible. So the check reports, and connecting Listenarr to a stock Jellyfin
+gives you a search box that can ask for a book the library will never show
+arriving.
 
 ## What it does
 

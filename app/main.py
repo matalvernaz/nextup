@@ -50,7 +50,7 @@ def _rekey_ledger_once() -> None:
     """
     if store.user_key_scheme() == "id":
         return
-    if store.ledger_is_empty():
+    if store.nothing_to_rekey():
         # Nothing to move, so nothing to ask Jellyfin about. Without this a
         # fresh install whose Jellyfin is not up yet -- the ordinary ordering
         # on a one-box bring-up -- dies in lifespan and restart-loops, on a
@@ -314,9 +314,46 @@ def readyz(response: Response) -> dict:
     return {"ready": True}
 
 
+def _setup_is_open(request: Request):
+    """None when this page may be used, or the response that refuses it.
+
+    Open with no credential at all, because that is the state it exists for and
+    there is nobody to authenticate against yet. Once connected it needs a
+    Jellyfin administrator, exactly as `/backends` does: this page rewrites the
+    address this service sends its own API key to, which is a larger prize than
+    pointing the install at somebody's Radarr.
+
+    Signing in still works while Jellyfin is refusing this service's key --
+    `authenticate` and `user_from_token` both carry the caller's credentials
+    rather than this service's -- so the repair path `/readyz` names stays open
+    in the state it is named for. The one case this closes is an address that
+    is wrong: nobody can sign in through it, and the way back is the
+    environment, which wins over anything a page has stored.
+    """
+    if setup.needs_setup():
+        return None
+    try:
+        user = viewer(request)
+    except LookupError as exc:
+        return _signin_page(request, detail=str(exc), status=401)
+    if not user.is_admin:
+        return templates.TemplateResponse(
+            request=request, name="setup.html", status_code=403,
+            context={
+                "message": "Changing where this connects needs a Jellyfin "
+                           "administrator account.",
+                "jellyfin_url": "",
+                "locked": True,
+                "connected": True,
+            })
+    return None
+
+
 @app.get("/setup", response_class=HTMLResponse)
 def get_setup(request: Request, msg: str = ""):
     """Connect to Jellyfin. The only step a first run cannot skip."""
+    if (refused := _setup_is_open(request)) is not None:
+        return refused
     return templates.TemplateResponse(
         request=request, name="setup.html",
         context={
@@ -330,15 +367,29 @@ def get_setup(request: Request, msg: str = ""):
 @app.post("/setup")
 def post_setup(request: Request, jellyfin_url: str = Form(""),
                username: str = Form(""), password: str = Form("")):
+    if (refused := _setup_is_open(request)) is not None:
+        return refused
+    # Counted the same way `/signin` counts, and for the same reason: this
+    # forwards a password to Jellyfin, and the shipped compose publishes a port.
+    keys = (throttle.caller_address(request), f"setup:{username.strip().casefold()}")
+    if (wait := throttle.retry_after(*keys)):
+        minutes = max(1, round(wait / 60))
+        return RedirectResponse(
+            url="/setup?msg=" + quote(
+                f"Too many failed attempts. Try again in about {minutes} "
+                f"minute{'' if minutes == 1 else 's'}."),
+            status_code=303)
     try:
         message = setup.connect_jellyfin(jellyfin_url, username, password)
     except jellyfin.TokenRejected as exc:
+        throttle.record_failure(*keys)
         return RedirectResponse(url=f"/setup?msg={quote(str(exc))}",
                                 status_code=303)
     except jellyfin.JellyfinUnavailable as exc:
         return RedirectResponse(
             url=f"/setup?msg={quote(f'That Jellyfin could not be reached. {exc}')}",
             status_code=303)
+    throttle.clear(*keys)
     return RedirectResponse(url=f"/backends?msg={quote(message)}",
                             status_code=303)
 
@@ -569,7 +620,13 @@ def post_book_dismiss(request: Request, asin: str = Form(...),
     except LookupError as exc:
         return _back_to_books(f"Nextup could not work out who you are. {exc}")
     book_wants.dismiss(user, asin)
-    book_shelves.invalidate(user.key)
+    # Taken off this account's shelf now, and the shelf marked for a rebuild
+    # behind the next read. Invalidating instead threw away the stored copy as
+    # well, so the redirect that follows paid for a whole cold rebuild -- twelve
+    # to twenty-two seconds, in front of somebody who had just pressed a button
+    # labelled "Not this one".
+    book_shelves.forget_asin(asin, user_key=user.key)
+    book_shelves.expire(user.key)
     return _back_to_books(
         f"Hidden: {title or asin}.", undo_asin=asin, undo_title=title)
 
@@ -581,7 +638,11 @@ def post_book_restore(request: Request, asin: str = Form(...)):
     except LookupError as exc:
         return _back_to_books(f"Nextup could not work out who you are. {exc}")
     restored = book_wants.restore(user, asin)
-    book_shelves.invalidate(user.key)
+    # A row cannot be put back into a cached shelf it was removed from, so this
+    # one really does need the rebuild -- but behind the answer, not in front
+    # of it. The stored shelf is served meanwhile, without the book, and the
+    # book returns on the read after that.
+    book_shelves.expire(user.key)
     return _back_to_books("Put back." if restored
                           else "That book was not hidden.")
 
@@ -592,13 +653,14 @@ def post_book_refresh(request: Request):
 
     Not a rebuild in front of the person who asked: it is twelve seconds, nine
     of them one Jellyfin listing, and a page that hangs that long reads as
-    broken. The next load serves the stale answer and rebuilds behind it.
+    broken. The next load serves the stored answer and rebuilds behind it,
+    which is what `expire` leaves in place and `invalidate` did not.
     """
     try:
         user = viewer(request)
     except LookupError as exc:
         return _back_to_books(f"Nextup could not work out who you are. {exc}")
-    book_shelves.invalidate(user.key)
+    book_shelves.expire(user.key)
     return _back_to_books("Working out new recommendations. They will appear "
                           "here shortly.")
 

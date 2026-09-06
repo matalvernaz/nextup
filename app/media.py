@@ -116,6 +116,16 @@ def _build() -> tuple[dict[str, Medium], bool]:
 #: library a configured backend has no items in yet, is enough on its own.
 PROVISIONAL_TTL_SECONDS = 300
 
+#: And how long a settled one is kept. A settled registry used to have no
+#: lifetime at all, on the reasoning that it only changes when the deployment
+#: does -- but a library added later, or an acquisition tool that stops
+#: answering after the build, then stayed invisible until somebody saved a
+#: setting or restarted the container. `backend_reachable` lives in this same
+#: record, so a Radarr that died an hour ago went on reading as reachable.
+#: An hour, because rebuilding is one Jellyfin round trip plus one probe per
+#: backend, and neither is worth paying per request.
+SETTLED_TTL_SECONDS = 3600
+
 _registry: dict[str, Medium] | None = None
 _registry_built_at = 0.0
 _registry_settled = False
@@ -125,16 +135,17 @@ _registry_guard = threading.Lock()
 def available() -> dict[str, Medium]:
     """The media this server serves.
 
-    Cached, because it costs a Jellyfin round trip and a settled answer only
-    changes when the deployment does. An unsettled one -- Jellyfin could not be
-    asked, or a configured backend has no library yet -- is cached only briefly,
-    so a startup-order accident does not outlive the deployment that caused it.
+    Cached, because it costs a Jellyfin round trip and a settled answer changes
+    rarely. An unsettled one -- Jellyfin could not be asked, or a configured
+    backend has no library yet -- is cached far more briefly, so a startup-order
+    accident does not outlive the deployment that caused it.
     """
     global _registry, _registry_built_at, _registry_settled
     with _registry_guard:
-        if _registry is not None and (
-                _registry_settled
-                or time.monotonic() - _registry_built_at < PROVISIONAL_TTL_SECONDS):
+        lifetime = (SETTLED_TTL_SECONDS if _registry_settled
+                    else PROVISIONAL_TTL_SECONDS)
+        if (_registry is not None
+                and time.monotonic() - _registry_built_at < lifetime):
             return _registry
     built, settled = _build()
     with _registry_guard:
@@ -184,7 +195,22 @@ class _OwnedCache:
         # Built outside the lock: it is a Jellyfin round trip over the whole
         # film and TV libraries, and holding the lock across it would make
         # every concurrent caller wait for one slow scan.
-        built = jellyfin.owned_index()
+        try:
+            built = jellyfin.owned_index()
+        except jellyfin.JellyfinUnavailable:
+            with self._guard:
+                previous = self._value
+            if previous is None:
+                # Nothing to fall back on, and answering "the library holds
+                # nothing" would be a lie with consequences: everything owned
+                # reads as askable. The caller is told the truth instead.
+                raise
+            # An hour-old index is a far better answer than an empty one, and
+            # `_built_at` is deliberately not moved -- the next caller tries
+            # again rather than waiting out a TTL that an outage started.
+            log.error("keeping the previous library index: Jellyfin could not "
+                      "be asked for a new one")
+            return previous
         with self._guard:
             self._value = built
             self._built_at = time.monotonic()

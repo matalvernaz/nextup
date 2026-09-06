@@ -314,6 +314,14 @@ class _Cached:
 
 _cache: dict[tuple[str, str, tuple[str, ...]], _Cached] = {}
 _guard = threading.Lock()
+#: One lock per cache key, so a cold build for one account does not hold up a
+#: cached read for another.
+_build_locks: dict[tuple[str, str, tuple[str, ...]], threading.Lock] = {}
+
+
+def _build_lock(key) -> threading.Lock:
+    with _guard:
+        return _build_locks.setdefault(key, threading.Lock())
 
 
 def library_ids(medium: str = "series") -> tuple[str, ...]:
@@ -351,10 +359,23 @@ def result(
                 <= _cache_seconds(medium)):
             return cached.value
 
-    library = jellyfin.recommendation_items_for_user(medium, user.id, libraries)
-    built = build(library, medium)
-    with _guard:
-        _cache[key] = _Cached(time.monotonic(), built)
+    # One build per key at a time. Without this, every request that arrives
+    # during a cold build starts its own: the same Jellyfin listing of the same
+    # library, several times over, on the one occasion the server is already
+    # busy. The book shelves have had this since they were measured at twelve
+    # seconds; these are the same shape of work.
+    with _build_lock(key):
+        with _guard:
+            cached = _cache.get(key)
+            if cached and not force and (
+                    time.monotonic() - cached.built_at
+                    <= _cache_seconds(medium)):
+                return cached.value
+        library = jellyfin.recommendation_items_for_user(
+            medium, user.id, libraries)
+        built = build(library, medium)
+        with _guard:
+            _cache[key] = _Cached(time.monotonic(), built)
     log.info("%s recommendations user=%s libraries=%d seeds=%d rows=%d",
              medium, user.key, len(libraries), built["seed_count"],
              len(built["recommendations"]))

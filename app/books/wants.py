@@ -62,6 +62,16 @@ def want(
     `metadata` is the add-shaped record when the caller already has it; a
     series listing does, and passing it spares Listenarr a lookup per book.
     """
+    # Same reason as the shared path: the duplicate check, the allowance check,
+    # the Listenarr add and the ledger write are four steps with three
+    # decisions between them, and two taps arriving together both used to find
+    # the day's allowance unspent.
+    with store.key_lock(user.key, store.MEDIUM):
+        return _admit(user, asin, title, recommendation_id, metadata)
+
+
+def _admit(user, asin, title, recommendation_id, metadata):
+    """The guarded half of `want`. Never called without its lock held."""
     already = _request_row(user.key, asin)
     if already is not None and already["fulfilled_at"] is None:
         state = _state(already)
@@ -127,13 +137,15 @@ def cancel(user: jellyfin.User, asin: str) -> tuple[bool, str]:
       there for as long as Listenarr stayed down, with no way to clear it. The
       message says which of the two happened rather than claiming both.
     """
-    if _request_row(user.key, asin) is None:
+    # Dropped and counted in one transaction, so two accounts cancelling the
+    # same book at the same moment cannot each read the other as still waiting
+    # and leave Listenarr searching for something nobody is on the list for.
+    existed, others = store.release_request(user.key, asin)
+    if not existed:
         log.info("cancel user=%s asin=%s no-such-request", user.key, asin)
         return False, "That book is not on your list."
 
-    others = store.outstanding_request_users(asin) - {user.key}
     if others:
-        store.forget_request(user.key, asin)
         store.record_feedback(user.key, asin, "cancel")
         log.info("cancel user=%s asin=%s kept in Listenarr for %s",
                  user.key, asin, sorted(others))
@@ -141,7 +153,6 @@ def cancel(user: jellyfin.User, asin: str) -> tuple[bool, str]:
                       "so it is still being looked for.")
 
     called_off = _stop_acquiring(asin)
-    store.forget_request(user.key, asin)
     store.record_feedback(user.key, asin, "cancel")
     log.info("cancel user=%s asin=%s listenarr_deleted=%s",
              user.key, asin, called_off)
@@ -281,10 +292,7 @@ def _requested_title_keys(title: str) -> set[str]:
 
 
 def _request_row(user_key: str, asin: str) -> dict | None:
-    for row in store.requests_for(user_key):
-        if row["asin"] == asin:
-            return row
-    return None
+    return store.request_row(user_key, asin)
 
 
 def _state(row: dict) -> str:

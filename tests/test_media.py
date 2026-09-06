@@ -105,5 +105,54 @@ check.that("could not be reached" in silent["movie"].backend_detail,
 check.that(not media._registry_settled,
            "an outage is not a settled fact, so it is asked again")
 
+# --- a settled registry is still asked again eventually ----------------------
+# It used to have no lifetime at all, so a library created later, or a backend
+# that stopped answering after the build, stayed invisible until somebody saved
+# a setting or restarted the container.
+check.that(media.SETTLED_TTL_SECONDS > media.PROVISIONAL_TTL_SECONDS,
+           "a settled registry outlives an unsettled one")
+backends.status = lambda medium, force=False: None
+media.forget()
+LIBRARIES["movie"] = ["lib-films"]
+settled = media.available()
+check.that(media._registry_settled, "a complete build settles")
+builds = []
+real_build = media._build
+media._build = lambda: builds.append(1) or real_build()
+media.available()
+check.equal(builds, [], "and is served from memory while it is young")
+media._registry_built_at -= media.SETTLED_TTL_SECONDS + 1
+media.available()
+check.equal(len(builds), 1, "and asked again once it is not")
+media._build = real_build
+
+# --- an outage is not an empty library ---------------------------------------
+# `_items` used to answer an HTTP failure with an empty list, and this cache
+# kept it for a quarter of an hour: everything the library holds then read as
+# not owned, so owned films were offered as askable and every outstanding
+# request read as not yet arrived.
+GOOD = jellyfin.Owned(frozenset({"1"}), frozenset(), frozenset(), {})
+
+
+def unavailable():
+    raise jellyfin.JellyfinUnavailable("no route to host")
+
+
+media._owned.forget()
+media.jellyfin.owned_index = unavailable
+raised = False
+try:
+    media.owned()
+except jellyfin.JellyfinUnavailable:
+    raised = True
+check.that(raised, "with nothing to fall back on, the caller is told")
+
+media.jellyfin.owned_index = lambda: GOOD
+check.equal(media.owned(force=True).movie_tmdb, frozenset({"1"}),
+            "a good index is kept")
+media.jellyfin.owned_index = unavailable
+check.equal(media.owned(force=True).movie_tmdb, frozenset({"1"}),
+            "and served through an outage rather than replaced by an empty one")
+
 harness.cleanup()
 raise SystemExit(check.report())

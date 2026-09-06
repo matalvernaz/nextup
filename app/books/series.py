@@ -96,40 +96,18 @@ def _row_position(row: dict, series_asin: str) -> str | None:
     return None
 
 
-def _release_date(row: dict) -> date | None:
-    """The day Audible says a catalogue row comes out, when it says.
-
-    Listenarr relays the date as "2026-04-28" and Audible's own API as a full
-    timestamp, so both are read off the leading ten characters. None when the
-    field is absent or is something no calendar recognises.
-    """
-    text = _text(row.get("releaseDate"))[:10]
-    if not text:
-        return None
-    try:
-        return date.fromisoformat(text)
-    except ValueError:
-        return None
-
-
 def _not_out_yet(row: dict, today: date) -> bool:
     """A book nothing can acquire, because it has not been published.
 
-    Audible pads a series' listing with a placeholder product for every volume
-    it has announced and not released -- publisher "ZZZ - Series Advisor
-    Placeholder", SKU `PL_HLDR_...`, no narrator, dated 2200-01-01 -- and
-    lists genuine pre-orders beside the books that are out. Both are the same
-    thing here, and both are read off the one field they agree on: a release
-    date still in the future. Measured 2026-09-05, when a nine-row listing of
-    a four-book series turned five placeholders into five requests Listenarr
-    will search for forever.
+    Measured 2026-09-05, when a nine-row listing of a four-book series turned
+    five placeholders into five requests Listenarr will search for forever.
 
-    A row with no date, or a date that does not parse, counts as out. Refusing
-    to ask for a real book because a relayed field was empty is the worse of
-    the two mistakes.
+    The rule itself is `listenarr.not_yet_published`, which now also guards the
+    add boundary every single request goes through. Held here as well because
+    a batch counts and names what it is holding back, where the boundary can
+    only refuse one book at a time.
     """
-    published = _release_date(row)
-    return published is not None and published > today
+    return listenarr.not_yet_published(_text(row.get("releaseDate")), today)
 
 
 def _identity(position: str | None, title: str) -> str:
