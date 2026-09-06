@@ -128,7 +128,10 @@ arriving.
   TVDB through Sonarr, Audible through Listenarr, Deezer and MusicBrainz
   through buskarr.
 - **Requests** one thing, with a per-medium daily allowance for accounts that
-  are not Jellyfin administrators.
+  are not Jellyfin administrators. Asking twice for something still on its way
+  is free and spends nothing. Asking again for something that arrived and has
+  since left the library is a new request, because otherwise a film deleted
+  from Jellyfin could never be asked for again by whoever had it.
 - **Reports** what became of each request: `on_its_way`, `still_looking` or
   `in_library`, with aired, queued and in-library episode counts for
   television.

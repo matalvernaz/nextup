@@ -73,11 +73,20 @@ def want(
 def _admit(user, asin, title, recommendation_id, metadata):
     """The guarded half of `want`. Never called without its lock held."""
     already = _request_row(user.key, asin)
-    if already is not None and already["fulfilled_at"] is None:
-        state = _state(already)
-        log.info("want repeat user=%s asin=%s state=%s (no allowance spent)",
-                 user.key, asin, state)
-        return state, "Already on its way"
+    if already is not None:
+        if already["fulfilled_at"] is None:
+            state = _state(already)
+            log.info("want repeat user=%s asin=%s state=%s "
+                     "(no allowance spent)", user.key, asin, state)
+            return state, "Already on its way"
+        # A book that arrived once may be asked for again, and this path has
+        # always let one through to Listenarr. The closed row has to go with
+        # it: `record_request` will not write over a row that is already
+        # there, so the second ask reached Listenarr, was charged for, and
+        # left nothing on the list to say any of that had happened.
+        store.forget_request(user.key, asin)
+        log.info("want reopened user=%s asin=%s: a book that arrived once is "
+                 "being asked for again", user.key, asin)
 
     remaining = allowance(user)
     if remaining is not None and remaining <= 0:

@@ -110,10 +110,20 @@ def _admit(user: jellyfin.User, found: media.Medium, medium: str,
            item_key: str, unit: str, hit: dict) -> tuple[str, str]:
     """The guarded half of `want`. Never called without its lock held."""
     if (existing := store.get(user.key, medium, item_key)) is not None:
-        state = _state(existing, medium)
-        log.info("want repeat user=%s medium=%s key=%s state=%s "
-                 "(no allowance spent)", user.key, medium, item_key, state)
-        return state, "Already asked for."
+        if existing["fulfilled_at"] is None or _still_held(existing, medium):
+            state = _state(existing, medium)
+            log.info("want repeat user=%s medium=%s key=%s state=%s "
+                     "(no allowance spent)", user.key, medium, item_key, state)
+            return state, "Already asked for."
+        # It arrived once and has since left the library. That is a new
+        # request, not a repeat: the closed row goes, and everything below
+        # charges and records this one from scratch. Without this a film
+        # deleted from Jellyfin could never be asked for again by the account
+        # that had it, on either surface, with "Already asked for." as the
+        # only explanation.
+        store.forget(user.key, medium, item_key)
+        log.info("want reopened user=%s medium=%s key=%s: it arrived once and "
+                 "is no longer in the library", user.key, medium, item_key)
 
     price = media.cost(medium, unit)
     remaining = allowance(user, medium)
@@ -142,6 +152,35 @@ def _admit(user: jellyfin.User, found: media.Medium, medium: str,
     log.info("want accepted user=%s key=%s backend_id=%s message=%r",
              user.key, item_key, result.backend_id, result.message)
     return ON_ITS_WAY, result.message
+
+
+def _still_held(row, medium: str) -> bool:
+    """Whether a fulfilled request's media are still in the library.
+
+    Presence, and deliberately not `_arrived`. That one asks whether a
+    whole-series request has *finished*, which needs Sonarr's aired total and
+    answers no whenever that total cannot be had -- so asking it here would
+    read every fulfilled series as gone and hand the lot back to Sonarr.
+
+    Unknown counts as held, everywhere. Reopening on an unknown re-acquires
+    something the library still has; refusing on one costs a second tap once
+    the answer is available again. The second is much the cheaper mistake.
+    """
+    key = row["item_key"]
+    provider_id = key.split(":", 1)[1] if ":" in key else ""
+    if medium in (media.MOVIE, media.SERIES):
+        if not provider_id:
+            return True
+        try:
+            index = media.owned()
+        except jellyfin.JellyfinUnavailable:
+            return True
+        return provider_id in (index.movie_tmdb if medium == media.MOVIE
+                               else index.series_tvdb)
+    # Music is buskarr's to answer: it placed the file and holds the exact
+    # identity it placed it under, which is the only handle on it there is.
+    reported = buskarr.state(row["backend_id"])
+    return reported is None or reported.get("state") == "have"
 
 
 def _add(medium: str, unit: str, item_key: str, hit: dict,
