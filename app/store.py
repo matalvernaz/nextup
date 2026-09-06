@@ -230,6 +230,10 @@ def _drop_outdated_caches(conn: sqlite3.Connection) -> None:
             current = None
         if current == version:
             continue
+        dropped = [table for table in tables
+                   if conn.execute(
+                       "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                       (table,)).fetchone()]
         for table in tables:
             conn.execute(f"DROP TABLE IF EXISTS {table}")
         conn.execute("INSERT INTO meta(key,value) VALUES(?,?) "
@@ -238,6 +242,15 @@ def _drop_outdated_caches(conn: sqlite3.Connection) -> None:
         if row is not None:
             log.info("dropped %s: %s moved from %s to %d",
                      ", ".join(tables), key, row["value"], version)
+        elif dropped:
+            # Loud, because this is the one path that discards a cache without
+            # anybody having changed a version. A database written before this
+            # check existed carries no row, and the shape of what is in it
+            # cannot be known -- so it goes, and the log says why rather than
+            # leaving a cold first shelf looking like a fault.
+            log.warning("dropped %s: no %s recorded, so what was cached could "
+                        "not be trusted to match this code",
+                        ", ".join(sorted(dropped)), key)
 
 
 #: Columns added to `requests` after the first release. `CREATE TABLE IF NOT
