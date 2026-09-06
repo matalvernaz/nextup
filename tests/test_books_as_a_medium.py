@@ -31,6 +31,11 @@ store.init()
 backends.status = lambda medium, force=False: backends.Status(
     medium, medium, configured=True, reachable=True)
 media.jellyfin.library_ids = lambda medium: ["lib-" + medium]
+# Stated rather than arrived at by letting a Jellyfin call fail. An index built
+# during an outage is not an empty library, and `owned_index` says so by
+# raising now, so a test that wants an empty one has to ask for it.
+media.jellyfin.owned_index = lambda: jellyfin.Owned(
+    frozenset(), frozenset(), frozenset(), {})
 media.forget()
 
 USER = jellyfin.User(id="u1", name="matt", is_admin=False)

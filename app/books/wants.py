@@ -281,10 +281,7 @@ def _requested_title_keys(title: str) -> set[str]:
 
 
 def _request_row(user_key: str, asin: str) -> dict | None:
-    for row in store.requests_for(user_key):
-        if row["asin"] == asin:
-            return row
-    return None
+    return store.request_row(user_key, asin)
 
 
 def _state(row: dict) -> str:

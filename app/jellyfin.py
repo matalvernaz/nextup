@@ -377,12 +377,14 @@ def _items(medium: str, item_type: str, fields: str) -> list[dict]:
                 data = c.get("/Items", params=params).raise_for_status().json()
                 out.extend(data.get("Items", []))
     except httpx.HTTPError as exc:
-        # An empty index makes everything look unarrived, which shows a request
-        # as still on its way. That is the safe direction to be wrong in, but
-        # it is invisible without this line -- so it is logged loudly.
-        log.error("library index for %s failed; every request will read as "
-                  "not yet arrived (%s)", medium, exc)
-        return []
+        # Raised, not swallowed into an empty list, for the same reason
+        # `library_ids` raises: an empty index is a settled fact about a
+        # library, and an outage is not. Returned as one it made every film and
+        # series read as not owned, which marks things the library already
+        # holds as askable and every outstanding request as not yet arrived --
+        # and the caller then cached that answer for a quarter of an hour.
+        log.error("library index for %s failed (%s)", medium, exc)
+        raise JellyfinUnavailable(str(exc)) from exc
     return out
 
 

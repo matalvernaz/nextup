@@ -227,19 +227,44 @@ def invalidate(user_key: str | None = None) -> None:
         log.warning("could not forget the persisted shelf user=%s: %s", user_key, exc)
 
 
-def forget_asin(asin: str) -> None:
-    """Drop one book from every cached unowned shelf.
+def expire(user_key: str) -> None:
+    """Mark a shelf due for a rebuild without throwing it away.
 
-    Listenarr is shared, so a book one person requests should stop being
-    offered to everybody. This used to clear the whole cache, which was cheap
-    when requests arrived from one browser and is not now that ten accounts can
-    make one from a phone: every request would push every user through a cold
-    Jellyfin and Audible recompute. Removing the row costs nothing and has the
-    same visible effect.
+    `invalidate` drops the persisted copy too, which leaves `_stale_entry` with
+    nothing to answer from -- so the next page load pays for the whole 12 to 22
+    second rebuild in front of whoever asked. That is exactly what the refresh
+    button says it avoids, and it was also the cost of every dismissal.
+
+    Dropping only the memory entry leaves the persisted shelf to be served
+    immediately while the rebuild runs behind it, which is the path `result`
+    already has for a shelf that has merely gone stale.
+    """
+    with _cache_guard:
+        _cache.pop(user_key, None)
+    log.info("shelf expired user=%s; the next read serves the stored one and "
+             "rebuilds behind it", user_key)
+
+
+def forget_asin(asin: str, user_key: str | None = None) -> None:
+    """Drop one book from cached unowned shelves.
+
+    Household-wide by default, because Listenarr is shared and a book one
+    person requests should stop being offered to everybody. `user_key` narrows
+    it to one account, which is what a dismissal is: hiding a suggestion is a
+    statement about one person's taste and must not withdraw the book from the
+    other nine.
+
+    This used to clear the whole cache, which was cheap when requests arrived
+    from one browser and is not now that ten accounts can make one from a
+    phone: every request would push every user through a cold Jellyfin and
+    Audible recompute. Removing the row costs nothing and has the same visible
+    effect.
     """
     dropped = []
     with _cache_guard:
         for key, (at, data, written) in list(_cache.items()):
+            if user_key is not None and key != user_key:
+                continue
             discover = data.get("discover") or []
             kept = [row for row in discover if row.get("asin") != asin]
             if len(kept) != len(discover):

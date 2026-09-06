@@ -620,7 +620,13 @@ def post_book_dismiss(request: Request, asin: str = Form(...),
     except LookupError as exc:
         return _back_to_books(f"Nextup could not work out who you are. {exc}")
     book_wants.dismiss(user, asin)
-    book_shelves.invalidate(user.key)
+    # Taken off this account's shelf now, and the shelf marked for a rebuild
+    # behind the next read. Invalidating instead threw away the stored copy as
+    # well, so the redirect that follows paid for a whole cold rebuild -- twelve
+    # to twenty-two seconds, in front of somebody who had just pressed a button
+    # labelled "Not this one".
+    book_shelves.forget_asin(asin, user_key=user.key)
+    book_shelves.expire(user.key)
     return _back_to_books(
         f"Hidden: {title or asin}.", undo_asin=asin, undo_title=title)
 
@@ -632,7 +638,11 @@ def post_book_restore(request: Request, asin: str = Form(...)):
     except LookupError as exc:
         return _back_to_books(f"Nextup could not work out who you are. {exc}")
     restored = book_wants.restore(user, asin)
-    book_shelves.invalidate(user.key)
+    # A row cannot be put back into a cached shelf it was removed from, so this
+    # one really does need the rebuild -- but behind the answer, not in front
+    # of it. The stored shelf is served meanwhile, without the book, and the
+    # book returns on the read after that.
+    book_shelves.expire(user.key)
     return _back_to_books("Put back." if restored
                           else "That book was not hidden.")
 
@@ -643,13 +653,14 @@ def post_book_refresh(request: Request):
 
     Not a rebuild in front of the person who asked: it is twelve seconds, nine
     of them one Jellyfin listing, and a page that hangs that long reads as
-    broken. The next load serves the stale answer and rebuilds behind it.
+    broken. The next load serves the stored answer and rebuilds behind it,
+    which is what `expire` leaves in place and `invalidate` did not.
     """
     try:
         user = viewer(request)
     except LookupError as exc:
         return _back_to_books(f"Nextup could not work out who you are. {exc}")
-    book_shelves.invalidate(user.key)
+    book_shelves.expire(user.key)
     return _back_to_books("Working out new recommendations. They will appear "
                           "here shortly.")
 

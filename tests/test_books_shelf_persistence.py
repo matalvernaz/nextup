@@ -102,6 +102,35 @@ after = shelves.result(matt, update_playlist=False)
 check("withdrawn book stays withdrawn across a restart",
       [r["asin"] for r in after["discover"]], ["A2"])
 
+# --- expire leaves something to answer with; invalidate does not -------------
+# The refresh button, and every dismissal, used to invalidate. That drops the
+# stored shelf as well, so the redirect straight afterwards had nothing to
+# serve and paid for the whole cold rebuild in front of the reader -- the exact
+# wait the button's own docstring says it exists to avoid.
+shelves._cache.clear()
+warm = shelves.result(matt, update_playlist=False)
+builds.clear()
+gate.clear()          # any rebuild now blocks, so a foreground one would hang
+shelves.expire(matt.key)
+served = shelves.result(matt, update_playlist=False)
+check("an expired shelf still answers at once",
+      [r["asin"] for r in served["discover"]], [r["asin"] for r in warm["discover"]])
+gate.set()
+
+shelves.invalidate(matt.key)
+check("invalidate still throws the stored copy away", store.get_shelf(matt.key), None)
+
+# --- a dismissal is one account's opinion, not the household's ---------------
+shelves._cache.clear()
+shelves.result(matt, update_playlist=False)
+other = jellyfin.User(id="user-kadija", name="kadija", is_admin=False)
+shelves.result(other, update_playlist=False)
+shelves.forget_asin("A1", user_key=matt.key)
+check("the dismissed book leaves that account's shelf",
+      [r["asin"] for r in shelves._cache[matt.key][1]["discover"]], ["A2"])
+check("and stays on everybody else's",
+      [r["asin"] for r in shelves._cache[other.key][1]["discover"]], ["A1", "A2"])
+
 if failures:
     print("FAIL")
     for f in failures:
