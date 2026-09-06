@@ -49,11 +49,25 @@ def _users_with_shelves() -> list[jellyfin.User]:
 
 
 def once() -> int:
-    """One pass. Returns how many accounts were refreshed."""
+    """One pass. Returns how many accounts were actually rebuilt.
+
+    Forced, and therefore built here rather than handed to a thread. Without
+    `force` this takes the stale path -- which is right for a page load, where
+    somebody is waiting and a stored shelf is a far better answer than a
+    twelve-second wait -- and that path returns immediately after starting a
+    background rebuild.
+
+    Nobody is waiting here, and there is no answer to serve, so the two
+    differ: with one account it was one background read of the book library,
+    and with ten it was ten of them at once. Measured on 2026-09-06, all ten
+    timed out at the client's thirty seconds, every pass, and `once` reported
+    refreshing ten accounts having rebuilt none. Sequentially each takes
+    twelve seconds and none of them fail.
+    """
     done = 0
     for user in _users_with_shelves():
         try:
-            shelves.result(user, update_playlist=True)
+            shelves.result(user, force=True, update_playlist=True)
             done += 1
         except Exception as exc:  # noqa: BLE001 - one account's failure is not
             # every account's, and this runs where nobody is watching.

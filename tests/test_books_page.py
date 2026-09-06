@@ -174,10 +174,11 @@ book_store.put_shelf("user-matt", dict(SHELF))
 check.equal(upkeep.once(), 1, "upkeep refreshes the account that has a shelf")
 check.that(written and all(name == "Next Read" and ids == ["i1"]
                            for name, ids in written),
-           "and writes its playlist without anybody having visited anything. "
-           "More than one write is expected and correct: a shelf restored "
-           "from disk is served stale and settled, then rebuilt behind the "
-           "answer and settled again")
+           "and writes its playlist without anybody having visited anything")
+check.equal(len(written), 1,
+           "once, because the pass builds the shelf itself rather than "
+           "serving the stored one and starting a thread -- see "
+           "tests/test_upkeep_serialises.py for what that cost")
 
 # Nobody else. Building a shelf for a household member who has never opened
 # the feature costs a twelve-second Jellyfin listing to produce something
