@@ -229,5 +229,25 @@ unsupported = client.get(
 check.equal(unsupported.status_code, 404,
             "media without a recommender are named as unsupported")
 
+# --- a reason names the part this item credits, not the part that matched ---
+# Live on 2026-09-06: "Austin Powers in Goldmember" was offered as "features
+# Jay Roach", who directs it and appears in no cast anywhere.
+crew_seed = show("crew-seed", "Watched Film", progress=80,
+                 genres=("Comedy",), people=(("Pat Helm", "Actor"),))
+directed = show("directed", "Directed By The Same Hand", genres=("Comedy",),
+                people=(("Pat Helm", "Director"),))
+double = show("double", "Acted And Wrote", genres=("Comedy",),
+              people=(("Pat Helm", "Writer"), ("Pat Helm", "Actor")))
+credits = {row["id"]: " ".join(row["reason"])
+           for row in recommendations.build(
+               [crew_seed, directed, double])["recommendations"]}
+check.that("directed by Pat Helm" in credits.get("directed", ""),
+           "a director is credited with directing, not with being in the cast")
+check.that("features" not in credits.get("directed", ""),
+           "a name that never acted in an item is not said to feature in it")
+check.that("features Pat Helm" in credits.get("double", ""),
+           "somebody credited twice is named by the part a viewer would notice")
+
+
 harness.cleanup()
 raise SystemExit(check.report())
