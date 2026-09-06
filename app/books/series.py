@@ -13,6 +13,7 @@ applies to each book as if it had been asked for on its own.
 """
 import math
 import re
+from datetime import date, datetime, timezone
 
 from .. import config, jellyfin, listenarr, logs
 from . import audible, engine, shelves, store, wants
@@ -93,6 +94,42 @@ def _row_position(row: dict, series_asin: str) -> str | None:
         if position is not None:
             return position
     return None
+
+
+def _release_date(row: dict) -> date | None:
+    """The day Audible says a catalogue row comes out, when it says.
+
+    Listenarr relays the date as "2026-04-28" and Audible's own API as a full
+    timestamp, so both are read off the leading ten characters. None when the
+    field is absent or is something no calendar recognises.
+    """
+    text = _text(row.get("releaseDate"))[:10]
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _not_out_yet(row: dict, today: date) -> bool:
+    """A book nothing can acquire, because it has not been published.
+
+    Audible pads a series' listing with a placeholder product for every volume
+    it has announced and not released -- publisher "ZZZ - Series Advisor
+    Placeholder", SKU `PL_HLDR_...`, no narrator, dated 2200-01-01 -- and
+    lists genuine pre-orders beside the books that are out. Both are the same
+    thing here, and both are read off the one field they agree on: a release
+    date still in the future. Measured 2026-09-05, when a nine-row listing of
+    a four-book series turned five placeholders into five requests Listenarr
+    will search for forever.
+
+    A row with no date, or a date that does not parse, counts as out. Refusing
+    to ask for a real book because a relayed field was empty is the worse of
+    the two mistakes.
+    """
+    published = _release_date(row)
+    return published is not None and published > today
 
 
 def _identity(position: str | None, title: str) -> str:
@@ -224,7 +261,8 @@ def plan(user: jellyfin.User, name: str, anchor_item_id: str | None = None) -> d
 
     "On order" is an unfulfilled request from anybody in the household, and
     nothing else. A book this listener hid on the Discover shelf is left out
-    and said to be, not folded in with the ones on their way.
+    and said to be, not folded in with the ones on their way. A book Audible
+    has not published is held back the same way -- see `_not_out_yet`.
     """
     library = jellyfin.books(user.id)
     members = [book for book in library if _same_series(book, name)]
@@ -261,6 +299,7 @@ def plan(user: jellyfin.User, name: str, anchor_item_id: str | None = None) -> d
     }
     ordered = {a.upper() for a in store.ordered_asins()}
     hidden = {a.upper() for a in store.dismissed_asins(user.key)}
+    today = datetime.now(timezone.utc).date()
 
     # Two passes. A row is judged on its own first -- owned by id or by title
     # and author, on order, or hidden -- and only then by what it shares an
@@ -296,9 +335,14 @@ def plan(user: jellyfin.User, name: str, anchor_item_id: str | None = None) -> d
         }
         candidate["owned"] = (engine._already_owned(candidate, asins, by_title)
                               or bool(engine._title_keys(title) & member_titles))
-        candidate["ordered"] = not candidate["owned"] and asin in ordered
-        candidate["hidden"] = (not candidate["owned"] and not candidate["ordered"]
-                               and asin in hidden)
+        # Ahead of "on order", because a placeholder asked for in an earlier
+        # tap is not on its way and saying so would be a lie with a search
+        # behind it.
+        candidate["notOut"] = not candidate["owned"] and _not_out_yet(row, today)
+        candidate["ordered"] = (not candidate["owned"] and not candidate["notOut"]
+                                and asin in ordered)
+        candidate["hidden"] = (not candidate["owned"] and not candidate["notOut"]
+                               and not candidate["ordered"] and asin in hidden)
         if candidate["owned"]:
             owned_keys.add(candidate["key"])
         candidates.append(candidate)
@@ -306,6 +350,7 @@ def plan(user: jellyfin.User, name: str, anchor_item_id: str | None = None) -> d
     hidden_keys = {c["key"] for c in candidates if c["hidden"]}
 
     have: list[dict] = []
+    not_out: list[dict] = []
     on_order: list[dict] = []
     left_out: list[dict] = []
     missing: list[dict] = []
@@ -314,6 +359,11 @@ def plan(user: jellyfin.User, name: str, anchor_item_id: str | None = None) -> d
         key = candidate["key"]
         if candidate["owned"] or key in owned_keys:
             have.append(candidate)
+        elif candidate["notOut"]:
+            # On the row's own date and no other row's. One marketplace can
+            # list a book as out while the other still shows a placeholder for
+            # it, and the edition that is out is a real gap.
+            not_out.append(candidate)
         elif candidate["ordered"] or key in ordered_keys:
             on_order.append(candidate)
         elif candidate["hidden"] or key in hidden_keys:
@@ -327,8 +377,9 @@ def plan(user: jellyfin.User, name: str, anchor_item_id: str | None = None) -> d
             missing_keys.add(key)
 
     log.info("series plan user=%s series=%r asin=%s region=%s listed=%d have=%d "
-             "on_order=%d hidden=%d missing=%d", user.key, name, series_asin, region,
-             len(seen), len(have), len(on_order), len(left_out), len(missing))
+             "on_order=%d hidden=%d not_out=%d missing=%d", user.key, name,
+             series_asin, region, len(seen), len(have), len(on_order),
+             len(left_out), len(not_out), len(missing))
     return {
         "series": name,
         "seriesAsin": series_asin,
@@ -336,6 +387,7 @@ def plan(user: jellyfin.User, name: str, anchor_item_id: str | None = None) -> d
         "have": have,
         "onOrder": on_order,
         "leftOut": left_out,
+        "notOut": not_out,
         "missing": missing,
         "rows": {_text(row.get("asin")).upper(): row
                  for row in rows if isinstance(row, dict)},
@@ -345,6 +397,10 @@ def plan(user: jellyfin.User, name: str, anchor_item_id: str | None = None) -> d
 def want_series(user: jellyfin.User, name: str,
                 anchor_item_id: str | None = None) -> dict:
     """Ask for the books of one series the library does not hold, bounded.
+
+    Only what Audible has actually published: an unreleased volume is counted
+    and named as such rather than asked for, because a request for a book that
+    does not exist is one Listenarr searches for forever.
 
     Each book goes through `wants.want`, so a repeat is free, the ledger sees
     it, and Listenarr is handed the search. Bounded twice: by the tap limit,
@@ -391,19 +447,21 @@ def want_series(user: jellyfin.User, name: str,
     owned_count = _distinct_books(planned["have"])
     on_order_count = _distinct_books(planned["onOrder"])
     left_out_count = _distinct_books(planned["leftOut"])
+    not_out_count = _distinct_books(planned["notOut"])
     return {
         "series": name,
         "seriesAsin": planned["seriesAsin"],
         "ownedCount": owned_count,
         "onOrderCount": on_order_count,
         "leftOutCount": left_out_count,
+        "notOutCount": not_out_count,
         "requested": [{"asin": c["asin"], "title": c["title"]} for c in requested],
         "failed": [{"asin": c["asin"], "title": c["title"], "reason": c["reason"]}
                    for c in failed],
         "heldBackCount": held_back,
         "message": sentence(
             name, owned_count=owned_count, on_order=on_order_count,
-            left_out=left_out_count,
+            left_out=left_out_count, not_out=not_out_count,
             requested=[c["title"] for c in requested],
             failed=[c["title"] for c in failed],
             held_back=held_back, cap_hit=cap_hit, missing=len(missing)),
@@ -431,17 +489,17 @@ def _plural(count: int, noun: str) -> str:
 
 def sentence(name: str, *, owned_count: int, on_order: int, left_out: int,
              requested: list[str], failed: list[str], held_back: int,
-             cap_hit: bool, missing: int) -> str:
+             cap_hit: bool, missing: int, not_out: int = 0) -> str:
     """What to say about the outcome, in full, because the row that would have
     carried it is on another screen and the tap has nothing else to show for
     itself."""
     parts: list[str] = []
     if not missing:
-        if not on_order and not left_out:
+        if not on_order and not left_out and not not_out:
             return (f"You already have every book Audible lists in {name}: "
                     f"{_plural(owned_count, 'book')}.")
         parts.append(f"You have {_plural(owned_count, 'book')} of {name}.")
-        if on_order and not left_out:
+        if on_order and not left_out and not not_out:
             parts.append(
                 f"The {_plural(on_order, 'book') if on_order != 1 else 'one'} you do not "
                 f"have {'are' if on_order != 1 else 'is'} already being looked for.")
@@ -451,6 +509,9 @@ def sentence(name: str, *, owned_count: int, on_order: int, left_out: int,
         if left_out:
             parts.append(f"{_plural(left_out, 'book')} you hid "
                          f"{'was' if left_out == 1 else 'were'} left out.")
+        if not_out:
+            parts.append(f"{_plural(not_out, 'book')} "
+                         f"{'is' if not_out == 1 else 'are'} not out yet.")
         return " ".join(parts)
 
     if requested:
@@ -475,4 +536,7 @@ def sentence(name: str, *, owned_count: int, on_order: int, left_out: int,
     if left_out:
         parts.append(f"{_plural(left_out, 'book')} you hid "
                      f"{'was' if left_out == 1 else 'were'} left out.")
+    if not_out:
+        parts.append(f"{_plural(not_out, 'book')} "
+                     f"{'is' if not_out == 1 else 'are'} not out yet.")
     return " ".join(parts)

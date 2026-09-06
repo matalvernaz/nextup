@@ -2,6 +2,7 @@
 and what the sentence says about it."""
 import os
 import sys
+from datetime import date, timedelta
 from pathlib import Path
 
 os.environ.setdefault("JELLYFIN_TOKEN", "test-token")
@@ -37,10 +38,11 @@ def book(item_id, name, series_name, index, asin=None, author="Jim Butcher"):
     return item
 
 
-def row(asin, title, position, series_asin, series_name, author="Jim Butcher"):
+def row(asin, title, position, series_asin, series_name, author="Jim Butcher",
+        release="2020-01-01"):
     return {"asin": asin, "title": title, "authors": [{"name": author}],
             "narrators": [{"name": "A Reader"}], "lengthMinutes": 600,
-            "releaseDate": "2020-01-01",
+            "releaseDate": release,
             "series": [{"asin": series_asin, "name": series_name, "position": position}]}
 
 
@@ -356,6 +358,83 @@ check("and is not reported as a refusal", raced_outcome["failed"], [])
 check("the sentence blames the allowance", raced_outcome["message"],
       "You have used today's requests. 2 books of Case Saga are still missing. "
       "Another 1 book is already being looked for.")
+
+# --- a series announced further than it has been published ------------------
+# Audible lists a placeholder product for each volume it has named and not
+# released, and a pre-order for one with a date on it. Neither can be
+# acquired, and asking for either leaves Listenarr searching forever.
+TODAY = date.today()
+CS = "Calamity Saga"
+LIBRARY.append(book("cb1", "Calamity Saga 1", CS, 1, asin="B0CB01",
+                    author="Calamity Author"))
+PRODUCTS["B0CB01"] = {"title": "Calamity Saga 1", "_region": "ca",
+                      "series": [{"title": CS, "sequence": "1", "asin": "SER-CB"}]}
+SERIES_BOOKS["SER-CB"] = [
+    row("B0CB01", "Calamity Saga 1", "1", "SER-CB", CS, "Calamity Author"),
+    # Out today, which is out.
+    row("B0CB02", "Calamity Saga 2", "2", "SER-CB", CS, "Calamity Author",
+        release=TODAY.isoformat()),
+    # No date relayed at all: asked for rather than withheld on a blank field.
+    row("B0CB03", "Calamity Saga 3", "3", "SER-CB", CS, "Calamity Author",
+        release=""),
+    # A genuine pre-order.
+    row("B0CB04", "Calamity Saga 4", "4", "SER-CB", CS, "Calamity Author",
+        release=(TODAY + timedelta(days=30)).isoformat()),
+    # A placeholder, with every marker Audible actually sends on one.
+    {**row("B0CB05", "Calamity Saga 5", "5", "SER-CB", CS, "Calamity Author",
+           release="2200-01-01"),
+     "narrators": [], "sku": "PL_HLDR_158623CA",
+     "publisher": "ZZZ - Series Advisor Placeholder"},
+]
+
+gaps = series.plan(matt, CS, anchor_item_id="cb1")
+check("an unpublished book is not a gap", [c["title"] for c in gaps["missing"]],
+      ["Calamity Saga 2", "Calamity Saga 3"])
+check("a pre-order and a placeholder are both held back",
+      [c["title"] for c in gaps["notOut"]],
+      ["Calamity Saga 4", "Calamity Saga 5"])
+
+asked = series.want_series(matt, CS, anchor_item_id="cb1")
+check("only the published gaps are asked for",
+      [c["title"] for c in asked["requested"]],
+      ["Calamity Saga 2", "Calamity Saga 3"])
+check("nothing unpublished reaches Listenarr",
+      "B0CB04" not in added and "B0CB05" not in added, True)
+check("the unpublished ones are counted", asked["notOutCount"], 2)
+check("and the sentence says so", asked["message"],
+      "Asked for 2 books from Calamity Saga: Calamity Saga 2, Calamity Saga 3. "
+      "2 books are not out yet.")
+
+again_cs = series.want_series(matt, CS)
+check("a second tap keeps saying what is unpublished", again_cs["message"],
+      "You have 1 book of Calamity Saga. Another 2 books are already being "
+      "looked for. 2 books are not out yet.")
+
+# A placeholder somebody asked for before this rule existed reads as
+# unpublished, not as a book on its way.
+store.record_request(kadija.key, "B0CB05", "Calamity Saga 5")
+recorded = series.plan(matt, CS, anchor_item_id="cb1")
+check("an unpublished book already in the ledger is still unpublished",
+      "B0CB05" in [c["asin"] for c in recorded["notOut"]], True)
+check("and is not reported as on order",
+      "B0CB05" in [c["asin"] for c in recorded["onOrder"]], False)
+
+check("one unpublished book reads as one",
+      series.sentence(CS, owned_count=1, on_order=0, left_out=0, not_out=1,
+                      requested=[], failed=[], held_back=0, cap_hit=False,
+                      missing=0),
+      "You have 1 book of Calamity Saga. 1 book is not out yet.")
+
+check("a book out today is out",
+      series._not_out_yet({"releaseDate": TODAY.isoformat()}, TODAY), False)
+check("tomorrow's is not",
+      series._not_out_yet({"releaseDate": (TODAY + timedelta(days=1)).isoformat()},
+                          TODAY), True)
+check("a full timestamp is read as its date",
+      series._not_out_yet({"releaseDate": "2200-01-01T00:00:00Z"}, TODAY), True)
+check("a date no calendar recognises counts as out",
+      series._not_out_yet({"releaseDate": "coming soon"}, TODAY), False)
+check("no date at all counts as out", series._not_out_yet({}, TODAY), False)
 
 # --- positions compare as numbers -------------------------------------------
 check("3 and 3.0 are one position", series._position("3.0"), series._position(3))
