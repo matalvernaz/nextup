@@ -1,8 +1,36 @@
 {% extends "base.html" %}
-{% block title %}Books — Nextup{% endblock %}
+{% block title %}Discover — Nextup{% endblock %}
 {% block main %}
-<h2>Books</h2>
+<h2>Discover</h2>
 
+{#
+  A list of links rather than a select and a Submit. There are three of them
+  at most, each is one page, and a picker that needs a second control to take
+  effect is two moves where one would do.
+#}
+{% if shelves | length > 1 %}
+<nav aria-label="What to discover">
+  <ul class="media-picker">
+    {% for s in shelves %}
+    <li>
+      {% if s.current %}
+      <span aria-current="page">{{ s.label }}</span>
+      {% else %}
+      <a href="/discover?medium={{ s.key }}">{{ s.label }}</a>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+</nav>
+{% endif %}
+
+{% if not shelves %}
+{# The message is in the live region at the top of every page, and repeated
+   here because a page whose whole body is empty gives a reader nothing to
+   land on. #}
+<p>{{ message }}</p>
+
+{% elif medium == 'book' %}
 {#
   An undo offered only in the moment it is wanted. The dismissed titles are not
   kept anywhere -- the table holds an ASIN and a time and nothing a person could
@@ -26,9 +54,7 @@
     book{{ '' if allowance == 1 else 's' }} today.{% endif %}
 </p>
 
-<form method="post" action="/books/refresh">
-  <button type="submit">Work out new recommendations</button>
-</form>
+{% include "_refresh.html" %}
 
 <h3>Read next, from what the library already has</h3>
 {% if not own %}
@@ -101,5 +127,46 @@
   </li>
   {% endfor %}
 </ol>
+{% endif %}
+
+{% else %}
+{#
+  Films and television. One shelf, of things the library already holds and
+  nobody here has started -- so there is nothing to ask for and no button. The
+  same shape as the book shelf above it for that reason.
+#}
+{% include "_refresh.html" %}
+
+<h3>
+  {% if medium == 'movie' %}Watch next, from the films the library already has
+  {% else %}Watch next, from the series the library already has{% endif %}
+</h3>
+{% if pending %}
+{# Not a spinner and not a percentage. Neither is knowable here, and a reader
+   is better served by one sentence saying which phase this is in.
+
+   Above the shelf and not instead of it: a shelf in hand whose rebuild is
+   failing has both, and hiding the rows would take away the answer to keep
+   the news about it. #}
+<p>{{ pending }}</p>
+{% endif %}
+{% if not rows and not pending %}
+<p>Nothing yet. This fills in once you have watched a few things here, and
+  needs something unstarted left in the library to offer.</p>
+{% elif rows %}
+<p>{{ rows | length }} to choose from, best first.</p>
+<ol class="shelf">
+  {% for row in rows %}
+  <li>
+    <h4>{{ row.title }}</h4>
+    {% if row.reason %}
+    <ul class="why">
+      {% for reason in row.reason %}<li>{{ reason }}</li>{% endfor %}
+    </ul>
+    {% endif %}
+  </li>
+  {% endfor %}
+</ol>
+{% endif %}
 {% endif %}
 {% endblock %}

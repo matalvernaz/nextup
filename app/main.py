@@ -23,7 +23,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from . import (api, backends, compat_nextread, config, jellyfin, logs, media,
-               selfcheck, sessions, settings, setup, store, throttle, wants)
+               recommendations, selfcheck, sessions, settings, setup, store,
+               throttle, wants)
 from .books import shelves as book_shelves
 from .books import store as book_store
 from .books import upkeep
@@ -127,10 +128,9 @@ templates = Jinja2Templates(directory="app/templates")
 templates.env.globals["credential_rejected"] = (
     lambda: jellyfin.credential_rejected(force=False))
 
-# Whether to draw the link to the book shelves at all. Books are the only
-# medium with recommendations, and an installation without Listenarr or a
-# books library should not be offered a page that has nothing on it.
-templates.env.globals["books_offered"] = lambda: "book" in media.available()
+# Whether to draw the link to Discover at all. An installation with no
+# rankable library should not be offered a page that has nothing on it.
+templates.env.globals["discover_media"] = lambda: discover_media()
 
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
@@ -531,19 +531,54 @@ def post_cancel(request: Request, medium: str = Form(...),
 
 BOOK = "book"
 
+#: The shelves this page can draw, in the order it draws them, and what to
+#: call each. Books last: they are the medium with two shelves and much the
+#: longest page, so putting them first buries the other two.
+#:
+#: Named here rather than read from the media registry because that registry
+#: only carries a medium whose acquisition tool is configured, and a film
+#: shelf needs no Radarr.
+DISCOVER_LABELS = {media.MOVIE: "Films", media.SERIES: "Series", BOOK: "Books"}
+
+
+def discover_media() -> list[str]:
+    """Which media have a shelf on this installation, in page order."""
+    rankable = set(recommendations.offered())
+    books = BOOK in media.available()
+    return [key for key in DISCOVER_LABELS
+            if key in rankable or (key == BOOK and books)]
+
+
+def _back_to_discover(medium: str, message: str = "",
+                      **extra: str) -> RedirectResponse:
+    """Back to one shelf, carrying one sentence about what just happened."""
+    query = {"medium": medium, "msg": message,
+             **{k: v for k, v in extra.items() if v}}
+    trail = "&".join(f"{k}={quote(v)}" for k, v in query.items() if v)
+    return RedirectResponse(f"/discover{'?' + trail if trail else ''}",
+                            status_code=303)
+
 
 def _back_to_books(message: str = "", **extra: str) -> RedirectResponse:
-    """Back to the books page, carrying one sentence about what just happened."""
-    query = {"msg": message, **{k: v for k, v in extra.items() if v}}
-    trail = "&".join(f"{k}={quote(v)}" for k, v in query.items() if v)
-    return RedirectResponse(f"/books{'?' + trail if trail else ''}",
-                            status_code=303)
+    return _back_to_discover(BOOK, message, **extra)
 
 
 @app.get("/books", response_class=HTMLResponse)
 def get_books(request: Request, msg: str = "", undo_asin: str = "",
               undo_title: str = ""):
-    """The two book shelves: what to read next, and what to add.
+    """Where the book shelves used to live.
+
+    Kept because it is a bookmarkable address that was published, and because
+    the one thing worse than moving a page is moving it into a 404.
+    """
+    return _back_to_discover(BOOK, msg, undo_asin=undo_asin,
+                             undo_title=undo_title)
+
+
+@app.get("/discover", response_class=HTMLResponse)
+def get_discover(request: Request, medium: str = "", msg: str = "",
+                 undo_asin: str = "", undo_title: str = ""):
+    """What to play next, in whichever medium this server can rank.
 
     Its own page rather than a section of the search page. The search page's
     shape is "ask for a thing"; this one is "here is what was chosen for you",
@@ -551,8 +586,10 @@ def get_books(request: Request, msg: str = "", undo_asin: str = "",
     bury the form for everybody and bury it worst for somebody reading top to
     bottom.
 
-    Books are the only medium with shelves, so nothing here is written to be
-    reused by the other three. Two of them may never have any.
+    One page for all three, and one noun. Books arrived first and had a page
+    of their own; films and television had a working ranker with no page at
+    all. Two pages answering the same question in two vocabularies is what
+    this replaces.
     """
     if setup.needs_setup():
         return RedirectResponse(url="/setup", status_code=303)
@@ -560,33 +597,61 @@ def get_books(request: Request, msg: str = "", undo_asin: str = "",
         user = viewer(request)
     except LookupError as exc:
         return _signin_page(request, detail=str(exc), status=401)
-    if BOOK not in media.available():
-        return templates.TemplateResponse(
-            request=request, name="books.html", status_code=404,
-            context={"user": user, "own": [], "discover": [], "asked_for": set(),
-                     "allowance": 0, "playlist_name": config.PLAYLIST_NAME,
-                     "computed_at": "", "undo_asin": "", "undo_title": "",
-                     "message": "This installation does not serve books. "
-                                "Connect Listenarr and add a books library to "
-                                "Jellyfin."})
 
+    shelves = discover_media()
+    if not shelves:
+        return templates.TemplateResponse(
+            request=request, name="discover.html", status_code=404,
+            context={"user": user, "shelves": [], "medium": "", "rows": [],
+                     "pending": "", "message":
+                     "This installation has nothing to recommend yet. "
+                     "Recommendations come from a Jellyfin film, television "
+                     "or books library, and this server has none of those."})
+    # An unknown medium falls back to the first shelf rather than refusing, as
+    # the search page does with its own picker: a stale link is a person in
+    # the right place with the wrong query string.
+    medium = medium if medium in shelves else shelves[0]
+    context = {"user": user, "medium": medium, "message": msg,
+               "shelves": [{"key": key, "label": DISCOVER_LABELS[key],
+                            "current": key == medium} for key in shelves]}
+    if medium == BOOK:
+        context |= _book_shelves(user, undo_asin, undo_title)
+    else:
+        context |= _owned_shelf(user, medium)
+    return templates.TemplateResponse(
+        request=request, name="discover.html", context=context)
+
+
+def _book_shelves(user: jellyfin.User, undo_asin: str,
+                  undo_title: str) -> dict:
+    """The two book shelves: what to read next, and what to add."""
     data = book_shelves.result(user)
     asked_for = {row["asin"] for row in book_store.requests_for(user.key)
                  if not row["fulfilled_at"]}
-    return templates.TemplateResponse(
-        request=request, name="books.html",
-        context={
-            "user": user,
-            "own": data.get("own") or [],
-            "discover": data.get("discover") or [],
-            "asked_for": asked_for,
-            "allowance": wants.allowance(user, BOOK),
-            "playlist_name": data.get("playlist_name") or config.PLAYLIST_NAME,
-            "computed_at": _when(book_store.last_run(user.key)),
-            "undo_asin": undo_asin,
-            "undo_title": undo_title,
-            "message": msg,
-        })
+    return {
+        "own": data.get("own") or [],
+        "discover": data.get("discover") or [],
+        "asked_for": asked_for,
+        "allowance": wants.allowance(user, BOOK),
+        "playlist_name": data.get("playlist_name") or config.PLAYLIST_NAME,
+        "computed_at": _when(book_store.last_run(user.key)),
+        "undo_asin": undo_asin,
+        "undo_title": undo_title,
+        "pending": "",
+    }
+
+
+def _owned_shelf(user: jellyfin.User, medium: str) -> dict:
+    """One ranked shelf of what the library already holds.
+
+    Never built in front of the person who asked. A cold film build is twelve
+    seconds of Jellyfin on this library, and a page that hangs that long reads
+    as broken rather than as busy -- so the build runs behind the answer and
+    `pending` is what the page says meanwhile.
+    """
+    rows, pending = recommendations.shelf_or_start(user, medium=medium)
+    return {"rows": (rows or {}).get("recommendations") or [],
+            "pending": pending}
 
 
 def _when(run) -> str:
@@ -647,22 +712,30 @@ def post_book_restore(request: Request, asin: str = Form(...)):
                           else "That book was not hidden.")
 
 
-@app.post("/books/refresh")
-def post_book_refresh(request: Request):
-    """Throw away this account's shelves so the next load rebuilds them.
+@app.post("/discover/refresh")
+def post_discover_refresh(request: Request, medium: str = Form(BOOK)):
+    """Throw one shelf away so the next load rebuilds it.
 
-    Not a rebuild in front of the person who asked: it is twelve seconds, nine
-    of them one Jellyfin listing, and a page that hangs that long reads as
-    broken. The next load serves the stored answer and rebuilds behind it,
-    which is what `expire` leaves in place and `invalidate` did not.
+    Not a rebuild in front of the person who asked: books are twelve seconds,
+    nine of them one Jellyfin listing, and films are much the same. A page
+    that hangs that long reads as broken. The next load serves the stored
+    answer where there is one and rebuilds behind it, which is what `expire`
+    leaves in place and `invalidate` did not.
     """
     try:
         user = viewer(request)
     except LookupError as exc:
-        return _back_to_books(f"Nextup could not work out who you are. {exc}")
-    book_shelves.expire(user.key)
-    return _back_to_books("Working out new recommendations. They will appear "
-                          "here shortly.")
+        return _back_to_discover(
+            medium, f"Nextup could not work out who you are. {exc}")
+    if medium == BOOK:
+        book_shelves.expire(user.key)
+    elif medium in recommendations.SUPPORTED_MEDIA:
+        recommendations.expire(user, medium=medium)
+    else:
+        return _back_to_discover(medium, "There is no such shelf.")
+    return _back_to_discover(
+        medium, "Working out new recommendations. They will appear here "
+                "shortly.")
 
 
 def _back(medium: str, message: str) -> RedirectResponse:

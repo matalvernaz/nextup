@@ -360,6 +360,73 @@ def library_ids(medium: str = "series") -> tuple[str, ...]:
             if medium in SUPPORTED_MEDIA else ())
 
 
+#: How long a settled list of rankable media is kept. Every page's navigation
+#: asks for it, and it answers a question about the deployment -- which
+#: Jellyfin libraries exist -- rather than one about the request.
+OFFERED_TTL_SECONDS = 900
+
+#: And how long an unsettled one is kept: Jellyfin could not be asked, or has
+#: no library of either kind yet. Short, because creating the library ought to
+#: be enough on its own to make the shelf appear, and an empty answer is what
+#: takes it out of the navigation altogether.
+OFFERED_PROVISIONAL_SECONDS = 60
+
+_offered: tuple[float, tuple[str, ...], bool] | None = None
+
+
+def offered() -> tuple[str, ...]:
+    """Media this server can rank.
+
+    A Jellyfin library of that kind is the whole test. These shelves are built
+    from what the server already holds, so an installation with no Radarr
+    still has a film shelf, and gating it on the acquisition tool would take
+    away the half that works without one.
+
+    An empty answer is barely cached at all. It is what takes the shelf out
+    of the navigation altogether, so an outage, or a library created a minute
+    after the container started, must not be allowed to settle it.
+    """
+    global _offered
+    with _guard:
+        if _offered is not None:
+            at, value, settled = _offered
+            lifetime = (OFFERED_TTL_SECONDS if settled
+                        else OFFERED_PROVISIONAL_SECONDS)
+            if time.monotonic() - at <= lifetime:
+                return value
+    found = []
+    asked = True
+    for medium in SUPPORTED_MEDIA:
+        try:
+            if library_ids(medium):
+                found.append(medium)
+        except jellyfin.JellyfinUnavailable as exc:
+            log.warning("cannot tell whether %s can be ranked: %s", medium, exc)
+            asked = False
+    value = tuple(found)
+    with _guard:
+        _offered = (time.monotonic(), value, asked and bool(value))
+    return value
+
+
+def _libraries_for(medium: str, library_id: str) -> tuple[str, ...]:
+    """The libraries one request covers, narrowed to one where asked."""
+    available = library_ids(medium)
+    requested = jellyfin.normalise_id(library_id)
+    if not requested:
+        return available
+    by_normalised = {jellyfin.normalise_id(value): value for value in available}
+    if requested not in by_normalised:
+        raise UnknownLibrary(library_id)
+    return (by_normalised[requested],)
+
+
+def _cache_key(user: jellyfin.User, medium: str,
+               libraries: tuple[str, ...]) -> tuple:
+    return (medium, user.id,
+            tuple(jellyfin.normalise_id(value) for value in libraries))
+
+
 def result(
     user: jellyfin.User,
     library_id: str = "",
@@ -370,18 +437,8 @@ def result(
     """One user's shelf, optionally narrowed to one configured library."""
     if medium not in SUPPORTED_MEDIA:
         raise ValueError(f"unsupported recommendation medium {medium!r}")
-    available = library_ids(medium)
-    requested = jellyfin.normalise_id(library_id)
-    if requested:
-        by_normalised = {jellyfin.normalise_id(value): value for value in available}
-        if requested not in by_normalised:
-            raise UnknownLibrary(library_id)
-        libraries = (by_normalised[requested],)
-    else:
-        libraries = available
-
-    key = (medium, user.id,
-           tuple(jellyfin.normalise_id(value) for value in libraries))
+    libraries = _libraries_for(medium, library_id)
+    key = _cache_key(user, medium, libraries)
     with _guard:
         cached = _cache.get(key)
         if cached and not force and (
@@ -412,7 +469,111 @@ def result(
     return built
 
 
+#: What a caller waiting on an out-of-band build is given to say.
+BUILDING = ("Working out what to watch. This takes a moment the first time; "
+            "reload the page and it will be here.")
+
+#: Shelves being built where nobody is waiting. A page will not sit through a
+#: cold film build -- twelve seconds of Jellyfin on this library -- so it
+#: starts one and says so, and this is what stops the reload that follows from
+#: starting a second.
+_building: set[tuple] = set()
+
+#: How long a failed build is left alone before another one is allowed. A
+#: page that started a build on every load would ask a Jellyfin that is
+#: properly down once per reload; one that never retried would need somebody
+#: to press a button before a restarted Jellyfin made any difference.
+RETRY_AFTER_SECONDS = 120
+
+#: When the last out-of-band build for a key failed, and why. Kept because
+#: without it a build that failed twenty minutes ago still reads as "working
+#: it out", which is a page that never finishes and never says why.
+_failures: dict[tuple, tuple[float, str]] = {}
+
+
+def shelf_or_start(user: jellyfin.User, library_id: str = "", *,
+                   medium: str = "series") -> tuple[dict | None, str]:
+    """A shelf already in hand, or nothing and one sentence about why not.
+
+    For a caller that cannot wait. A shelf past its lifetime is served anyway
+    while the rebuild runs behind it, which is what the book shelves do and
+    for the same reason: an hour-old ranking is a better answer than a
+    twelve-second wait for a slightly newer one.
+
+    A build that has just failed is not retried for `RETRY_AFTER_SECONDS`,
+    however stale the answer being served is. Reloading would otherwise start
+    a fresh build every time, so a Jellyfin that is down would be asked once
+    per page load and the sentence would never change.
+    """
+    if medium not in SUPPORTED_MEDIA:
+        raise ValueError(f"unsupported recommendation medium {medium!r}")
+    key = _cache_key(user, medium, _libraries_for(medium, library_id))
+    with _guard:
+        cached = _cache.get(key)
+        if cached is not None and (time.monotonic() - cached.built_at
+                                   <= _cache_seconds(medium)):
+            return cached.value, ""
+        failed_at, detail = _failures.get(key, (0.0, ""))
+        waiting = detail and (
+            time.monotonic() - failed_at <= RETRY_AFTER_SECONDS)
+        starting = not waiting and key not in _building
+        if starting:
+            _building.add(key)
+    if starting:
+        threading.Thread(target=_build_behind, args=(user, library_id, medium, key),
+                         name=f"shelf-{medium}-{user.id}",
+                         daemon=True).start()
+    if cached is not None:
+        # The stale shelf, and -- while a rebuild is failing -- why it is the
+        # newest one there is. Silence here would read as a current answer.
+        return cached.value, detail if waiting else ""
+    return None, detail if waiting else BUILDING
+
+
+def _build_behind(user: jellyfin.User, library_id: str, medium: str,
+                  key: tuple) -> None:
+    """Build one shelf where nobody is waiting, and record what happened."""
+    try:
+        result(user, library_id, force=True, medium=medium)
+        with _guard:
+            _failures.pop(key, None)
+    except jellyfin.JellyfinUnavailable as exc:
+        log.warning("%s shelf build failed user=%s: %s", medium, user.key, exc)
+        _remember_failure(
+            key, "Jellyfin could not be reached, so this could not be worked "
+                 "out. Try again once it is back.")
+    except Exception as exc:  # noqa: BLE001 - a build with no caller must not
+        # take the process down, and the page has no other way to learn that
+        # the thing it is waiting for is never going to arrive.
+        log.warning("%s shelf build failed user=%s: %s", medium, user.key, exc)
+        _remember_failure(
+            key, "Working this out did not succeed. The log says why.")
+    finally:
+        with _guard:
+            _building.discard(key)
+
+
+def _remember_failure(key: tuple, detail: str) -> None:
+    with _guard:
+        _failures[key] = (time.monotonic(), detail)
+
+
+def expire(user: jellyfin.User, library_id: str = "", *,
+           medium: str = "series") -> None:
+    """Mark one shelf due for a rebuild, and let a failed one be tried again."""
+    if medium not in SUPPORTED_MEDIA:
+        raise ValueError(f"unsupported recommendation medium {medium!r}")
+    key = _cache_key(user, medium, _libraries_for(medium, library_id))
+    with _guard:
+        _cache.pop(key, None)
+        _failures.pop(key, None)
+    log.info("%s shelf expired user=%s", medium, user.key)
+
+
 def forget() -> None:
     """Drop every cached shelf. Used after configuration changes and in tests."""
+    global _offered
     with _guard:
         _cache.clear()
+        _failures.clear()
+        _offered = None
