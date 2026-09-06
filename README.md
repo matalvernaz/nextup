@@ -193,6 +193,11 @@ Radarr was asked for. A whole-series request has arrived when Jellyfin holds
 every episode Sonarr currently counts as aired — future episodes stay
 monitored, and the request is not closed after its first episode.
 
+Specials are on neither side of that comparison. Sonarr's aired total does not
+include them, so the episodes counted here must not either: a series with a
+special in the library would otherwise reach the total with real episodes still
+missing, one free episode per special.
+
 Books and music are the two exceptions, for the same underlying reason: their
 identity does not survive the trip. An audiobook arrives tagged with whichever
 ASIN the *other* marketplace issued for the same edition, so arrival is decided
