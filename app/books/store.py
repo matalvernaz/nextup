@@ -32,6 +32,7 @@ from ..store import (  # noqa: F401  (re-exported for the book engine)
     get_sims,
     get_vectors,
     init,
+    key_lock,
     rekey_users,
     put_audible_alias,
     put_product,
@@ -133,6 +134,11 @@ def forget_request(user_key: str, asin: str) -> bool:
     it counting against the day's allowance for a book nobody is getting.
     """
     return store.forget(user_key, MEDIUM, asin)
+
+
+def release_request(user_key: str, asin: str) -> tuple[bool, set]:
+    """Drop one book request and say who else is still waiting on it."""
+    return store.release(user_key, MEDIUM, asin)
 
 
 def outstanding_request_users(asin: str) -> set:

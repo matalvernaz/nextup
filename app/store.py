@@ -15,6 +15,7 @@ own ledger a copy rather than a reshape.
 """
 import json
 import sqlite3
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -149,6 +150,28 @@ CREATE INDEX IF NOT EXISTS feedback_events_time
 CREATE INDEX IF NOT EXISTS feedback_events_recommendation
     ON feedback_events(recommendation_id);
 """
+
+
+#: One lock per ledger key, so a read-modify-write over the same rows runs once
+#: at a time. SQLite serialises the statements; it does not serialise a decision
+#: taken between two of them, which is what the allowance check is.
+_key_locks: dict[str, threading.Lock] = {}
+_key_locks_guard = threading.Lock()
+
+
+def key_lock(*parts: str) -> threading.Lock:
+    """The lock for one account's requests in one medium.
+
+    Held across "is it already asked for, is there allowance, ask the backend,
+    write the row". Those are four statements with three decisions between
+    them, so two taps arriving together both read an unspent allowance and both
+    spend it. One worker serves this application, so a lock in the process is
+    the whole of the fix; a deployment that ever runs more would need the
+    reservation to live in the database instead.
+    """
+    name = "\x00".join(parts)
+    with _key_locks_guard:
+        return _key_locks.setdefault(name, threading.Lock())
 
 
 @contextmanager
@@ -425,6 +448,40 @@ def forget(user_key: str, medium: str, item_key: str) -> bool:
             "DELETE FROM requests WHERE user_key=? AND medium=? AND item_key=?",
             (user_key, medium, item_key))
     return cur.rowcount > 0
+
+
+def release(user_key: str, medium: str,
+            item_key: str) -> tuple[bool, set[str]]:
+    """Drop this account's request and say who else is still waiting on it.
+
+    One transaction, because these used to be two statements with a decision
+    between them. Two accounts cancelling the same thing at the same moment
+    each read the other as still waiting, so each left the acquisition running
+    and each deleted its own row -- and nothing pointed at it afterwards. The
+    row in Radarr, Sonarr or Listenarr then ran on with no ledger entry to
+    explain it or ever call it off.
+
+    `BEGIN IMMEDIATE` rather than the default deferred transaction: the write
+    lock has to be held from before the read, or the second caller reads a row
+    the first is about to delete.
+
+    - Returns: (whether there was a row to drop, the other accounts still
+      outstanding on the same thing).
+    """
+    with db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        existed = conn.execute(
+            "SELECT 1 FROM requests WHERE user_key=? AND medium=? AND item_key=?",
+            (user_key, medium, item_key)).fetchone() is not None
+        if existed:
+            conn.execute(
+                "DELETE FROM requests "
+                "WHERE user_key=? AND medium=? AND item_key=?",
+                (user_key, medium, item_key))
+        others = {row["user_key"] for row in conn.execute(
+            "SELECT user_key FROM requests WHERE medium=? AND item_key=? "
+            "AND fulfilled_at IS NULL", (medium, item_key))}
+    return existed, others - {user_key}
 
 
 def others_waiting(user_key: str, medium: str, item_key: str) -> set[str]:
