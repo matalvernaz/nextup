@@ -107,7 +107,7 @@ check.that("reading list" in body and "playlist" not in body.lower(),
 check.that('<ol class="shelf"' in body,
            "the shelves are ordered lists, because the order IS the "
            "recommendation")
-check.that("Discover" in body,
+check.that('href="/discover"' in body,
            "and the nav names the page, so it can be found from the other one")
 check.that('name="medium" value="book"' in body,
            "the refresh control says which shelf it refreshes, because one "

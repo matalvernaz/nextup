@@ -479,10 +479,16 @@ BUILDING = ("Working out what to watch. This takes a moment the first time; "
 #: starting a second.
 _building: set[tuple] = set()
 
-#: Why the last out-of-band build for a key failed. Kept because without it a
-#: build that failed twenty minutes ago still reads as "working it out",
-#: which is a page that never finishes and never says why.
-_failures: dict[tuple, str] = {}
+#: How long a failed build is left alone before another one is allowed. A
+#: page that started a build on every load would ask a Jellyfin that is
+#: properly down once per reload; one that never retried would need somebody
+#: to press a button before a restarted Jellyfin made any difference.
+RETRY_AFTER_SECONDS = 120
+
+#: When the last out-of-band build for a key failed, and why. Kept because
+#: without it a build that failed twenty minutes ago still reads as "working
+#: it out", which is a page that never finishes and never says why.
+_failures: dict[tuple, tuple[float, str]] = {}
 
 
 def shelf_or_start(user: jellyfin.User, library_id: str = "", *,
@@ -494,9 +500,10 @@ def shelf_or_start(user: jellyfin.User, library_id: str = "", *,
     for the same reason: an hour-old ranking is a better answer than a
     twelve-second wait for a slightly newer one.
 
-    A failed build is not retried on its own. Reloading would otherwise start
-    a fresh build every time, so the sentence stands until something calls
-    `expire`.
+    A build that has just failed is not retried for `RETRY_AFTER_SECONDS`,
+    however stale the answer being served is. Reloading would otherwise start
+    a fresh build every time, so a Jellyfin that is down would be asked once
+    per page load and the sentence would never change.
     """
     if medium not in SUPPORTED_MEDIA:
         raise ValueError(f"unsupported recommendation medium {medium!r}")
@@ -506,9 +513,10 @@ def shelf_or_start(user: jellyfin.User, library_id: str = "", *,
         if cached is not None and (time.monotonic() - cached.built_at
                                    <= _cache_seconds(medium)):
             return cached.value, ""
-        if cached is None and key in _failures:
-            return None, _failures[key]
-        starting = key not in _building
+        failed_at, detail = _failures.get(key, (0.0, ""))
+        waiting = detail and (
+            time.monotonic() - failed_at <= RETRY_AFTER_SECONDS)
+        starting = not waiting and key not in _building
         if starting:
             _building.add(key)
     if starting:
@@ -516,8 +524,10 @@ def shelf_or_start(user: jellyfin.User, library_id: str = "", *,
                          name=f"shelf-{medium}-{user.id}",
                          daemon=True).start()
     if cached is not None:
-        return cached.value, ""
-    return None, BUILDING
+        # The stale shelf, and -- while a rebuild is failing -- why it is the
+        # newest one there is. Silence here would read as a current answer.
+        return cached.value, detail if waiting else ""
+    return None, detail if waiting else BUILDING
 
 
 def _build_behind(user: jellyfin.User, library_id: str, medium: str,
@@ -545,7 +555,7 @@ def _build_behind(user: jellyfin.User, library_id: str, medium: str,
 
 def _remember_failure(key: tuple, detail: str) -> None:
     with _guard:
-        _failures[key] = detail
+        _failures[key] = (time.monotonic(), detail)
 
 
 def expire(user: jellyfin.User, library_id: str = "", *,

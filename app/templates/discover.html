@@ -142,13 +142,18 @@
   {% else %}Watch next, from the series the library already has{% endif %}
 </h3>
 {% if pending %}
-{# Not a spinner and not a percentage. Neither is knowable here, and a
-   reader is better served by one sentence saying which phase this is in. #}
+{# Not a spinner and not a percentage. Neither is knowable here, and a reader
+   is better served by one sentence saying which phase this is in.
+
+   Above the shelf and not instead of it: a shelf in hand whose rebuild is
+   failing has both, and hiding the rows would take away the answer to keep
+   the news about it. #}
 <p>{{ pending }}</p>
-{% elif not rows %}
+{% endif %}
+{% if not rows and not pending %}
 <p>Nothing yet. This fills in once you have watched a few things here, and
   needs something unstarted left in the library to offer.</p>
-{% else %}
+{% elif rows %}
 <p>{{ rows | length }} to choose from, best first.</p>
 <ol class="shelf">
   {% for row in rows %}

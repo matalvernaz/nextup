@@ -17,8 +17,8 @@ harness.setup(RADARR_URL="", SONARR_URL="", LISTENARR_URL="", BUSKARR_URL="",
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app import (jellyfin, main, media, recommendations,  # noqa: E402
-                 sessions, store)
+from app import (config, jellyfin, main, media,  # noqa: E402
+                 recommendations, sessions, store)
 
 check = harness.Check("discover page")
 store.init()
@@ -169,6 +169,46 @@ check.equal(broken.status_code, 200,
            "a shelf that cannot be built is still a page")
 check.that("Jellyfin could not be reached" in broken.text,
            "which says what went wrong instead of working on it forever")
+
+# --- a stale shelf is served, and says why it is the newest one there is ----
+#
+# The alternative was silence, which reads as a current answer, and the one
+# after that was a fresh build on every reload -- which asks a Jellyfin that
+# is properly down once per page load.
+recommendations.forget()
+jellyfin.recommendation_items_for_user = slow_library
+for _ in range(100):
+    good = client.get("/discover?medium=movie")
+    if "The Film To Offer" in good.text:
+        break
+    time.sleep(0.1)
+check.that("The Film To Offer" in good.text, "a shelf is built to go stale")
+
+config.MOVIE_RECOMMENDATION_CACHE_SECONDS = 0
+attempts: list[int] = []
+
+
+def refuses(medium, uid, libraries):
+    attempts.append(1)
+    raise jellyfin.JellyfinUnavailable("no route to host")
+
+
+jellyfin.recommendation_items_for_user = refuses
+for _ in range(100):
+    stale = client.get("/discover?medium=movie")
+    if "could not be reached" in stale.text:
+        break
+    time.sleep(0.1)
+check.that("The Film To Offer" in stale.text,
+           "the shelf that is in hand is still served while a rebuild fails")
+check.that("Jellyfin could not be reached" in stale.text,
+           "with why it is not any newer than it is")
+
+before = len(attempts)
+for _ in range(5):
+    client.get("/discover?medium=movie")
+check.equal(len(attempts), before,
+            "and reloading does not ask a Jellyfin that is down once per load")
 
 harness.cleanup()
 raise SystemExit(check.report())
