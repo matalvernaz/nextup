@@ -66,13 +66,17 @@ def _series_hits(user: jellyfin.User, query: str) -> list[dict]:
         log.info("series search unresolved query=%r (%s)", query, exc)
         return []
     name = planned.get("series") or query.strip()
-    missing = int(planned.get("missing") or 0)
+    # `plan` answers with the rows themselves, not counts, on all three of
+    # these. Reading one of them as a number was how this path came to raise
+    # TypeError for every series that actually had a gap -- which is to say,
+    # in the only case it exists for.
+    missing = len(planned.get("missing") or ())
     have = len(planned.get("have") or ())
     on_order = len(planned.get("onOrder") or ())
     return [{
         "medium": "book",
         "unit": SERIES_UNIT,
-        "item_key": name,
+        "itemKey": name,
         "title": name,
         "year": "",
         "authors": [],
@@ -80,7 +84,7 @@ def _series_hits(user: jellyfin.User, query: str) -> list[dict]:
         # book: what "owned" means for it is that the library already holds
         # everything Audible lists.
         "owned": missing == 0,
-        "detail": _series_detail(have, on_order, missing),
+        "overview": _series_detail(have, on_order, missing),
     }]
 
 
@@ -101,17 +105,32 @@ def _series_detail(have: int, on_order: int, missing: int) -> str:
 
 
 def _as_hit(row: dict) -> dict:
-    """One audiobook, as the shared results list expects a hit to look."""
+    """One audiobook, as the shared results list expects a hit to look.
+
+    `itemKey` and `overview` are the shared names, spelled the way `radarr`,
+    `sonarr` and `buskarr` spell them. They were `item_key` and `detail` here,
+    which is not a style difference: the results template reads `itemKey` into
+    the hidden field its Ask button posts, so every book hit posted an empty
+    identifier and came back refused.
+    """
     return {
         "medium": "book",
         "unit": "book",
-        "item_key": row.get("asin") or "",
+        "itemKey": row.get("asin") or "",
         "title": row.get("title") or "",
         "year": "",
         "authors": row.get("authors") or [],
         "artist": ", ".join(row.get("authors") or []),
+        # An audiobook is chosen by who reads it as much as by who wrote it,
+        # and this library has three narration series of one book series.
+        "narrators": row.get("narrators") or [],
         "owned": bool(row.get("owned")),
-        "detail": row.get("description") or "",
+        # Already asked for by this account. The other three media have no such
+        # state on a search hit; a book does, because `search` reads the ledger
+        # to build it, and dropping it made a book already on order look
+        # askable.
+        "requested": bool(row.get("requested")),
+        "overview": row.get("description") or "",
     }
 
 
