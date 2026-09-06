@@ -106,6 +106,34 @@ check.equal(blocks["music"]["backendReachable"], True,
             "and a healthy one is not made to look broken")
 media.forget()
 
+# --- an outage answers in JSON on the JSON routes ---------------------------
+# The application's own handler renders an HTML page, which is right for the
+# browser pages and useless to a client that asked for JSON. The
+# recommendation route already did this; search and requests did not.
+media._registry = {
+    media.MOVIE: media.Medium(media.MOVIE, "Films", ("movie",), 3,
+                              ("lib-movies",)),
+}
+media._registry_built_at = float("inf")
+media._registry_settled = True
+
+
+def no_index(*_args, **_kwargs):
+    raise jellyfin.JellyfinUnavailable("connection refused")
+
+
+media._owned.forget()
+media.jellyfin.owned_index = no_index
+# One row, or `states` answers an empty list without ever needing the index --
+# which is correct, and would make this check pass for the wrong reason.
+store.record("u1", media.MOVIE, "tmdb:1", "movie", "A Film", "2001", 1, "9")
+for path in ("/api/v1/search?medium=movie&q=anything", "/api/v1/requests"):
+    r = client.get(path, headers={"X-Emby-Token": "good-token"})
+    check.equal(r.status_code, 503, f"{path} answers 503 through an outage")
+    check.that(r.headers.get("content-type", "").startswith("application/json"),
+               f"{path} answers it in JSON, not as a page")
+media.forget()
+
 # Header parsing: the handshake form clients actually send.
 check.equal(
     jellyfin.token_from_header(

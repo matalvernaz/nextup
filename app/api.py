@@ -205,7 +205,16 @@ def get_search(medium: str, q: str = "", unit: str = "",
         raise HTTPException(
             status_code=404, detail=f"This server does not serve {medium}.")
     query = q.strip()
-    results = wants.search(query, medium, unit, user) if query else []
+    try:
+        results = wants.search(query, medium, unit, user) if query else []
+    except jellyfin.JellyfinUnavailable as exc:
+        # 503 in JSON, like the recommendation route. The application's own
+        # handler renders an HTML page, which is right for the browser pages
+        # and useless to a client that asked for JSON.
+        raise HTTPException(
+            status_code=503,
+            detail="Jellyfin could not be reached, so what the library "
+                   "already holds is not known.") from exc
     log.info("search user=%s medium=%s unit=%s q=%r hits=%d",
              user.key, medium, unit or "-", query, len(results))
     return {"version": config.API_VERSION, "medium": medium,
@@ -216,7 +225,13 @@ def get_search(medium: str, q: str = "", unit: str = "",
 def get_requests(medium: str | None = None,
                  user: jellyfin.User = Depends(caller)) -> dict:
     """This account's requests and what has become of each."""
-    rows = wants.states(user, medium)
+    try:
+        rows = wants.states(user, medium)
+    except jellyfin.JellyfinUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Jellyfin could not be reached, so whether these have "
+                   "arrived is not known.") from exc
     return {
         "version": config.API_VERSION,
         "requests": rows,
