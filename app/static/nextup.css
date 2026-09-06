@@ -37,6 +37,13 @@ input[type="text"], select { font-size: 1rem; padding: 0.3rem; min-width: 18rem;
     padding: 0.6rem;
 }
 
+/* The medium picker on Discover. The current one is not a link, so it needs
+   the weight a link would have given it -- and it is marked aria-current in
+   the markup, which is what actually announces it. */
+.media-picker [aria-current] {
+    font-weight: bold;
+}
+
 /* The book shelves. An ordered list because the order is the recommendation --
    a reader hearing "1 of 40" is being told something true about the ranking. */
 .shelf { padding-left: 1.6rem; }

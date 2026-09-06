@@ -25,16 +25,16 @@
     this shelf had no page, the playlist it writes silently stopped being
     written for a day and nothing said so.
 
-    Inside the signed-in block deliberately: `books_offered()` asks the
-    registry, which probes backends on a cache miss, and a signed-out visitor
-    should not be able to make this container reach out to Listenarr -- nor
-    learn from how long the page took whether it is configured.
+    Inside the signed-in block deliberately: `discover_media()` asks the
+    media registry, which probes backends on a cache miss, and a signed-out
+    visitor should not be able to make this container reach out to Listenarr
+    -- nor learn from how long the page took whether it is configured.
   #}
-  {% if books_offered() %}
+  {% if discover_media() %}
   <nav aria-label="Sections">
     <ul>
       <li><a href="/">Search and requests</a></li>
-      <li><a href="/books">Book recommendations</a></li>
+      <li><a href="/discover">Discover</a></li>
     </ul>
   </nav>
   {% endif %}

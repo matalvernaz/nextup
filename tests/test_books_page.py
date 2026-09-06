@@ -1,9 +1,10 @@
-"""The book shelves in a browser, and the upkeep that no longer needs one.
+"""The book shelves on Discover, and the upkeep that no longer needs a visitor.
 
-Two things are being pinned. The page itself -- which did not exist, and whose
-absence cost the Jellyfin playlist a day of being written -- and the scheduled
-pass that means the playlist's freshness never depends on a person visiting
-again.
+Three things are being pinned. The shelves themselves -- which had no page at
+all once, and whose absence cost the Jellyfin playlist a day of being written
+-- the address they used to live at, which still has to lead somewhere, and
+the scheduled pass that means the playlist's freshness never depends on a
+person visiting again.
 """
 import harness
 
@@ -73,7 +74,13 @@ client = TestClient(main.app, raise_server_exceptions=False,
 # anybody. JELLYFIN_USER is empty here, as a household deployment leaves it.
 client.cookies.set(sessions.COOKIE_NAME, sessions.issue("a-token", MATT.id))
 
-page = client.get("/books")
+moved = client.get("/books")
+check.equal(moved.status_code, 303,
+            "the address the shelves used to live at still leads somewhere")
+check.equal(moved.headers["location"], "/discover?medium=book",
+            "and it leads to the same shelves under the one Discover noun")
+
+page = client.get("/discover?medium=book")
 check.equal(page.status_code, 200, "the page renders")
 body = page.text
 
@@ -100,8 +107,11 @@ check.that("reading list" in body and "playlist" not in body.lower(),
 check.that('<ol class="shelf"' in body,
            "the shelves are ordered lists, because the order IS the "
            "recommendation")
-check.that("Book recommendations" in body,
+check.that("Discover" in body,
            "and the nav names the page, so it can be found from the other one")
+check.that('name="medium" value="book"' in body,
+           "the refresh control says which shelf it refreshes, because one "
+           "page now carries three")
 
 # --- the nav is not drawn where there is nothing behind it -------------------
 #
@@ -116,22 +126,21 @@ import os  # noqa: E402
 
 os.environ["LISTENARR_URL"] = ""
 media.forget()
-not_served = client.get("/books")
+not_served = client.get("/discover?medium=book")
 check.equal(not_served.status_code, 404,
-            "the page says it is not served here, rather than rendering two "
-            "empty shelves")
-check.that("Book recommendations" not in not_served.text,
-           "and no nav offers it")
+            "the page says it has nothing to recommend, rather than "
+            "rendering empty shelves")
+check.that("Discover</a>" not in not_served.text, "and no nav offers it")
 
 # The sign-in page must never draw it either, and not because of what it says:
-# `books_offered()` asks the registry, which probes backends on a cache miss,
+# `discover_media()` asks the registry, which probes backends on a cache miss,
 # so a signed-out visitor could otherwise make this container reach out to
 # Listenarr and learn from the delay whether it is configured.
-check.that("Book recommendations" not in client.get("/signin").text,
+check.that("Discover</a>" not in client.get("/signin").text,
            "and a signed-out visitor is told nothing about the backends")
 os.environ["LISTENARR_URL"] = "http://listenarr.invalid:4545"
 media.forget()
-check.equal(client.get("/books").status_code, 200,
+check.equal(client.get("/discover?medium=book").status_code, 200,
             "an empty books library is still served, controls and all")
 
 # --- dismissing offers an undo, in the one moment it is wanted ---------------
@@ -147,7 +156,8 @@ check.that("undo_asin=B0NEW" in hidden.headers["location"],
 check.that("One%20You%20Do%20Not" in hidden.headers["location"],
            "and its title, so the undo control can be read aloud")
 
-with_undo = client.get("/books?undo_asin=B0NEW&undo_title=One+You+Do+Not")
+with_undo = client.get(
+    "/discover?medium=book&undo_asin=B0NEW&undo_title=One+You+Do+Not")
 check.that("Undo hiding One You Do Not" in with_undo.text,
            "and the page offers it by name")
 

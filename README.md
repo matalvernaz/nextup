@@ -35,17 +35,28 @@ Put HTTPS in front of it before letting it out of your own network. Signing in
 sends a Jellyfin password, and over plain HTTP that crosses the network as
 typed — the page says so when it is not encrypted.
 
-### Books
+### Discover
 
-Where Listenarr is connected and Jellyfin has a books library, `/books` carries
-two ranked shelves: what to read next from what the library already holds, and
-what to add that it does not. Each row says why it is there. The first shelf is
-also kept in Jellyfin as a reading list, so you can pick one up from any
-Jellyfin app rather than only from this one — refreshed on a schedule, not when
-somebody happens to visit.
+`/discover` is what to play next, ranked, for each medium this server can rank.
+Every row says why it is there.
 
-Books are the only medium with recommendations. The other three are search and
-request.
+- **Films** and **Series** need only a Jellyfin library of that kind. One shelf
+  each, of what the library already holds and nobody has started, ranked from
+  your own playback, favourites and ratings. No Radarr or Sonarr required —
+  these are recommendations about what is already there.
+- **Books** need Listenarr connected and a books library. Two shelves: what to
+  read next from what the library holds, and what to add that it does not. The
+  first is also kept in Jellyfin as a reading list, so you can pick one up from
+  any Jellyfin app rather than only from this one — refreshed on a schedule,
+  not when somebody happens to visit.
+
+Music is the one medium with no recommendations; there it is search and request
+only.
+
+A shelf is never built while you wait. The first film shelf on a large library
+is around twelve seconds of Jellyfin, so the page says it is working on it and
+has the shelf on the next load. After that it is instant for an hour, and
+`Work out new recommendations` starts a fresh one.
 
 ### Versions
 
@@ -151,6 +162,10 @@ half-configured install can say which half:
 what is actually there and nothing at all for what is not. A backend that is
 configured and briefly silent keeps its medium and says so, rather than
 vanishing and taking somebody's list of outstanding requests with it.
+
+Those three are what it takes to *ask* for something. A film or television
+shelf on `/discover` needs only the third: it ranks what the library already
+holds, so it is there whether or not an acquisition tool is.
 
 ## Signing in
 

@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass
 
 from . import (backends, buskarr, config, jellyfin, listenarr, logs,
-               radarr, sonarr)
+               radarr, recommendations, sonarr)
 
 log = logs.get("media")
 
@@ -158,13 +158,20 @@ def available() -> dict[str, Medium]:
 
 
 def forget() -> None:
-    """Drop the cached registry and library index."""
+    """Drop everything derived from a connection setting.
+
+    The recommendation shelves included: they are built from a read of a
+    Jellyfin library, so after the address changes they describe the wrong
+    server, and which media can be ranked is the same question as which
+    libraries exist.
+    """
     global _registry, _registry_settled
     with _registry_guard:
         _registry = None
         _registry_settled = False
     _owned.forget()
     backends.forget()
+    recommendations.forget()
 
 
 def get(medium: str) -> Medium | None:

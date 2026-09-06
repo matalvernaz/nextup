@@ -1,0 +1,9 @@
+{#
+  The one control that is the same on every shelf. Included rather than
+  repeated so the two arms of the page cannot drift apart on which medium
+  they post.
+#}
+<form method="post" action="/discover/refresh">
+  <input type="hidden" name="medium" value="{{ medium }}">
+  <button type="submit">Work out new recommendations</button>
+</form>
