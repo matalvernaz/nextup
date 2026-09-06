@@ -19,7 +19,7 @@ store.init()
 # must not ask Jellyfin anything -- it used to, and raised, and the raise
 # happens inside lifespan where it kills the process rather than failing a
 # health check. `restart: unless-stopped` then makes it a loop.
-check.equal(store.ledger_is_empty(), True, "a fresh install has no requests")
+check.equal(store.nothing_to_rekey(), True, "a fresh install has nothing to migrate")
 try:
     main._rekey_ledger_once()
     check.that(True, "first boot does not need Jellyfin")
@@ -38,7 +38,7 @@ check.equal(store.user_key_scheme(), "id", "a second run changes nothing")
 # way. Better to refuse to start and say so.
 store.set_user_key_scheme("name")
 store.record("matt", "book", "B01", "book", "A Novel", "", 1, "")
-check.equal(store.ledger_is_empty(), False, "there is now something to migrate")
+check.equal(store.nothing_to_rekey(), False, "there is now something to migrate")
 check.raises(RuntimeError, main._rekey_ledger_once,
              "a ledger that needs migrating still refuses to start blind")
 

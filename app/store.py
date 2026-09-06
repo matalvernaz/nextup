@@ -172,10 +172,49 @@ def db():
 def init() -> None:
     Path(config.DB_PATH).parent.mkdir(parents=True, exist_ok=True)
     with db() as conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS meta "
+                     "(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        _drop_outdated_caches(conn)
         conn.executescript(SCHEMA)
         conn.executescript(BOOK_SCHEMA)
         _add_missing_columns(conn)
     log.info("store ready at %s", config.DB_PATH)
+
+
+def _drop_outdated_caches(conn: sqlite3.Connection) -> None:
+    """Throw away cached payloads written to a shape this code no longer reads.
+
+    `CREATE TABLE IF NOT EXISTS` will not reshape a table that already exists,
+    so a version bump has to DROP. Both constants carried this meaning in the
+    audiobook service and the check did not survive the merge into this one --
+    which made them decoration: bumping either did nothing, and a reshaped
+    payload would have gone on being served for its whole TTL, 720 hours in the
+    case of a product.
+
+    Versioned apart on purpose. Reshaping a cached product must not throw away
+    a similarity graph that costs one Audible request per seed per axis.
+    """
+    for key, version, tables in (
+        ("sims_schema_version", SIMS_SCHEMA_VERSION,
+         ("sims", "doc_vectors", "audible_aliases", "products")),
+        ("products_schema_version", PRODUCTS_SCHEMA_VERSION, ("products",)),
+    ):
+        row = conn.execute("SELECT value FROM meta WHERE key=?",
+                           (key,)).fetchone()
+        try:
+            current = int(row["value"]) if row else None
+        except (TypeError, ValueError):
+            current = None
+        if current == version:
+            continue
+        for table in tables:
+            conn.execute(f"DROP TABLE IF EXISTS {table}")
+        conn.execute("INSERT INTO meta(key,value) VALUES(?,?) "
+                     "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                     (key, str(version)))
+        if row is not None:
+            log.info("dropped %s: %s moved from %s to %d",
+                     ", ".join(tables), key, row["value"], version)
 
 
 #: Columns added to `requests` after the first release. `CREATE TABLE IF NOT
@@ -210,17 +249,25 @@ def set_user_key_scheme(scheme: str) -> None:
                      (USER_KEY_SCHEME, scheme))
 
 
-def ledger_is_empty() -> bool:
-    """Whether there is any request at all, of any medium, from anybody.
+def nothing_to_rekey() -> bool:
+    """Whether any user-scoped table holds a row at all.
 
     Asked at startup, because the migration onto account ids is fatal when
     Jellyfin cannot be reached and a fresh install has nothing to migrate. A
     first `docker compose up` where Jellyfin is not up yet -- the ordinary
     ordering on a single box -- used to crash-loop the container on a
     rekeying of zero rows.
+
+    Every table, not just `requests`. Asking about that one alone meant an
+    account with a shelf, a dismissal or a run and no outstanding request took
+    the fresh-install path: the marker was written, the migration never ran,
+    and their recommendations stayed under a display name nothing would look
+    for again.
     """
     with db() as conn:
-        return conn.execute("SELECT 1 FROM requests LIMIT 1").fetchone() is None
+        return not any(
+            conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
+            for table in USER_SCOPED_TABLES)
 
 
 #: Every table whose `user_key` names an account. All of them move together in

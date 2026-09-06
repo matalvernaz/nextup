@@ -97,10 +97,39 @@ check.equal(store.restore("matt", "B03"), False,
 # list as empty and every allowance as unspent. An empty ledger has nothing to
 # migrate, though, and a fresh install whose Jellyfin is not up yet used to
 # crash-loop on a migration of zero rows.
-check.equal(store.ledger_is_empty(), False, "this ledger has rows in it")
+check.equal(store.nothing_to_rekey(), False, "this ledger has rows in it")
 with store.db() as conn:
     conn.execute("DELETE FROM requests")
-check.equal(store.ledger_is_empty(), True, "an emptied ledger says so")
+check.equal(store.nothing_to_rekey(), True, "an emptied ledger says so")
+
+# Every user-scoped table, not only `requests`. Asked about that one alone, an
+# account with a shelf and no outstanding request took the fresh-install path:
+# the marker was written, the migration never ran, and their recommendations
+# stayed under a display name nothing would look for again.
+with store.db() as conn:
+    conn.execute("INSERT INTO shelves (user_key, payload, computed_at) "
+                 "VALUES ('matt', '{}', 0)")
+check.equal(store.nothing_to_rekey(), False,
+            "a shelf with no request is still something to migrate")
+with store.db() as conn:
+    conn.execute("DELETE FROM shelves")
+
+# --- a cache version bump has to actually throw the cache away ---------------
+# Both constants say in their own comments that this is what they are for, and
+# the check did not survive the merge, which made bumping either one a no-op.
+with store.db() as conn:
+    conn.execute("INSERT OR REPLACE INTO products (asin, payload, fetched_at) "
+                 "VALUES ('B0OLD', '{}', 0)")
+    conn.execute("INSERT INTO meta(key,value) VALUES('products_schema_version','1') "
+                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+store.init()
+with store.db() as conn:
+    left = conn.execute("SELECT 1 FROM products WHERE asin='B0OLD'").fetchone()
+    marked = conn.execute(
+        "SELECT value FROM meta WHERE key='products_schema_version'").fetchone()
+check.equal(left, None, "a payload cached under an older shape is dropped")
+check.equal(marked["value"], str(store.PRODUCTS_SCHEMA_VERSION),
+            "and the version it was dropped for is written down")
 
 harness.cleanup()
 raise SystemExit(check.report())

@@ -74,13 +74,20 @@ class User:
 class Owned:
     """What the library already holds, keyed the way the arrs identify things.
 
-    `series_item_ids` maps a provider id to Jellyfin's own item id, which is
-    what makes an episode count askable. The count itself is deliberately NOT
-    here: this fork returns neither `RecursiveItemCount` nor `ChildCount` on a
-    Series however they are requested (measured, both come back null), so the
-    only route to it is asking about episodes -- and asking about every
-    episode in the library is a 24 MB, six-second answer to a question only
-    ever asked about the two or three series somebody is waiting on.
+    `series_item_ids` maps a **TVDB** id to Jellyfin's own item id, which is
+    what makes an episode count askable. TVDB alone, because that is what the
+    only reader looks up: a series ledger key is `tvdb:<id>`. It held both TVDB
+    and TMDB ids under bare keys, which is one namespace pretending to be two --
+    both are small integers, so a series whose TMDB id happened to equal another
+    series' TVDB id answered for the wrong show, and its episode count could
+    close somebody else's request.
+
+    The count itself is deliberately NOT here: this fork returns neither
+    `RecursiveItemCount` nor `ChildCount` on a Series however they are requested
+    (measured, both come back null), so the only route to it is asking about
+    episodes -- and asking about every episode in the library is a 24 MB,
+    six-second answer to a question only ever asked about the two or three
+    series somebody is waiting on.
     """
     movie_tmdb: frozenset[str] = frozenset()
     series_tvdb: frozenset[str] = frozenset()
@@ -278,11 +285,9 @@ def owned_index() -> Owned:
     for item in _items("series", "Series", fields="ProviderIds"):
         tvdb = _provider(item, "Tvdb")
         tmdb = _provider(item, "Tmdb")
-        for key in (tvdb, tmdb):
-            if key:
-                item_ids[key] = item["Id"]
         if tvdb:
             series_tvdb.add(tvdb)
+            item_ids[tvdb] = item["Id"]
         if tmdb:
             series_tmdb.add(tmdb)
 
