@@ -205,21 +205,34 @@ def restore(
     return restored
 
 
-def states(user_key: str, owned: tuple[set, dict]) -> list[dict]:
+def states(user_key: str, owned: tuple[set, dict] | None) -> list[dict]:
     """This account's requests, each with its current state.
 
     `owned` is the library index -- ASINs, and normalised titles to author sets
     -- which the engine builds on every run anyway. There is still no status to
     fetch from Listenarr and nothing to poll: a book has either reached the
     library or it has not.
+
+    `None` means the index could not be had. The rows are still reported, with
+    the state their age implies, and nothing is settled: a book that has
+    arrived reads as still coming until the next read. That is the same
+    staleness this index already carries between rebuilds, and much better
+    than the alternative -- the whole request list, films and series and music
+    included, disappearing behind a 503 because one library listing timed out.
     """
-    asins, by_title = owned
     rows = store.requests_for(user_key)
-    arrived = {r["asin"] for r in rows
-               if r["fulfilled_at"] is None and _arrived(r, asins, by_title)}
-    if arrived:
-        log.info("requests fulfilled user=%s asins=%s", user_key, sorted(arrived))
-    store.fulfil_requests(user_key, arrived)
+    arrived: set[str] = set()
+    if owned is not None:
+        asins, by_title = owned
+        arrived = {r["asin"] for r in rows
+                   if r["fulfilled_at"] is None and _arrived(r, asins, by_title)}
+        if arrived:
+            log.info("requests fulfilled user=%s asins=%s",
+                     user_key, sorted(arrived))
+        store.fulfil_requests(user_key, arrived)
+    else:
+        log.warning("reporting %d book request(s) unsettled user=%s: the "
+                    "library index could not be read", len(rows), user_key)
 
     out = []
     for row in rows:

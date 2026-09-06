@@ -40,14 +40,52 @@ def owned_index(user: jellyfin.User) -> tuple[set, dict]:
     Cached separately from the shelves, and briefly: a book bought since the
     last search should stop being offered without waiting an hour for the
     shelf's own entry to age out.
+
+    An expired index is served while a rebuild runs behind it. Blocking at the
+    boundary buys nothing: the answer served a second before it expired was
+    already `OWNED_TTL_SECONDS` old and nobody waited for that one, so waiting
+    here trades a knowably-stale answer for a page that reads as broken. The
+    home page asks for this, to settle book arrivals -- measured on the live
+    server at 14.4 s with the index expired against 0.5 s with it in hand.
     """
     with _cache_guard:
         entry = _owned_cache.get(user.key)
-        if entry and time.monotonic() - entry[0] <= OWNED_TTL_SECONDS:
-            return entry[1]
+    if entry:
+        if time.monotonic() - entry[0] > OWNED_TTL_SECONDS:
+            _rebuild_owned_behind(user)
+        return entry[1]
     index = engine._owned_index(jellyfin.books(user.id))
     _publish_owned(user.key, index)
     return index
+
+
+#: Being rebuilt, so a stale answer served to one reader is not rebuilt again
+#: by the next four.
+_refreshing_owned: set[str] = set()
+
+
+def _rebuild_owned_behind(user: jellyfin.User) -> None:
+    """Rebuild one account's library index where nobody is waiting for it."""
+    with _cache_guard:
+        if user.key in _refreshing_owned:
+            return
+        _refreshing_owned.add(user.key)
+
+    def run() -> None:
+        try:
+            _publish_owned(user.key,
+                           engine._owned_index(jellyfin.books(user.id)))
+        except Exception as exc:  # noqa: BLE001 - a rebuild with no caller
+            # must never take the process down, and the previous index is
+            # still being served. `_publish_owned` is not reached, so the
+            # entry keeps its old timestamp and the next reader tries again.
+            log.warning("background library index refresh failed user=%s: %s",
+                        user.key, exc)
+        finally:
+            with _cache_guard:
+                _refreshing_owned.discard(user.key)
+
+    Thread(target=run, name=f"owned-index-{user.key}", daemon=True).start()
 
 
 def _publish_owned(user_key: str, index: tuple[set, dict]) -> None:
