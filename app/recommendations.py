@@ -22,7 +22,18 @@ SUPPORTED_MEDIA = ("series", "movie")
 # guest overlap drowns everything else. Jellyfin preserves billing order, so
 # the first six actors are the stable main-cast approximation available here.
 MAIN_CAST_LIMIT = 6
-CREATIVE_ROLES = frozenset({"Creator", "Director", "Writer"})
+
+#: How one person's part in an item is worded, most visible part first. A
+#: person credited twice -- an actor who also wrote it -- is described by the
+#: first of these that applies, because that is the part a viewer would name.
+CREDIT_PHRASES = (
+    ("Actor", "features"),
+    ("Director", "directed by"),
+    ("Creator", "created by"),
+    ("Writer", "written by"),
+)
+CREATIVE_ROLES = frozenset(
+    role for role, _ in CREDIT_PHRASES if role != "Actor")
 
 
 class UnknownLibrary(ValueError):
@@ -96,6 +107,23 @@ def _people(item: dict) -> list[str]:
             names.append(name)
             actors += 1
     return names
+
+
+def _credit(item: dict, name: str) -> str:
+    """How this item credits one person: "features", "directed by", and so on.
+
+    Read from the item being described rather than from the seed that matched
+    it. The two are frequently different parts -- a name reaches the taste
+    profile for acting in something and turns up again directing this -- and
+    only this side of it is known here.
+    """
+    wanted = _normalise(name)
+    roles = {person.get("Type") for person in item.get("People") or []
+             if _normalise(str(person.get("Name") or "")) == wanted}
+    for role, phrase in CREDIT_PHRASES:
+        if role in roles:
+            return phrase
+    return "features"
 
 
 def _add(profile: Counter, display: dict[str, str], values: list[str],
@@ -200,8 +228,10 @@ def _score_candidates(
         reasons: list[str] = []
         if people_matches:
             source_kind = "film" if medium == "movie" else "show"
+            name = people_matches[0][0]
             reasons.append(
-                f"features {people_matches[0][0]} from a {source_kind} you've watched")
+                f"{_credit(item, name)} {name}, from a {source_kind} "
+                f"you've watched")
         if genre_matches:
             names = [name for name, _ in genre_matches[:2]]
             reasons.append(_genre_reason(names, medium))
