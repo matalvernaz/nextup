@@ -9,6 +9,22 @@ asked for yet.</p>
 {% else %}
 
 <h2>Ask for something</h2>
+{#
+  Named rather than hidden. The medium stays on offer while its acquisition
+  tool is down, because taking it away would also take away the list of what
+  has already been asked for -- but a search that answers nothing must not
+  read as a catalogue with nothing in it.
+#}
+{% set silent = media | rejectattr('backend_reachable') | list %}
+{% if silent %}
+<div role="alert" class="fault">
+  {% for m in silent %}
+  <p>{{ m.label }}: the tool that fetches these is not answering.
+     {% if m.backend_detail %}{{ m.backend_detail }}{% endif %}
+     Asking will not work until it is back.</p>
+  {% endfor %}
+</div>
+{% endif %}
 <form method="get" action="/" role="search">
   <fieldset>
     <legend>Search</legend>

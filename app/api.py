@@ -151,6 +151,13 @@ def capabilities(protocol: int = 1,
                           for unit in found.units},
             "dailyCap": None if user.is_admin else found.daily_cap,
             "remainingToday": wants.allowance(user, found.key),
+            # Whether the tool that acquires this medium answered when it was
+            # last asked. Published because a client had no way to tell "no
+            # matches" from "Radarr did not answer", and the medium is
+            # deliberately still offered while a backend is down -- so without
+            # this the outage is invisible on every surface.
+            "backendReachable": found.backend_reachable,
+            "backendDetail": found.backend_detail,
         })
     log.info("capabilities user=%s keyholder=%s media=%s",
              user.key, user.is_admin, [b["medium"] for b in blocks])

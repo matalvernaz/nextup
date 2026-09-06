@@ -5,6 +5,7 @@ only what it has bought (85 rows against Jellyfin's 1028), so Nextread never
 uses it to answer "what do I have". It does ask "what is already on order", to
 avoid recommending a book that is mid-acquisition.
 """
+from datetime import date, datetime, timezone
 from typing import NamedTuple
 
 import httpx
@@ -117,6 +118,38 @@ def _series_payload(values) -> tuple[dict, list[dict]]:
         for index, (value, name, number) in enumerate(entries)
     ]
     return memberships[primary_index], memberships
+
+
+def not_yet_published(text: str | None, today: date | None = None) -> bool:
+    """Whether a catalogue row names a book nothing can acquire yet.
+
+    Audible pads a series listing with a placeholder product for every volume
+    it has announced and not released -- publisher "ZZZ - Series Advisor
+    Placeholder", SKU `PL_HLDR_...`, no narrator, dated 2200-01-01 -- and lists
+    genuine pre-orders beside the books that are out. Both are the same thing
+    here, and both are read off the one field they agree on: a release date
+    still in the future.
+
+    A row with no date, or a date that does not parse, counts as out. Refusing
+    to ask for a real book because a relayed field was empty is the worse of the
+    two mistakes.
+
+    Listenarr relays the date as "2026-04-28" and Audible's own API as a full
+    timestamp, so both are read off the leading ten characters.
+
+    The clock is UTC, because that is the one the series plan reads and a
+    catalogue date is not local to anybody. On a box ahead of UTC a local
+    "today" is a future date for part of the day, which would hold back a book
+    that is out.
+    """
+    head = (text or "").strip()[:10]
+    if not head:
+        return False
+    try:
+        published = date.fromisoformat(head)
+    except ValueError:
+        return False
+    return published > (today or datetime.now(timezone.utc).date())
 
 
 def _to_add_metadata(result: dict, region: str | None = None) -> dict:
@@ -438,6 +471,19 @@ def add(asin: str, monitored: bool = True, metadata: dict | None = None) -> AddR
             True, "Already in Listenarr", _audiobook_id(existing), title, authors)
 
     meta = metadata if metadata is not None else audible_metadata(asin)
+    if meta and not_yet_published(meta.get("publishedDate")):
+        # Checked here rather than only where series gaps are planned, because
+        # this is the one door every request goes through. A placeholder asked
+        # for directly is accepted by Listenarr and then searched for forever:
+        # there is no file to find, and nothing downstream ever gives up.
+        title = meta.get("title") or asin
+        log.info("refusing asin=%s: %r is not published until %s",
+                 asin, title, meta.get("publishedDate"))
+        return AddResult(
+            False,
+            f"{title} is not out yet, so there is nothing to look for. "
+            "Ask again once it has been published.",
+            None)
     if not meta:
         return AddResult(
             False,
