@@ -178,7 +178,15 @@ def states(user: jellyfin.User) -> list[dict]:
     title with an author to agree with it. That is what `books.wants.states`
     does, against the library index the engine builds anyway.
     """
-    owned = shelves.owned_index(user)
+    try:
+        owned = shelves.owned_index(user)
+    except jellyfin.JellyfinUnavailable as exc:
+        # Reported unsettled rather than raised. Every other medium's state is
+        # perfectly knowable, and letting this one take the request list away
+        # loses somebody's outstanding films and series because a listing of
+        # three and a half thousand audiobooks timed out.
+        log.warning("book arrivals not settled: %s", exc)
+        owned = None
     return [{
         "itemKey": row["asin"],
         "medium": "book",
