@@ -205,16 +205,19 @@ def connect_jellyfin(url: str, username: str, password: str) -> str:
     url = url.strip().rstrip("/")
     if not url:
         raise jellyfin.TokenRejected("A Jellyfin address is needed.")
-    # Written before authenticating: `jellyfin.authenticate` reads
-    # `config.JELLYFIN_URL`, and the address being tried is the one just typed.
-    if not settings.held_in_environment("JELLYFIN_URL"):
-        settings.put("JELLYFIN_URL", url)
+    # Tried, not stored. This used to write the address first, because
+    # `authenticate` read it from the configuration -- so a wrong password was
+    # enough to leave the service pointed at whatever had been typed, and the
+    # next library read carried this service's API key there in a header.
+    # Nothing is persisted until an administrator of that Jellyfin has answered.
     token, user = jellyfin.authenticate(username.strip(), password,
-                                        _device())
+                                        _device(), base_url=url)
     if not user.is_admin:
         raise jellyfin.TokenRejected(
             f"{user.name} is not a Jellyfin administrator. Setting this up "
             "needs an administrator account, because it reads every library.")
+    if not settings.held_in_environment("JELLYFIN_URL"):
+        settings.put("JELLYFIN_URL", url)
     settings.put("JELLYFIN_TOKEN", token)
     media.forget()
     made_key = _make_api_key(token)

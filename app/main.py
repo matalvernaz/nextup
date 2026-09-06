@@ -314,9 +314,46 @@ def readyz(response: Response) -> dict:
     return {"ready": True}
 
 
+def _setup_is_open(request: Request):
+    """None when this page may be used, or the response that refuses it.
+
+    Open with no credential at all, because that is the state it exists for and
+    there is nobody to authenticate against yet. Once connected it needs a
+    Jellyfin administrator, exactly as `/backends` does: this page rewrites the
+    address this service sends its own API key to, which is a larger prize than
+    pointing the install at somebody's Radarr.
+
+    Signing in still works while Jellyfin is refusing this service's key --
+    `authenticate` and `user_from_token` both carry the caller's credentials
+    rather than this service's -- so the repair path `/readyz` names stays open
+    in the state it is named for. The one case this closes is an address that
+    is wrong: nobody can sign in through it, and the way back is the
+    environment, which wins over anything a page has stored.
+    """
+    if setup.needs_setup():
+        return None
+    try:
+        user = viewer(request)
+    except LookupError as exc:
+        return _signin_page(request, detail=str(exc), status=401)
+    if not user.is_admin:
+        return templates.TemplateResponse(
+            request=request, name="setup.html", status_code=403,
+            context={
+                "message": "Changing where this connects needs a Jellyfin "
+                           "administrator account.",
+                "jellyfin_url": "",
+                "locked": True,
+                "connected": True,
+            })
+    return None
+
+
 @app.get("/setup", response_class=HTMLResponse)
 def get_setup(request: Request, msg: str = ""):
     """Connect to Jellyfin. The only step a first run cannot skip."""
+    if (refused := _setup_is_open(request)) is not None:
+        return refused
     return templates.TemplateResponse(
         request=request, name="setup.html",
         context={
@@ -330,15 +367,29 @@ def get_setup(request: Request, msg: str = ""):
 @app.post("/setup")
 def post_setup(request: Request, jellyfin_url: str = Form(""),
                username: str = Form(""), password: str = Form("")):
+    if (refused := _setup_is_open(request)) is not None:
+        return refused
+    # Counted the same way `/signin` counts, and for the same reason: this
+    # forwards a password to Jellyfin, and the shipped compose publishes a port.
+    keys = (throttle.caller_address(request), f"setup:{username.strip().casefold()}")
+    if (wait := throttle.retry_after(*keys)):
+        minutes = max(1, round(wait / 60))
+        return RedirectResponse(
+            url="/setup?msg=" + quote(
+                f"Too many failed attempts. Try again in about {minutes} "
+                f"minute{'' if minutes == 1 else 's'}."),
+            status_code=303)
     try:
         message = setup.connect_jellyfin(jellyfin_url, username, password)
     except jellyfin.TokenRejected as exc:
+        throttle.record_failure(*keys)
         return RedirectResponse(url=f"/setup?msg={quote(str(exc))}",
                                 status_code=303)
     except jellyfin.JellyfinUnavailable as exc:
         return RedirectResponse(
             url=f"/setup?msg={quote(f'That Jellyfin could not be reached. {exc}')}",
             status_code=303)
+    throttle.clear(*keys)
     return RedirectResponse(url=f"/backends?msg={quote(message)}",
                             status_code=303)
 

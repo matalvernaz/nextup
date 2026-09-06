@@ -49,7 +49,16 @@ ADMIN = jellyfin.User(id="u1", name="matt", is_admin=True)
 MEMBER = jellyfin.User(id="u2", name="kadija", is_admin=False)
 
 
-def authenticate(username, password, device):
+tried_against = []
+
+
+def authenticate(username, password, device, base_url=""):
+    # `base_url` is not decoration. The page must be able to try an address
+    # without committing it, so this records what it was actually asked to
+    # authenticate against and refuses to fall back to the configured one.
+    tried_against.append(base_url)
+    if not base_url:
+        raise AssertionError("setup must authenticate against the typed address")
     if password != "right":
         raise jellyfin.TokenRejected("Jellyfin did not accept that.")
     return f"token-for-{username}", ADMIN if username == "matt" else MEMBER
@@ -57,6 +66,19 @@ def authenticate(username, password, device):
 
 jellyfin.authenticate = authenticate
 setup._make_api_key = lambda token: None
+
+# --- a wrong password must not move this service ----------------------------
+# The address used to be written before authenticating, so anybody who could
+# reach this form could repoint the service and have its own Jellyfin API key
+# posted to them on the next library read.
+wrong = client.post("/setup", data={"jellyfin_url": "http://attacker.example",
+                                    "username": "matt", "password": "wrong"},
+                    follow_redirects=False)
+check.equal(wrong.status_code, 303, "a wrong password is refused")
+check.equal(tried_against[-1], "http://attacker.example",
+            "against the address that was typed, not the configured one")
+check.equal(settings.get("JELLYFIN_URL"), None,
+            "and nothing about where this connects is written")
 
 refused = client.post("/setup", data={"jellyfin_url": "http://jf:8096",
                                       "username": "kadija",
@@ -66,6 +88,8 @@ check.equal(refused.status_code, 303, "a member is redirected back")
 check.that("administrator" in refused.headers.get("location", ""),
            "and told why, because reading every library needs one")
 check.equal(config.JELLYFIN_TOKEN, "", "with no credential kept")
+check.equal(settings.get("JELLYFIN_URL"), None,
+            "and the address is not written for them either")
 
 # --- and as one who is ---------------------------------------------------------
 ok = client.post("/setup", data={"jellyfin_url": "http://jf:8096",
@@ -169,6 +193,36 @@ check.equal(settings.get("RADARR_URL"), "http://radarr:7878",
             "value that would never be read")
 del os.environ["RADARR_URL"]
 settings.forget()
+
+# --- once connected, the setup page is administrators only -------------------
+# It is open on a first run because there is nobody to authenticate against
+# yet. Left open afterwards it rewrites the address this service sends its own
+# Jellyfin API key to, which is a larger prize than the backends page it sits
+# beside -- and that one has always been gated.
+check.equal(setup.needs_setup(), False, "the service is connected by now")
+
+jellyfin.user = lambda name=None: MEMBER
+jellyfin.user_from_token = lambda token: MEMBER
+
+as_member = client.get("/setup")
+check.equal(as_member.status_code, 403,
+            "a member cannot reach the setup page once it is connected")
+check.that("administrator" in as_member.text,
+           "and is told why rather than shown an empty page")
+check.that("http://jf:8096" not in as_member.text,
+           "and is not shown where this connects")
+
+posted = client.post("/setup", data={"jellyfin_url": "http://attacker.example",
+                                     "username": "matt", "password": "right"},
+                     follow_redirects=False)
+check.equal(posted.status_code, 403, "nor post to it")
+check.equal(config.JELLYFIN_URL, "http://jf:8096",
+            "so the address this service uses is unchanged")
+
+jellyfin.user = lambda name=None: ADMIN
+jellyfin.user_from_token = lambda token: ADMIN
+as_admin = client.get("/setup")
+check.equal(as_admin.status_code, 200, "an administrator still can")
 
 harness.cleanup()
 raise SystemExit(check.report())

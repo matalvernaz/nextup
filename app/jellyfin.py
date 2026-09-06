@@ -504,8 +504,8 @@ def _handshake(device: str) -> str:
             f'DeviceId="{device}", Version="{_CLIENT_VERSION}"')
 
 
-def authenticate(username: str, password: str,
-                 device: str) -> tuple[str, User]:
+def authenticate(username: str, password: str, device: str,
+                 base_url: str = "") -> tuple[str, User]:
     """Exchange a username and password for that account's access token.
 
     Used only by the browser pages. The JSON API never sees a password: its
@@ -516,11 +516,18 @@ def authenticate(username: str, password: str,
     "That password is wrong" and "the server is not answering" are different
     things to do next, and a page that says the first when it means the second
     sends somebody to reset a password that was never the problem.
+
+    - Parameter base_url: a Jellyfin to try instead of the configured one. The
+      setup page needs this: it used to write the typed address to the settings
+      table *before* authenticating, so a wrong password still left the service
+      pointed somewhere else, and the next library read sent this service's own
+      API key there.
     """
     if not username or not password:
         raise TokenRejected("A username and a password are both needed.")
     try:
-        with httpx.Client(base_url=config.JELLYFIN_URL, timeout=_TIMEOUT,
+        with httpx.Client(base_url=base_url or config.JELLYFIN_URL,
+                          timeout=_TIMEOUT,
                           headers={"Authorization": _handshake(device),
                                    "Accept": "application/json"}) as c:
             resp = c.post("/Users/AuthenticateByName",
