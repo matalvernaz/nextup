@@ -302,17 +302,49 @@ def owned_index() -> Owned:
                  frozenset(series_tmdb), item_ids)
 
 
-def episode_count(item_id: str) -> int | None:
-    """How many episodes of one series are in the library, or None if unknown.
+#: The season number Jellyfin files specials under. Excluded from the count,
+#: because the number it is compared against is Sonarr's
+#: `statistics.episodeCount`, which does not include them -- so a series with
+#: specials in the library reached the total while real episodes were still
+#: missing. Six series on the deployment this was found on hold specials, one
+#: of them thirty-three of them.
+SPECIALS_SEASON = 0
 
-    `limit=0` with the total requested makes this a fifty-byte answer -- the
-    count is the whole point and none of the episodes are wanted. None means
-    Jellyfin could not be asked, which is not the same as zero and must not be
-    read as one: zero closes nothing but says the series has not started
-    arriving, while unknown should leave a request exactly as it was.
+
+def episode_count(item_id: str) -> int | None:
+    """Aired-season episodes of one series in the library, or None if unknown.
+
+    Specials are left out on purpose, and that is the whole subtlety here. This
+    number is only ever compared with Sonarr's aired total, which counts no
+    specials at all -- so counting them made a request for a series with a
+    special in the library close before the episodes somebody asked for had
+    arrived.
+
+    `limit=0` with the total requested makes each of these a fifty-byte answer
+    -- the count is the whole point and none of the episodes are wanted. Two
+    of them rather than one listing of the whole series: the listing is 109 kB
+    against 100 bytes for the pair, measured on a 154-episode series.
+
+    None means Jellyfin could not be asked, which is not the same as zero and
+    must not be read as one: zero closes nothing but says the series has not
+    started arriving, while unknown should leave a request exactly as it was.
     """
     if not item_id:
         return None
+    total = _episode_total(item_id)
+    if total is None:
+        return None
+    specials = _specials_total(item_id)
+    if specials is None:
+        # The total is known and how much of it to discount is not, so the
+        # honest answer is that the count is unknown. Returning the total
+        # would be the very over-count this exists to stop.
+        return None
+    return max(0, total - specials)
+
+
+def _episode_total(item_id: str) -> int | None:
+    """Every episode of one series in the library, specials included."""
     try:
         with _client() as c:
             data = c.get("/Items", params={
@@ -326,6 +358,29 @@ def episode_count(item_id: str) -> int | None:
             }).raise_for_status().json()
     except (httpx.HTTPError, ValueError) as exc:
         log.warning("episode count failed for %s (%s)", item_id, exc)
+        return None
+    count = data.get("TotalRecordCount")
+    return count if isinstance(count, int) else None
+
+
+def _specials_total(item_id: str) -> int | None:
+    """Specials of one series in the library.
+
+    `/Shows/{id}/Episodes` takes a season number, which `/Items` does not --
+    that is why this is a different endpoint from the one above rather than
+    the same one with a filter.
+    """
+    try:
+        with _client() as c:
+            data = c.get(f"/Shows/{item_id}/Episodes", params={
+                "season": SPECIALS_SEASON,
+                "limit": 0,
+                "enableTotalRecordCount": "true",
+                "enableImages": "false",
+                "enableUserData": "false",
+            }).raise_for_status().json()
+    except (httpx.HTTPError, ValueError) as exc:
+        log.warning("specials count failed for %s (%s)", item_id, exc)
         return None
     count = data.get("TotalRecordCount")
     return count if isinstance(count, int) else None
