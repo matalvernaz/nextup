@@ -2,7 +2,7 @@
 and what the sentence says about it."""
 import os
 import sys
-from datetime import date, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 os.environ.setdefault("JELLYFIN_TOKEN", "test-token")
@@ -363,7 +363,10 @@ check("the sentence blames the allowance", raced_outcome["message"],
 # Audible lists a placeholder product for each volume it has named and not
 # released, and a pre-order for one with a date on it. Neither can be
 # acquired, and asking for either leaves Listenarr searching forever.
-TODAY = date.today()
+# The plan reads the clock in UTC, so the fixture has to as well: on a box
+# ahead of UTC a local "today" is a future date for part of the day, and the
+# row meant to be out would read as unreleased.
+TODAY = datetime.now(timezone.utc).date()
 CS = "Calamity Saga"
 LIBRARY.append(book("cb1", "Calamity Saga 1", CS, 1, asin="B0CB01",
                     author="Calamity Author"))
