@@ -29,17 +29,20 @@ jellyfin.account = lambda reference: (
     (_ for _ in ()).throw(LookupError(f"no Jellyfin account named {reference!r}")))
 
 
-def client_as(user):
-    jellyfin.user_from_token = lambda _token: user
-    app = FastAPI()
-    app.include_router(api.router)
-    return TestClient(app, raise_server_exceptions=False)
+#: One token per account, because the router caches an introspection result
+#: against a digest of the token. Sharing one string between the two callers
+#: would serve every later request as whoever asked first -- which reads as
+#: the endpoint refusing an administrator.
+TOKENS = {KEYHOLDER.key: "keyholder-token", MEMBER.key: "member-token"}
 
 
 def post(user, body):
-    return client_as(user).post(
-        "/api/v1/allowance/reset", json=body,
-        headers={"X-Emby-Token": "a-token"})
+    jellyfin.user_from_token = lambda _token, who=user: who
+    app = FastAPI()
+    app.include_router(api.router)
+    client = TestClient(app, raise_server_exceptions=False)
+    return client.post("/api/v1/allowance/reset", json=body,
+                       headers={"X-Emby-Token": TOKENS[user.key]})
 
 
 # The member has spent the day.
