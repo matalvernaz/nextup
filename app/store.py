@@ -58,6 +58,19 @@ CREATE INDEX IF NOT EXISTS requests_by_day
 CREATE INDEX IF NOT EXISTS requests_by_item
     ON requests(medium, item_key);
 
+-- When an account was last given its day's requests back, per medium.
+--
+-- A marker rather than a rewrite of the ledger. The alternative -- backdating
+-- `requested_at` until the rows fall out of the day's window -- spends the one
+-- record of when a thing was actually asked for, which is also what decides
+-- when "on its way" becomes "still looking" and how the list is ordered.
+CREATE TABLE IF NOT EXISTS allowance_resets (
+    user_key TEXT NOT NULL,
+    medium   TEXT NOT NULL,
+    reset_at REAL NOT NULL,
+    PRIMARY KEY (user_key, medium)
+);
+
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -432,13 +445,39 @@ def spent_today(user_key: str, medium: str, since: float) -> int:
 
     Sums `cost`, not rows: an artist and a single track are both one row and
     are not the same request, which is the whole reason the column exists.
+
+    The window starts at the later of `since` and this account's last reset,
+    so giving somebody their requests back does not also reach backwards past
+    the day boundary and hand them the previous one.
     """
     with db() as conn:
         row = conn.execute(
             "SELECT COALESCE(SUM(cost), 0) AS spent FROM requests "
-            "WHERE user_key=? AND medium=? AND requested_at >= ?",
-            (user_key, medium, since)).fetchone()
+            "WHERE user_key=? AND medium=? AND requested_at >= MAX(?, "
+            "  COALESCE((SELECT reset_at FROM allowance_resets "
+            "            WHERE user_key=? AND medium=?), 0))",
+            (user_key, medium, since, user_key, medium)).fetchone()
     return int(row["spent"] or 0)
+
+
+def reset_allowance(user_key: str, medium: str, at: float | None = None) -> float:
+    """Give this account its day's requests back on one medium. Returns when.
+
+    Only ever moves forward. A reset is "everything before now is forgiven",
+    and one written with an earlier time than the last would un-forgive
+    requests that a previous reset had already cleared.
+    """
+    when = time.time() if at is None else at
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO allowance_resets (user_key, medium, reset_at) "
+            "VALUES (?,?,?) ON CONFLICT (user_key, medium) DO UPDATE SET "
+            "reset_at=MAX(reset_at, excluded.reset_at)",
+            (user_key, medium, when))
+        row = conn.execute(
+            "SELECT reset_at FROM allowance_resets WHERE user_key=? AND medium=?",
+            (user_key, medium)).fetchone()
+    return float(row["reset_at"])
 
 
 def mark_arrived(user_key: str, medium: str, item_keys: set[str]) -> None:

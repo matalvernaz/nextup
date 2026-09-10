@@ -302,6 +302,49 @@ def post_want(user: jellyfin.User = Depends(caller),
             "remainingToday": wants.allowance(user, medium)}
 
 
+@router.post("/allowance/reset")
+def post_allowance_reset(
+        caller_user: jellyfin.User = Depends(caller),
+        account: str = Body(..., embed=True),
+        medium: str = Body("", embed=True)) -> dict:
+    """Give one account its day's requests back. Administrators only.
+
+    `medium` empty means every medium this server serves, which is what
+    somebody who has been told "I have run out" almost always means; naming
+    one is for giving back the books without also giving back the films.
+
+    Not a reset of anything stored against the requests themselves. The ledger
+    keeps saying when each thing was asked for, and a marker records that the
+    day was forgiven -- so the list a person sees, and the order it is in, are
+    the same either side of this call.
+    """
+    if not caller_user.is_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="Giving an account its requests back needs a Jellyfin "
+                   "administrator account.")
+    try:
+        target = jellyfin.account(account)
+    except LookupError as unknown:
+        raise HTTPException(status_code=404, detail=str(unknown)) from unknown
+
+    wanted = [medium] if medium else list(media.available())
+    reset = []
+    for each in wanted:
+        try:
+            remaining = wants.reset_allowance(target, each)
+        except LookupError as unserved:
+            raise HTTPException(status_code=404,
+                                detail=str(unserved)) from unserved
+        reset.append({"medium": each, "remainingToday": remaining})
+
+    log.info("allowance reset by=%s for=%s media=%s",
+             caller_user.key, target.key, [r["medium"] for r in reset])
+    return {"account": {"id": target.id, "name": target.name,
+                        "keyholder": target.is_admin},
+            "reset": reset}
+
+
 @router.post("/cancel")
 def post_cancel(user: jellyfin.User = Depends(caller),
                 medium: str = Body(..., embed=True),
