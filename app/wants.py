@@ -45,6 +45,22 @@ def allowance(user: jellyfin.User, medium: str) -> int | None:
     return max(0, found.daily_cap - spent)
 
 
+def reset_allowance(user: jellyfin.User, medium: str) -> int | None:
+    """Give one account its day's requests back on one medium.
+
+    Returns what it has left afterwards, which is `None` for an account that
+    was never capped. The lock is the same one a request takes, so a reset
+    cannot land between another caller's allowance check and its ledger write
+    and leave that request charged against a day it was forgiven.
+    """
+    if media.get(medium) is None:
+        raise LookupError(f"this server does not serve {medium!r}")
+    with store.key_lock(user.key, medium):
+        store.reset_allowance(user.key, medium)
+    log.info("allowance reset user=%s medium=%s", user.key, medium)
+    return allowance(user, medium)
+
+
 def search(query: str, medium: str, unit: str = "",
            user: jellyfin.User | None = None) -> list[dict]:
     """Catalogue hits for one medium, marked with what the library already has.

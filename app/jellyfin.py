@@ -183,6 +183,28 @@ def user(name: str | None = None) -> User:
     raise LookupError(f"no Jellyfin user named {name!r}")
 
 
+def account(reference: str) -> User:
+    """The account this display name or account id names.
+
+    Two ways of saying it because both are what a caller has: a person types
+    a name, and a client that already listed the accounts holds ids. Matching
+    the id first means a display name that happens to look like one cannot
+    shadow the account it belongs to.
+    """
+    wanted = (reference or "").strip()
+    if not wanted:
+        raise LookupError("no account named")
+    with _client() as c:
+        users = c.get("/Users").raise_for_status().json()
+    for dto in users:
+        if normalise_id(dto["Id"]) == normalise_id(wanted):
+            return _to_user(dto)
+    for dto in users:
+        if dto["Name"].casefold() == wanted.casefold():
+            return _to_user(dto)
+    raise LookupError(f"no Jellyfin account named {reference!r}")
+
+
 def user_from_token(token: str) -> User:
     """The account a caller's own Jellyfin access token belongs to.
 
