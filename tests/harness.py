@@ -38,15 +38,21 @@ def setup(**overrides: str) -> str:
     and called it a pass, and one that stubbed them read a registry the
     environment had already decided.
 
-    **Every setting in `config` is frozen when that module is imported** -- all
-    38 are plain module-level assignments, not properties -- so the environment
-    has to be final before it loads. Reading the names of the settings requires
-    importing it, which is the awkward part: the import is what freezes them.
-    So it is imported, used, and then reloaded once the environment is settled.
-    Without the reload, every override passed to this function is silently
-    ignored, because `config` read the cleared environment a few lines earlier.
-    Only `test_playlist_upkeep` caught that, and only because `PLAYLIST_OWNER`
-    is one of the two settings any test bothers to override.
+    `config` has **two kinds of setting, and they behave oppositely.** The
+    names in `_SETTABLE` go through the module's `__getattr__`, so they are read
+    from `os.environ` on every access and clearing them here works however late
+    a module is imported. Everything else -- `PLAYLIST_OWNER`, `PLAYLIST_NAME`
+    and the rest of the plain module-level assignments -- is evaluated once,
+    when `config` is first imported, and `__getattr__` is never consulted for a
+    name that already exists.
+
+    Reading `settable_names()` is itself what imports `config`, so that import
+    freezes the second kind against the environment as it stands a few lines
+    above -- before the overrides below are applied. Hence the reload at the
+    end, once the environment is final. Without it an override of a
+    non-settable name is silently ignored; `test_playlist_upkeep` is the only
+    test that notices, because `PLAYLIST_OWNER` is the only such name any test
+    overrides.
 
     The reload is safe here and nowhere else: tests call this before importing
     anything else from `app`, so no module is holding a `from app.config import
