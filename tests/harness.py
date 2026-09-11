@@ -10,6 +10,7 @@ So: the path is set outright, it is always under a temporary directory, and
 `cleanup` refuses to delete a file whose name does not identify it as a test
 database.
 """
+import importlib
 import os
 import shutil
 import sys
@@ -25,17 +26,58 @@ _tempdir: str | None = None
 
 
 def setup(**overrides: str) -> str:
-    """Point the app at a throwaway database. Returns its path."""
+    """Point the app at a throwaway database and an empty deployment.
+
+    Every wiring setting is **cleared**, not merely defaulted around. The four
+    Jellyfin variables were set outright from the start and the other thirteen
+    were left to whatever the surrounding process happened to hold -- which on
+    a laptop and in CI is nothing, and inside the running container is the live
+    Radarr, the live Sonarr and their real API keys. Five test files then failed
+    there and passed in CI, saying nothing about the code either time: a test
+    that forgot to stub `media.available()` read the container's own backends
+    and called it a pass, and one that stubbed them read a registry the
+    environment had already decided.
+
+    **Every setting in `config` is frozen when that module is imported** -- all
+    38 are plain module-level assignments, not properties -- so the environment
+    has to be final before it loads. Reading the names of the settings requires
+    importing it, which is the awkward part: the import is what freezes them.
+    So it is imported, used, and then reloaded once the environment is settled.
+    Without the reload, every override passed to this function is silently
+    ignored, because `config` read the cleared environment a few lines earlier.
+    Only `test_playlist_upkeep` caught that, and only because `PLAYLIST_OWNER`
+    is one of the two settings any test bothers to override.
+
+    The reload is safe here and nowhere else: tests call this before importing
+    anything else from `app`, so no module is holding a `from app.config import
+    X` copy that a reload would leave stale.
+    """
     global _tempdir
     _tempdir = tempfile.mkdtemp(prefix="nextup-tests-")
     db_path = os.path.join(_tempdir, f"{TEST_DB_PREFIX}{os.getpid()}.db")
 
+    # Set before the import below, which is the first thing to load
+    # `app.config`. `DB_PATH` is not among the settable names and is never
+    # cleared -- losing it would point a test at the real database.
     os.environ["DB_PATH"] = db_path
+    from app import config
+    for name in config.settable_names():
+        os.environ.pop(name, None)
+
     os.environ["JELLYFIN_URL"] = "http://jellyfin.invalid:8096"
     os.environ["JELLYFIN_TOKEN"] = "test-token-not-a-real-one"
     os.environ["JELLYFIN_USER"] = ""
     for key, value in overrides.items():
         os.environ[key] = value
+
+    leaked = sorted(name for name in config.settable_names()
+                    if name not in overrides and not name.startswith("JELLYFIN")
+                    and os.environ.get(name))
+    if leaked:
+        raise AssertionError(
+            "these settings reached a test from outside it: " + ", ".join(leaked))
+
+    importlib.reload(config)
     return db_path
 
 
