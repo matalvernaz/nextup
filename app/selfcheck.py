@@ -27,6 +27,18 @@ FIRST_DELAY_SECONDS = 60
 INTERVAL_SECONDS = 3600
 TIMEOUT_SECONDS = 10.0
 
+# One probe at sixty seconds was not enough of a wait. Measured 2026-09-10: a
+# deploy logged both routes as 404 at exactly the first delay, and both
+# answered when asked again minutes later -- so every slow registration wrote
+# the one error line in this service that means "a feature is silently
+# missing". An alarm that fires on healthy deploys is one nobody reads on the
+# day it is right, which is the whole failure this module exists to prevent.
+#
+# Only the first pass retries. A later one is about a rule that has since
+# vanished, and there is nothing starting up to wait for.
+FIRST_PASS_ATTEMPTS = 3
+RETRY_GAP_SECONDS = 20
+
 
 def expected_service(base_url: str) -> str:
     """Which service name `/info` should answer with under this base URL.
@@ -63,15 +75,39 @@ def check(base_url: str) -> str | None:
     return None
 
 
+def settled(base_url: str, attempts: int = 1,
+            gap: float = RETRY_GAP_SECONDS) -> tuple[str | None, int]:
+    """The problem still there after `attempts` probes, and how many it took.
+
+    Returns `(None, n)` once the route answers, so a caller can tell a route
+    that was simply late from one that was right the first time.
+    """
+    problem = check(base_url)
+    for taken in range(2, attempts + 1):
+        if problem is None:
+            return None, taken - 1
+        time.sleep(gap)
+        problem = check(base_url)
+        if problem is None:
+            return None, taken
+    return problem, attempts
+
+
 def _loop(base_urls: list[str]) -> None:
     time.sleep(FIRST_DELAY_SECONDS)
+    attempts = FIRST_PASS_ATTEMPTS
     while True:
         for base_url in base_urls:
-            problem = check(base_url)
+            problem, taken = settled(base_url, attempts)
             if problem:
                 log.error("same-origin route: %s", problem)
+            elif taken > 1:
+                log.info("same-origin route: %s answers, after %d attempt(s) "
+                         "— the proxy was still registering this container",
+                         base_url, taken)
             else:
                 log.info("same-origin route: %s answers", base_url)
+        attempts = 1
         time.sleep(INTERVAL_SECONDS)
 
 
