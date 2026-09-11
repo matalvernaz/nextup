@@ -17,6 +17,10 @@ from app import api, describarr, jellyfin  # noqa: E402
 
 check = harness.Check("describe")
 
+#: The real lookup, kept before `post` below replaces it with a stub. The last
+#: block in this file exercises the request it actually makes.
+real_item_with_path = jellyfin.item_with_path
+
 USER = jellyfin.User(id="u1", name="matt", is_admin=True)
 
 MOVIE = {"Id": "m1", "Type": "Movie", "Name": "The 5th Wave",
@@ -36,7 +40,7 @@ def post(item, *, answer=(202, "Accepted — queued"), raises=None):
     """
     sent = {}
     jellyfin.user_from_token = lambda _token: USER
-    jellyfin.item_with_path = lambda _id, found=item: found
+    jellyfin.item_with_path = lambda _id, _user, found=item: found
 
     class StubClient:
         def __init__(self, **_kwargs):
@@ -136,6 +140,36 @@ caps = client.get("/api/v1/capabilities",
                   headers={"X-Emby-Token": "token"}).json()
 check.equal(caps["describe"]["supported"], True,
             "a server with describarr configured says so")
+
+print("=== the item lookup asks the way Jellyfin requires ===")
+# The gap that let a live 400 through: every test above stubs
+# `item_with_path`, so nothing exercised the request it makes. `/Items/{id}`
+# without `userId` answers 400, and a 400 read as "no such item" turns every
+# describe request into "that has no file on the server".
+asked = {}
+
+
+class LookupClient:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+    def get(self, path, params=None):
+        asked["path"] = path
+        asked["params"] = params or {}
+        return httpx.Response(200, json=dict(MOVIE),
+                              request=httpx.Request("GET", path))
+
+
+jellyfin._client = lambda: LookupClient()
+found = real_item_with_path("m1", "user-42")
+check.equal(found["Id"], "m1", "the item comes back")
+check.equal(asked["params"].get("userId"), "user-42",
+            "userId is sent, without which Jellyfin answers 400")
+check.equal(asked["params"].get("fields"), "Path",
+            "and Path is asked for, which is the only reason to make this call")
 
 harness.cleanup()
 raise SystemExit(check.report())

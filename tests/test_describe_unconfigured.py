@@ -37,7 +37,7 @@ check.equal(caps["describe"]["supported"], False,
 # Asked anyway -- an older client, or a server that lost the setting after the
 # screen was drawn. Refused before Jellyfin is troubled for a path.
 asked = []
-jellyfin.item_with_path = lambda item_id: asked.append(item_id)
+jellyfin.item_with_path = lambda item_id, _user: asked.append(item_id)
 refused = client.post("/api/v1/describe", json={"itemId": "m1"},
                       headers={"X-Emby-Token": "token"})
 check.equal(refused.status_code, 503, "the endpoint refuses outright")
