@@ -37,12 +37,26 @@ class AllowanceExhausted(Denied):
     """
 
 
-def allowance(user: jellyfin.User) -> int | None:
-    """Requests this account has left today, or None when it is not capped."""
+def daily_cap(user: jellyfin.User) -> int | None:
+    """Books this account may ask for in a day, or None when it is not capped.
+
+    Its own number where a keyholder has set one. This path keeps its own
+    allowance arithmetic, so it has to ask the same question the shared one
+    asks -- reading `BOOK_DAILY_CAP` here while `capabilities` published an
+    override meant a listener was told six and refused at the fourth.
+    """
     if user.is_admin:
         return None
+    return store.daily_cap(user.key, config.BOOK_DAILY_CAP)
+
+
+def allowance(user: jellyfin.User) -> int | None:
+    """Requests this account has left today, or None when it is not capped."""
+    cap = daily_cap(user)
+    if cap is None:
+        return None
     used = store.requests_since(user.key, time.time() - DAY_SECONDS)
-    return max(0, config.BOOK_DAILY_CAP - used)
+    return max(0, cap - used)
 
 
 def want(
@@ -90,10 +104,13 @@ def _admit(user, asin, title, recommendation_id, metadata):
 
     remaining = allowance(user)
     if remaining is not None and remaining <= 0:
+        cap = daily_cap(user)
         log.warning("want denied user=%s asin=%s reason=daily-cap cap=%d",
-                    user.key, asin, config.BOOK_DAILY_CAP)
+                    user.key, asin, cap)
         raise AllowanceExhausted(
-            f"That is {config.BOOK_DAILY_CAP} books today. "
+            "This account cannot ask for books. A keyholder can give it an "
+            "allowance." if cap <= 0 else
+            f"That is {cap} books today. "
             "The allowance frees up again as the day rolls on.")
 
     log.info("want user=%s asin=%s title=%r remaining=%s",

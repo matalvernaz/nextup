@@ -75,7 +75,7 @@ def capabilities(user: jellyfin.User = Depends(caller)) -> dict:
         "playlistName": config.PLAYLIST_NAME,
         "want": {
             "supported": True,
-            "dailyCap": None if user.is_admin else config.BOOK_DAILY_CAP,
+            "dailyCap": wants.daily_cap(user),
             "remainingToday": remaining,
         },
         "states": [wants.ON_ITS_WAY, wants.STILL_LOOKING, wants.IN_LIBRARY],

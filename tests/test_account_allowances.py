@@ -17,7 +17,8 @@ harness.setup()
 from fastapi import FastAPI  # noqa: E402  (after harness.setup)
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app import api, jellyfin, media, store, wants  # noqa: E402
+from app import api, config, jellyfin, media, store, wants  # noqa: E402
+from app.books import wants as book_wants  # noqa: E402
 
 check = harness.Check("account allowances")
 store.init()
@@ -215,6 +216,30 @@ check.equal(nosy.status_code, 403, "and nobody else's")
 theirs = call(KEYHOLDER, "get", "/api/v1/allowance?account=sam")
 check.equal(theirs.status_code, 200, "a keyholder may read anybody's")
 check.equal(theirs.json()["account"]["name"], "sam", "and gets the one asked for")
+
+print("\n=== the book path keeps its own arithmetic, and must honour this too ===")
+# Books are the medium this ledger is mostly made of, and `app/books/wants.py`
+# has its own allowance function rather than going through `wants.allowance`.
+# Reading BOOK_DAILY_CAP there while capabilities published an override is how
+# a listener gets told six and refused at the fourth.
+BOOK = media.BOOK
+check.equal(book_wants.daily_cap(MEMBER), config.BOOK_DAILY_CAP,
+            "with no override the book path follows the setting")
+check.equal(book_wants.daily_cap(KEYHOLDER), None, "and a keyholder is uncapped")
+store.set_cap(MEMBER.key, BOOK, 6)
+check.equal(book_wants.daily_cap(MEMBER), 6,
+            "an override reaches the book path as well")
+check.equal(book_wants.allowance(MEMBER), 6, "and its allowance with it")
+for index in range(4):
+    store.record(MEMBER.key, BOOK, f"asin{index}", "book", "A book", "", 1, "")
+check.equal(book_wants.allowance(MEMBER), 2,
+            "a fourth book is not the end of a raised allowance")
+store.set_cap(MEMBER.key, BOOK, 0)
+check.equal(book_wants.allowance(MEMBER), 0, "zero allows nothing here too")
+store.clear_cap(MEMBER.key, BOOK)
+check.equal(book_wants.daily_cap(MEMBER), config.BOOK_DAILY_CAP,
+            "and clearing puts it back on the setting")
+
 
 harness.cleanup()
 raise SystemExit(check.report())

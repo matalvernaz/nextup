@@ -500,6 +500,19 @@ def reset_allowance(user_key: str, medium: str, at: float | None = None) -> floa
     return float(row["reset_at"])
 
 
+def daily_cap(user_key: str, medium: str, configured: int) -> int:
+    """This account's allowance on one medium: its own where it has one.
+
+    Here rather than in a caller because there are two request paths -- the
+    shared one and the book engine's, which keeps its own allowance
+    arithmetic -- and a rule each of them spells out separately is a rule they
+    can disagree about. `capabilities` publishing one number while the other
+    path refuses on a different one is the whole failure this exists to stop.
+    """
+    override = cap_override(user_key, medium)
+    return configured if override is None else override
+
+
 def cap_override(user_key: str, medium: str) -> int | None:
     """This account's own daily cap on one medium, or None to use the setting."""
     with db() as conn:

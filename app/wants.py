@@ -47,8 +47,7 @@ def daily_cap(user: jellyfin.User, medium: str) -> int | None:
     found = media.get(medium)
     if found is None:
         return 0
-    override = store.cap_override(user.key, medium)
-    return found.daily_cap if override is None else override
+    return store.daily_cap(user.key, medium, found.daily_cap)
 
 
 def allowance(user: jellyfin.User, medium: str) -> int | None:

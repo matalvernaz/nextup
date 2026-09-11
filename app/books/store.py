@@ -121,6 +121,11 @@ def requests_since(user_key: str, cutoff: float) -> int:
     return store.spent_today(user_key, MEDIUM, cutoff)
 
 
+def daily_cap(user_key: str, configured: int) -> int:
+    """This account's book allowance: its own where a keyholder set one."""
+    return store.daily_cap(user_key, MEDIUM, configured)
+
+
 def fulfil_requests(user_key: str, asins: set) -> None:
     """Stop the clock on requests whose book has since reached the library."""
     store.mark_arrived(user_key, MEDIUM, set(asins))
