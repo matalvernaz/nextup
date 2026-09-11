@@ -457,17 +457,29 @@ def recommendation_items_for_user(
     return list(found.values())
 
 
-def item_with_path(item_id: str) -> dict | None:
+def item_with_path(item_id: str, user_id: str) -> dict | None:
     """One item, including where its file actually is. None when unknown.
 
-    `Path` is administrator-only in Jellyfin, and this service holds an
-    administrator token where a listener's client does not -- which is the
-    whole reason a request to describe something comes through here rather than
-    going straight from the client to describarr.
+    `Path` is withheld from a client without administrator rights, and this
+    service holds an administrator token where a listener's client does not --
+    which is the whole reason a request to describe something comes through
+    here rather than going straight from the client to describarr.
+
+    The **token** is what decides whether `Path` comes back, not `userId`.
+    Measured against the live server: the same item read with this token
+    answers with its path under an administrator's id and under a
+    non-administrator's alike. So the caller's own id is passed, which is what
+    `userId` is actually for -- user data -- and no administrator's id has to
+    be found or stored to ask this question.
+
+    `userId` is not optional. `/Items/{id}` without it answers **400**, which
+    read as "no such item" would have turned every describe request into "that
+    has no file on the server".
     """
     try:
         with _client() as c:
-            response = c.get(f"/Items/{item_id}", params={"fields": "Path"})
+            response = c.get(f"/Items/{item_id}",
+                             params={"userId": user_id, "fields": "Path"})
             if response.status_code == 404:
                 return None
             response.raise_for_status()

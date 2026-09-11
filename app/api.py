@@ -328,7 +328,7 @@ def post_describe(user: jellyfin.User = Depends(caller),
         raise HTTPException(
             status_code=503,
             detail="This server has no describarr configured.")
-    item = jellyfin.item_with_path(item_id)
+    item = jellyfin.item_with_path(item_id, user.id)
     if item is None:
         raise HTTPException(status_code=404, detail="No such item.")
     kind = item.get("Type", "")
