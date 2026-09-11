@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}Nextup — accounts and allowances{% endblock %}
+{% block main %}
+<h2>Accounts and allowances</h2>
+
+{% if readonly %}
+<p>{{ detail }}</p>
+{% else %}
+<p>
+  Every account gets the same allowance unless it is given one of its own.
+  Leave a box empty and that account follows the shared figure, so raising the
+  shared one later raises it for them too. Type a number and that account keeps
+  it whatever the shared figure does. Zero means the account cannot ask for
+  that at all.
+</p>
+<p>
+  Keyholders are never capped, so they have no boxes here.
+</p>
+
+{% for account in accounts %}
+<section aria-labelledby="who-{{ account.id }}">
+  <h3 id="who-{{ account.id }}">
+    {{ account.name }} — {{ "Keyholder" if account.keyholder else "Member" }}
+  </h3>
+
+  {% if account.keyholder %}
+  <p>Uncapped. Nothing here applies while this account is a keyholder.</p>
+  {% else %}
+  <form method="post" action="/accounts">
+    <input type="hidden" name="account" value="{{ account.id }}">
+    {% for row in account.allowances %}
+    <p>
+      <label for="cap-{{ account.id }}-{{ row.medium }}">
+        {{ row.label }} a day for {{ account.name }}
+      </label><br>
+      <input type="number" inputmode="numeric" min="0" step="1"
+             id="cap-{{ account.id }}-{{ row.medium }}"
+             name="cap_{{ row.medium }}"
+             value="{{ row.own_cap if row.own_cap is not none else '' }}"
+             aria-describedby="cap-{{ account.id }}-{{ row.medium }}-help">
+      <br>
+      <span class="help" id="cap-{{ account.id }}-{{ row.medium }}-help">
+        {% if row.own_cap is not none %}
+          Its own allowance of {{ row.own_cap }}. Empty the box to put it back
+          on the shared {{ row.shared_cap }}.
+        {% else %}
+          Follows the shared allowance of {{ row.shared_cap }}.
+        {% endif %}
+        {{ row.remaining }} left today.
+      </span>
+    </p>
+    {% endfor %}
+    <p>
+      <button type="submit">Save allowances for {{ account.name }}</button>
+    </p>
+  </form>
+
+  {#
+    The same page, because this is the other thing somebody does about an
+    allowance and the two questions arrive together: "they have run out" is
+    answered either by giving today back or by raising the number, and having
+    to guess which page each lives on is the whole reason this one exists.
+  #}
+  <form method="post" action="/accounts/reset">
+    <input type="hidden" name="account" value="{{ account.id }}">
+    <button type="submit">
+      Give {{ account.name }} today&rsquo;s requests back
+    </button>
+  </form>
+  {% endif %}
+</section>
+{% endfor %}
+{% endif %}
+{% endblock %}

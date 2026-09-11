@@ -71,6 +71,26 @@ CREATE TABLE IF NOT EXISTS allowance_resets (
     PRIMARY KEY (user_key, medium)
 );
 
+-- What one account is allowed in a day on one medium, where that differs from
+-- what the setting says.
+--
+-- An override rather than a copy: no row means the configured cap, so raising
+-- MOVIE_DAILY_CAP still raises it for everybody who has not been given a
+-- number of their own. Storing every account's cap here instead would freeze
+-- the household at whatever the setting happened to be the day each account
+-- was first seen.
+--
+-- Zero is a real value and means an allowance of nothing. Absent is the only
+-- way to say "the default", which is why clearing deletes the row rather than
+-- writing a NULL.
+CREATE TABLE IF NOT EXISTS account_caps (
+    user_key  TEXT NOT NULL,
+    medium    TEXT NOT NULL,
+    daily_cap INTEGER NOT NULL,
+    set_at    REAL NOT NULL,
+    PRIMARY KEY (user_key, medium)
+);
+
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -478,6 +498,56 @@ def reset_allowance(user_key: str, medium: str, at: float | None = None) -> floa
             "SELECT reset_at FROM allowance_resets WHERE user_key=? AND medium=?",
             (user_key, medium)).fetchone()
     return float(row["reset_at"])
+
+
+def cap_override(user_key: str, medium: str) -> int | None:
+    """This account's own daily cap on one medium, or None to use the setting."""
+    with db() as conn:
+        row = conn.execute(
+            "SELECT daily_cap FROM account_caps WHERE user_key=? AND medium=?",
+            (user_key, medium)).fetchone()
+    return int(row["daily_cap"]) if row else None
+
+
+def cap_overrides(user_key: str = "") -> dict[tuple[str, str], int]:
+    """Every stored cap, or one account's, keyed `(user_key, medium)`.
+
+    One query because the page that shows this draws a whole household against
+    every medium, and asking per cell is ten accounts times four media.
+    """
+    sql = "SELECT user_key, medium, daily_cap FROM account_caps"
+    args: tuple = ()
+    if user_key:
+        sql += " WHERE user_key=?"
+        args = (user_key,)
+    with db() as conn:
+        rows = conn.execute(sql, args).fetchall()
+    return {(r["user_key"], r["medium"]): int(r["daily_cap"]) for r in rows}
+
+
+def set_cap(user_key: str, medium: str, daily_cap: int) -> None:
+    """Give this account its own daily cap on one medium.
+
+    Refuses a negative for the reason `config._int` does: below zero has no
+    meaning here, and it would read as an allowance of nothing while looking
+    like a number somebody chose.
+    """
+    if daily_cap < 0:
+        raise ValueError(f"a daily cap cannot be negative, and is {daily_cap}")
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO account_caps (user_key, medium, daily_cap, set_at) "
+            "VALUES (?,?,?,?) ON CONFLICT (user_key, medium) DO UPDATE SET "
+            "daily_cap=excluded.daily_cap, set_at=excluded.set_at",
+            (user_key, medium, int(daily_cap), time.time()))
+
+
+def clear_cap(user_key: str, medium: str) -> bool:
+    """Put this account back on the configured cap. True if it had its own."""
+    with db() as conn:
+        return conn.execute(
+            "DELETE FROM account_caps WHERE user_key=? AND medium=?",
+            (user_key, medium)).rowcount > 0
 
 
 def mark_arrived(user_key: str, medium: str, item_keys: set[str]) -> None:

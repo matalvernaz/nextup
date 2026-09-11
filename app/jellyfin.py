@@ -169,6 +169,18 @@ def all_users() -> dict[str, str]:
     return {dto["Name"].casefold(): dto["Id"] for dto in users}
 
 
+def accounts() -> list[User]:
+    """Every Jellyfin account, carrying whether each one is an administrator.
+
+    `all_users` answers a name-to-id question and drops the policy, which is
+    the half that decides who is capped -- so a page about allowances needs
+    this one and not that one.
+    """
+    with _client() as c:
+        users = c.get("/Users").raise_for_status().json()
+    return [_to_user(dto) for dto in users]
+
+
 def user(name: str | None = None) -> User:
     """Resolve a proxy-supplied username to the matching Jellyfin account."""
     name = name or config.JELLYFIN_USER

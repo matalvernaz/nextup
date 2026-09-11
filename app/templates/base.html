@@ -30,11 +30,22 @@
     visitor should not be able to make this container reach out to Listenarr
     -- nor learn from how long the page took whether it is configured.
   #}
-  {% if discover_media() %}
+  {% if discover_media() or user.is_admin %}
   <nav aria-label="Sections">
     <ul>
       <li><a href="/">Search and requests</a></li>
+      {% if discover_media() %}
       <li><a href="/discover">Discover</a></li>
+      {% endif %}
+      {#
+        Keyholders only, because it is the only thing on it they can do. A
+        page that exists and cannot be reached from anywhere is a page that
+        does not exist -- which is why the allowances went unset until now.
+      #}
+      {% if user.is_admin %}
+      <li><a href="/accounts">Accounts and allowances</a></li>
+      <li><a href="/backends">What this connects to</a></li>
+      {% endif %}
     </ul>
   </nav>
   {% endif %}
