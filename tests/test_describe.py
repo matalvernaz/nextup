@@ -114,10 +114,13 @@ check.that("Ghost" in response.json()["detail"],
 print("=== when describarr will not take it ===")
 # Its own words are passed on. "No AudioVault match" is the ordinary answer for
 # a film nothing has described, and it is not a failure of this service.
+# 409, not a 5xx. A client reads 5xx as "the server is down" and says so
+# instead of repeating the reason -- and "nothing has described this film" is
+# the ordinary answer here, not an outage.
 response, _ = post(MOVIE, answer=(400, "Could not infer title from path"))
-check.equal(response.status_code, 502, "a refusal is reported as one")
+check.equal(response.status_code, 409, "a refusal is a refusal, not an outage")
 check.that("infer title" in response.json()["detail"],
-           "carrying describarr's own reason")
+           "carrying describarr's own reason, which is better than ours")
 
 response, _ = post(MOVIE, raises=httpx.ConnectError("no route"))
 check.equal(response.status_code, 503, "unreachable is a different answer")

@@ -349,8 +349,13 @@ def post_describe(user: jellyfin.User = Depends(caller),
     try:
         detail = describarr.request(item)
     except describarr.DescribeRefused as refused:
+        # 409 rather than a 5xx. describarr answering "no source has a
+        # description for this" is the ordinary outcome for a film nothing has
+        # described, not an outage, and its own sentence is better than one
+        # invented here. A client that reads 5xx as "the server is down" would
+        # both hide that sentence and blame the wrong thing.
         raise HTTPException(
-            status_code=502,
+            status_code=409,
             detail=refused.detail or "describarr would not take the request.")
     except httpx.HTTPError as exc:
         raise HTTPException(
