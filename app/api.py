@@ -14,11 +14,14 @@ Two rules follow, and both are load-bearing:
 """
 import hashlib
 import time
+
+import httpx
 from threading import Lock
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query
 
-from . import config, jellyfin, logs, media, recommendations, store, wants
+from . import (config, describarr, jellyfin, logs, media, recommendations,
+               store, wants)
 
 log = logs.get("api")
 
@@ -186,6 +189,11 @@ def capabilities(protocol: int = 1,
         "states": [wants.ON_ITS_WAY, wants.STILL_LOOKING, wants.IN_LIBRARY],
         "search": {"supported": True, "limit": config.SEARCH_LIMIT},
         "cancel": {"supported": True},
+        # Absent on a server with no describarr configured, and a client shows
+        # nothing at all for it then -- the same rule `media` follows, and the
+        # same reason it is reported from configuration rather than from a
+        # probe. Additive, so a client that predates it goes on working.
+        "describe": {"supported": describarr.configured()},
         "recommendations": {
             "media": recommendation_media,
         },
@@ -300,6 +308,60 @@ def post_want(user: jellyfin.User = Depends(caller),
     return {"medium": medium, "itemKey": item_key, "state": state,
             "message": message,
             "remainingToday": wants.allowance(user, medium)}
+
+
+@router.post("/describe")
+def post_describe(user: jellyfin.User = Depends(caller),
+                  item_id: str = Body(..., embed=True, alias="itemId")) -> dict:
+    """Queue one film, series or season to have audio description added.
+
+    Not an allowance question and not written to the ledger. Nothing is
+    acquired and nobody's line is used: the file is already here, and this asks
+    for a track to be built against it from a source describarr already
+    searches. Repeating it is harmless -- describarr's own ledger skips what it
+    has finished -- so there is nothing to spend and nothing to refuse.
+
+    The path comes from this service because `Path` is administrator-only in
+    Jellyfin, and a listener's client cannot see it.
+    """
+    if not describarr.configured():
+        raise HTTPException(
+            status_code=503,
+            detail="This server has no describarr configured.")
+    item = jellyfin.item_with_path(item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="No such item.")
+    kind = item.get("Type", "")
+    if kind not in describarr.DESCRIBABLE_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"A {kind or 'thing'} cannot be described. "
+                   "Ask for a film, a series or a season.")
+    if not (item.get("Path") or "").strip():
+        # A title Jellyfin knows about but cannot place on disk -- a stale
+        # entry, or a library this container does not mount. Said plainly
+        # rather than passed on, because describarr would answer 400 about a
+        # path the listener never supplied.
+        raise HTTPException(
+            status_code=404,
+            detail=f"{item.get('Name', 'That')} has no file on the server.")
+    log.info("api describe user=%s type=%s id=%s", user.key, kind, item_id)
+    try:
+        detail = describarr.request(item)
+    except describarr.DescribeRefused as refused:
+        # 409 rather than a 5xx. describarr answering "no source has a
+        # description for this" is the ordinary outcome for a film nothing has
+        # described, not an outage, and its own sentence is better than one
+        # invented here. A client that reads 5xx as "the server is down" would
+        # both hide that sentence and blame the wrong thing.
+        raise HTTPException(
+            status_code=409,
+            detail=refused.detail or "describarr would not take the request.")
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"describarr could not be reached: {exc}")
+    return {"queued": True, "detail": detail}
 
 
 @router.post("/allowance/reset")
