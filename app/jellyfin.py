@@ -457,6 +457,26 @@ def recommendation_items_for_user(
     return list(found.values())
 
 
+def item_with_path(item_id: str) -> dict | None:
+    """One item, including where its file actually is. None when unknown.
+
+    `Path` is administrator-only in Jellyfin, and this service holds an
+    administrator token where a listener's client does not -- which is the
+    whole reason a request to describe something comes through here rather than
+    going straight from the client to describarr.
+    """
+    try:
+        with _client() as c:
+            response = c.get(f"/Items/{item_id}", params={"fields": "Path"})
+            if response.status_code == 404:
+                return None
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPError as exc:
+        log.warning("item lookup failed id=%s: %s", item_id, exc)
+        raise JellyfinUnavailable(str(exc)) from exc
+
+
 def _items(medium: str, item_type: str, fields: str) -> list[dict]:
     """Every item of one type across a medium's libraries."""
     out: list[dict] = []

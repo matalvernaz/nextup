@@ -363,6 +363,14 @@ _SETTABLE = {
     "LISTENARR_URL": ("text", ""),
     "LISTENARR_QUALITY_PROFILE_ID": ("int", 1),
 
+    # Audio description for what is already in the library. Sonarr and Radarr
+    # hand describarr everything they download, so this is only ever about the
+    # backlog. Unset means the control for it is not offered at all.
+    "DESCRIBARR_URL": ("text", ""),
+    # Optional by describarr's own design -- it treats an unset key as "the
+    # docker network is the boundary", which is how it is deployed here.
+    "DESCRIBARR_API_KEY": ("text", ""),
+
     # Unset means every Jellyfin view whose collection type matches, which is
     # right on almost every server and saves an install from copying ids out
     # of a browser URL.
