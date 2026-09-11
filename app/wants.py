@@ -29,6 +29,28 @@ class Denied(Exception):
     """The request was refused before anything was acquired."""
 
 
+def daily_cap(user: jellyfin.User, medium: str) -> int | None:
+    """What this account is allowed in a day on one medium, None if uncapped.
+
+    The account's own number where somebody has set one, and the configured
+    cap otherwise. An override is stored only where it differs from the
+    setting, so raising the setting still raises it for everybody who has not
+    been given a number of their own.
+
+    Every reader goes through here -- the allowance arithmetic, the refusal
+    message and the figure published to clients -- because a lowered cap that
+    only half the callers know about refuses a request and then explains it in
+    terms of a limit the person has not got.
+    """
+    if user.is_admin:
+        return None
+    found = media.get(medium)
+    if found is None:
+        return 0
+    override = store.cap_override(user.key, medium)
+    return found.daily_cap if override is None else override
+
+
 def allowance(user: jellyfin.User, medium: str) -> int | None:
     """Requests this account has left today on one medium, or None if uncapped.
 
@@ -36,13 +58,11 @@ def allowance(user: jellyfin.User, medium: str) -> int | None:
     cannot saturate one line between them, not to ration the person who owns
     the server.
     """
-    if user.is_admin:
+    cap = daily_cap(user, medium)
+    if cap is None:
         return None
-    found = media.get(medium)
-    if found is None:
-        return 0
     spent = store.spent_today(user.key, medium, time.time() - DAY_SECONDS)
-    return max(0, found.daily_cap - spent)
+    return max(0, cap - spent)
 
 
 def reset_allowance(user: jellyfin.User, medium: str) -> int | None:
@@ -144,10 +164,11 @@ def _admit(user: jellyfin.User, found: media.Medium, medium: str,
     price = media.cost(medium, unit)
     remaining = allowance(user, medium)
     if remaining is not None and remaining < price:
+        cap = daily_cap(user, medium)
         log.warning("want denied user=%s medium=%s key=%s reason=daily-cap "
-                    "cost=%d remaining=%d", user.key, medium, item_key,
-                    price, remaining)
-        raise Denied(_cap_message(found, unit, price, remaining))
+                    "cost=%d remaining=%d cap=%d", user.key, medium, item_key,
+                    price, remaining, cap)
+        raise Denied(_cap_message(found, unit, price, remaining, cap))
 
     log.info("want user=%s medium=%s unit=%s key=%s cost=%d remaining=%s",
              user.key, medium, unit, item_key, price,
@@ -218,9 +239,17 @@ def _provider_id(item_key: str) -> str:
 
 
 def _cap_message(found: media.Medium, unit: str, price: int,
-                 remaining: int) -> str:
-    """Why the request was refused, in terms of what was actually asked for."""
-    if price > found.daily_cap:
+                 remaining: int, cap: int) -> str:
+    """Why the request was refused, in terms of what was actually asked for.
+
+    `cap` is this account's allowance, which is not always the configured one.
+    Told "ask for an album instead" by a message reading the setting, somebody
+    on a lowered cap would be refused for that too.
+    """
+    if cap <= 0:
+        return (f"This account cannot ask for {found.label.lower()}. "
+                "A keyholder can give it an allowance.")
+    if price > cap:
         return (f"One {unit} is more than a day's allowance for "
                 f"{found.label.lower()}. Ask for an album or a track instead.")
     if remaining <= 0:

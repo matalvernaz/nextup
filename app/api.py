@@ -18,7 +18,7 @@ from threading import Lock
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query
 
-from . import config, jellyfin, logs, media, recommendations, wants
+from . import config, jellyfin, logs, media, recommendations, store, wants
 
 log = logs.get("api")
 
@@ -149,7 +149,7 @@ def capabilities(protocol: int = 1,
             "units": list(found.units),
             "unitCosts": {unit: media.cost(found.key, unit)
                           for unit in found.units},
-            "dailyCap": None if user.is_admin else found.daily_cap,
+            "dailyCap": wants.daily_cap(user, found.key),
             "remainingToday": wants.allowance(user, found.key),
             # Whether the tool that acquires this medium answered when it was
             # last asked. Published because a client had no way to tell "no
@@ -343,6 +343,92 @@ def post_allowance_reset(
     return {"account": {"id": target.id, "name": target.name,
                         "keyholder": target.is_admin},
             "reset": reset}
+
+
+@router.post("/allowance/cap")
+def post_allowance_cap(
+        caller_user: jellyfin.User = Depends(caller),
+        account: str = Body(..., embed=True),
+        medium: str = Body("", embed=True),
+        daily_cap: int | None = Body(None, embed=True, alias="dailyCap")
+) -> dict:
+    """Give one account its own daily allowance. Administrators only.
+
+    `dailyCap` null puts the account back on the configured cap, which is not
+    the same as setting it to that number: the default moves when the setting
+    does, and a copy of today's value does not.
+
+    `medium` empty means every medium this server serves. An administrator's
+    own allowance is stored all the same and simply not consulted while they
+    remain one -- refusing to store it would mean a demoted account silently
+    inheriting the default instead of what somebody chose for it.
+    """
+    if not caller_user.is_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="Setting an account's allowance needs a Jellyfin "
+                   "administrator account.")
+    try:
+        target = jellyfin.account(account)
+    except LookupError as unknown:
+        raise HTTPException(status_code=404, detail=str(unknown)) from unknown
+
+    served = list(media.available())
+    wanted = [medium] if medium else served
+    for each in wanted:
+        if each not in served:
+            raise HTTPException(status_code=404,
+                                detail=f"this server does not serve {each!r}")
+    try:
+        for each in wanted:
+            if daily_cap is None:
+                store.clear_cap(target.key, each)
+            else:
+                store.set_cap(target.key, each, daily_cap)
+    except ValueError as refused:
+        raise HTTPException(status_code=422, detail=str(refused)) from refused
+
+    log.info("allowance cap by=%s for=%s media=%s cap=%s",
+             caller_user.key, target.key, wanted,
+             "default" if daily_cap is None else daily_cap)
+    return {"account": {"id": target.id, "name": target.name,
+                        "keyholder": target.is_admin},
+            "allowances": [{"medium": each,
+                            "dailyCap": wants.daily_cap(target, each),
+                            "ownCap": store.cap_override(target.key, each),
+                            "remainingToday": wants.allowance(target, each)}
+                           for each in wanted]}
+
+
+@router.get("/allowance")
+def get_allowance(caller_user: jellyfin.User = Depends(caller),
+                  account: str = "") -> dict:
+    """What one account is allowed and has left, per medium.
+
+    Its own account for anybody; another's for an administrator. Asking about
+    somebody else is how the page that sets these draws what is there now,
+    and reading one's own is what makes this useful to a client that wants the
+    figures without the rest of `capabilities`.
+    """
+    target = caller_user
+    if account:
+        if not caller_user.is_admin:
+            raise HTTPException(
+                status_code=403,
+                detail="Reading another account's allowance needs a Jellyfin "
+                       "administrator account.")
+        try:
+            target = jellyfin.account(account)
+        except LookupError as unknown:
+            raise HTTPException(status_code=404,
+                                detail=str(unknown)) from unknown
+    return {"account": {"id": target.id, "name": target.name,
+                        "keyholder": target.is_admin},
+            "allowances": [{"medium": key,
+                            "dailyCap": wants.daily_cap(target, key),
+                            "ownCap": store.cap_override(target.key, key),
+                            "remainingToday": wants.allowance(target, key)}
+                           for key in sorted(media.available())]}
 
 
 @router.post("/cancel")

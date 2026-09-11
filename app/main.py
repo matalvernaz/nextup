@@ -455,6 +455,133 @@ async def post_backends(request: Request):
                             status_code=303)
 
 
+def _allowance_rows(account: jellyfin.User, served: list,
+                    overrides: dict) -> list[dict]:
+    """One row per medium for one account: shared cap, own cap, what is left."""
+    return [{"medium": key, "label": found.label,
+             "shared_cap": found.daily_cap,
+             "own_cap": overrides.get((account.key, key)),
+             "remaining": "Uncapped" if account.is_admin
+                          else wants.allowance(account, key)}
+            for key, found in served]
+
+
+@app.get("/accounts", response_class=HTMLResponse)
+def get_accounts(request: Request, msg: str = ""):
+    """Who may ask for how much, and how to change it. Keyholders only.
+
+    One `/Users` read and one pass over the stored overrides, rather than a
+    lookup per cell: ten accounts against four media is forty questions whose
+    answers are all in those two.
+    """
+    if setup.needs_setup():
+        return RedirectResponse(url="/setup", status_code=303)
+    try:
+        user = viewer(request)
+    except LookupError as exc:
+        return _signin_page(request, detail=str(exc), status=401)
+    if not user.is_admin:
+        # Read-only rather than a bare 403: somebody who followed a link here
+        # should be told what the page is, not just refused it.
+        return templates.TemplateResponse(
+            request=request, name="accounts.html", status_code=403,
+            context={"user": user, "accounts": (), "readonly": True,
+                     "message": "", "detail":
+                     "Setting what other accounts may ask for needs a "
+                     "Jellyfin administrator account."})
+    served = sorted(media.available().items())
+    overrides = store.cap_overrides()
+    accounts = [{"id": account.id, "name": account.name,
+                 "keyholder": account.is_admin,
+                 "allowances": _allowance_rows(account, served, overrides)}
+                for account in sorted(jellyfin.accounts(),
+                                      key=lambda a: a.name.casefold())]
+    return templates.TemplateResponse(
+        request=request, name="accounts.html",
+        context={"user": user, "accounts": accounts, "message": msg,
+                 "readonly": False, "detail": ""})
+
+
+@app.post("/accounts")
+async def post_accounts(request: Request):
+    """Save one account's allowances, then say what they now are."""
+    if setup.needs_setup():
+        return RedirectResponse(url="/setup", status_code=303)
+    try:
+        user = viewer(request)
+    except LookupError as exc:
+        return _signin_page(request, detail=str(exc), status=401)
+    if not user.is_admin:
+        return RedirectResponse(url="/accounts?msg=" + quote(
+            "Setting what other accounts may ask for needs a Jellyfin "
+            "administrator account."), status_code=303)
+    form = await request.form()
+    try:
+        target = jellyfin.account(str(form.get("account", "")))
+    except LookupError as unknown:
+        return RedirectResponse(url="/accounts?msg=" + quote(str(unknown)),
+                                status_code=303)
+
+    said, refused = [], []
+    for key, found in sorted(media.available().items()):
+        if f"cap_{key}" not in form:
+            continue
+        raw = str(form.get(f"cap_{key}", "")).strip()
+        if not raw:
+            if store.clear_cap(target.key, key):
+                said.append(f"{found.label.lower()} back to the shared "
+                            f"{found.daily_cap}")
+            continue
+        try:
+            store.set_cap(target.key, key, int(raw))
+        except ValueError:
+            # int() and set_cap both raise it, and the answer is the same
+            # sentence either way: the box holds something that is not a
+            # number of requests.
+            refused.append(f"{found.label.lower()} was left alone, because "
+                           f"{raw!r} is not a whole number of requests")
+            continue
+        said.append(f"{found.label.lower()} {raw}")
+
+    # Both halves, always. Reporting only the refusals hides three saved
+    # allowances behind one typo, and reporting only the saves hides the typo.
+    parts = []
+    if said:
+        parts.append(f"{target.name}: " + ", ".join(said) + ".")
+    if refused:
+        parts.append("; ".join(refused).capitalize() + ".")
+    log.info("allowances set by=%s for=%s saved=%s refused=%s",
+             user.key, target.key, said, refused)
+    return RedirectResponse(url="/accounts?msg=" + quote(
+        " ".join(parts) or "Nothing changed."), status_code=303)
+
+
+@app.post("/accounts/reset")
+async def post_accounts_reset(request: Request):
+    """Give one account its day's requests back, on every medium served."""
+    if setup.needs_setup():
+        return RedirectResponse(url="/setup", status_code=303)
+    try:
+        user = viewer(request)
+    except LookupError as exc:
+        return _signin_page(request, detail=str(exc), status=401)
+    if not user.is_admin:
+        return RedirectResponse(url="/accounts?msg=" + quote(
+            "Giving an account its requests back needs a Jellyfin "
+            "administrator account."), status_code=303)
+    form = await request.form()
+    try:
+        target = jellyfin.account(str(form.get("account", "")))
+    except LookupError as unknown:
+        return RedirectResponse(url="/accounts?msg=" + quote(str(unknown)),
+                                status_code=303)
+    for key in sorted(media.available()):
+        wants.reset_allowance(target, key)
+    log.info("allowance reset by=%s for=%s (all media)", user.key, target.key)
+    return RedirectResponse(url="/accounts?msg=" + quote(
+        f"{target.name} has today's requests back."), status_code=303)
+
+
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request, q: str = "", medium: str = "", unit: str = "",
           msg: str = ""):

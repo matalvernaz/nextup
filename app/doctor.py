@@ -13,7 +13,7 @@ there, and changes nothing.
 """
 import sys
 
-from . import backends, config, jellyfin, media, selfcheck
+from . import backends, config, jellyfin, media, selfcheck, store
 
 #: What a medium needs from Jellyfin, said the way a person would look for it.
 _LIBRARY_KIND = {"movie": "Movies", "series": "Shows",
@@ -101,9 +101,13 @@ def _library_lines() -> tuple[list[str], bool]:
                 f"{_LIBRARY_KIND.get(key, 'matching')} library. Requests "
                 "will work and nothing will ever read as arrived.")
         else:
+            own = sum(1 for (_, medium) in store.cap_overrides()
+                      if medium == key)
             lines.append(f"{found.label}: {len(found.library_ids)} "
                          f"library(ies), units {', '.join(found.units)}, "
-                         f"{found.daily_cap} per account per day.")
+                         f"{found.daily_cap} per account per day"
+                         + (f", {own} account(s) on their own allowance."
+                            if own else "."))
     return lines, ok
 
 
