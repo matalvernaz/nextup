@@ -95,7 +95,8 @@ def capabilities(user: jellyfin.User = Depends(caller)) -> dict:
 
 
 @router.get("/shelves")
-def get_shelves(user: jellyfin.User = Depends(caller)) -> dict:
+def get_shelves(force: bool = False,
+                user: jellyfin.User = Depends(caller)) -> dict:
     """Both shelves, plus this account's outstanding requests and their state.
 
     ``owned`` carries Jellyfin item ids rather than rendered rows: the client
@@ -111,10 +112,22 @@ def get_shelves(user: jellyfin.User = Depends(caller)) -> dict:
     shelf through Jellyfin rather than through this API. The cost is one write
     per recomputation, not per request: a cached shelf carries whether its
     write is still outstanding, and settles it once.
+
+    ``force`` recomputes instead of answering from the hour-long cache, and it
+    is what a listener's pull to refresh asks for. Without it the shelf cannot
+    be made to change at all inside that hour: a book finished a minute ago
+    goes on being recommended, and the gesture reports success every time
+    because the request it makes does succeed. It costs twelve seconds, which
+    is why nothing takes this path on its own -- only somebody who has asked.
+
+    An added query parameter rather than a new route, and that is consistent
+    with the rule above: every build already installed sends no ``force``,
+    takes the default, and gets the same bytes it gets today. The frozen thing
+    is the shape of the answer, and that is untouched.
     """
-    data = shelves.result(user, update_playlist=True)
-    log.info("shelves served user=%s owned=%d suggestions=%d",
-             user.key, len(data["own"]), len(data["discover"]))
+    data = shelves.result(user, force=force, update_playlist=True)
+    log.info("shelves served user=%s owned=%d suggestions=%d force=%s",
+             user.key, len(data["own"]), len(data["discover"]), force)
     return {
         "version": LEGACY_PROTOCOL,
         "runId": data.get("run_id"),

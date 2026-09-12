@@ -144,6 +144,22 @@ def _stale_entry(user_key: str) -> dict | None:
     return data
 
 
+def _entry_computed_since(user_key: str, moment: float) -> tuple[dict, bool] | None:
+    """A shelf that finished rebuilding while this caller waited for the lock.
+
+    A forced rebuild costs twelve seconds, so three of them in fifteen seconds
+    are not three answers -- they are one answer and two rebuilds nobody is
+    waiting for. A caller that arrived before a rebuild started could not have
+    asked for anything fresher than what that rebuild produced, so it is served
+    the same shelf rather than queueing another one behind it.
+    """
+    with _cache_guard:
+        entry = _cache.get(user_key)
+    if entry and entry[0] >= moment:
+        return entry[1], entry[2]
+    return None
+
+
 def _refresh_behind(user: jellyfin.User, update_playlist: bool) -> None:
     """Recompute out of band, so the stale answer served just now goes stale less."""
     with _cache_guard:
@@ -179,6 +195,7 @@ def result(user: jellyfin.User, force: bool = False,
     in front of the screen is the thing being fixed; an hour-old shelf is not
     worth a twelve-second wait, and this one only ever happens once per account.
     """
+    requested_at = time.monotonic()
     if not force and (cached := _fresh_entry(user.key)) is not None:
         data, written = cached
         log.debug("shelves cache hit user=%s playlist_written=%s", user.key, written)
@@ -194,6 +211,13 @@ def result(user: jellyfin.User, force: bool = False,
     with _lock_for(user.key):
         if not force and (cached := _fresh_entry(user.key)) is not None:
             data, written = cached
+            if update_playlist and not written:
+                write_playlist(user, data)
+            return data
+        if force and (recent := _entry_computed_since(
+                user.key, requested_at)) is not None:
+            data, written = recent
+            log.info("shelves rebuilt while this request waited user=%s", user.key)
             if update_playlist and not written:
                 write_playlist(user, data)
             return data
