@@ -106,6 +106,11 @@ def _recommendation_source_lines() -> tuple[list[str], bool]:
     # runs when the installation is broken, and a database that has never been
     # initialised is one of the ways it can be -- a doctor that dies of the
     # condition it was called to diagnose is no use at all.
+    # Bound before the try, not only in the else. An unreadable database left
+    # it unset and the line below then raised UnboundLocalError -- the doctor
+    # dying of the condition it was called to diagnose, one layer further in
+    # than the last time.
+    connected = 0
     try:
         connected = store.accounts_with_setting("HARDCOVER_TOKEN")
     except sqlite3.Error as exc:
@@ -122,9 +127,16 @@ def _recommendation_source_lines() -> tuple[list[str], bool]:
             "from Your reading accounts, and it only ever reads their own "
             "shelf.")
 
+    # Named as the HOUSEHOLD's sources, because that is what this figure is.
+    # Saying "openlibrary" flat would read as "Hardcover ratings are not used",
+    # which is wrong the moment one listener has connected an account -- their
+    # shelf asks Hardcover with their own token. The line above counts them;
+    # this one says what everybody gets.
     sources = external_books.configured_sources()
     lines.append(
-        "Book ratings: " + ", ".join(sources) + "."
+        "Book ratings, for everybody: " + ", ".join(sources) + "."
+        + (" Listeners who have connected Hardcover also get theirs."
+           if connected and "hardcover" not in sources else "")
         if sources else
         "Book ratings: none configured, so books are ranked without one.")
 
