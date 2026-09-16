@@ -17,6 +17,7 @@ import time
 from contextlib import asynccontextmanager
 from urllib.parse import quote, urlsplit
 
+import httpx
 from fastapi import FastAPI, Form, Request, Response
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -25,6 +26,7 @@ from fastapi.templating import Jinja2Templates
 from . import (api, backends, compat_nextread, config, jellyfin, logs, media,
                recommendations, selfcheck, sessions, settings, setup, store,
                throttle, wants)
+from .books import hardcover_shelf
 from .books import shelves as book_shelves
 from .books import store as book_store
 from .books import upkeep
@@ -399,6 +401,120 @@ def post_setup(request: Request, jellyfin_url: str = Form(""),
     throttle.clear(*keys)
     return RedirectResponse(url=f"/backends?msg={quote(message)}",
                             status_code=303)
+
+
+def _hardcover_panel(user) -> dict:
+    """What the account page says about this listener's Hardcover connection.
+
+    Never the token, and never a bare "saved". What somebody needs to see is
+    that the thing is reading the right account -- the name it connected as and
+    how much is on it -- because a token saved and silently ignored looks
+    exactly like a token saved and working.
+    """
+    if not store.user_setting(user.key, "HARDCOVER_TOKEN"):
+        return {
+            "connected": False,
+            "summary": "Not connected. Connect Hardcover and your own "
+                       "ratings, reading history and want-to-read shelf will "
+                       "shape your suggestions here.",
+            "detail": "",
+        }
+    shelf = hardcover_shelf.for_user(user.key)
+    if shelf is None:
+        return {
+            "connected": True,
+            "summary": "A token is saved, but Hardcover did not answer just "
+                       "now.",
+            "detail": "If this does not clear, the token may have been "
+                      "revoked. Paste a new one to replace it.",
+        }
+    counts = (len(hardcover_shelf.rated(shelf)),
+              len(hardcover_shelf.finished(shelf)),
+              len(hardcover_shelf.wanted(shelf)))
+    detail = (f"{counts[0]} rated, {counts[1]} finished, "
+              f"{counts[2]} on your want-to-read shelf.")
+    if not any(counts):
+        detail = ("Nothing on it yet, so it is not changing your suggestions. "
+                  "The first book you rate or shelve on Hardcover is when it "
+                  "starts to.")
+    return {
+        "connected": True,
+        "summary": f"Connected as {shelf['username']}, "
+                   f"{shelf['books_count']} book(s) on your Hardcover shelf.",
+        "detail": detail,
+    }
+
+
+@app.get("/account", response_class=HTMLResponse)
+def get_account(request: Request, msg: str = ""):
+    """What this listener has connected of their own. Every account, not just
+    keyholders: it is their reading, and there is nothing here to protect the
+    household from."""
+    if setup.needs_setup():
+        return RedirectResponse(url="/setup", status_code=303)
+    try:
+        user = viewer(request)
+    except LookupError as exc:
+        return _signin_page(request, detail=str(exc), status=401)
+    return templates.TemplateResponse(
+        request=request, name="account.html",
+        context={"user": user, "message": msg,
+                 "hardcover": _hardcover_panel(user)})
+
+
+@app.post("/account")
+def post_account(request: Request, action: str = Form("save"),
+                 HARDCOVER_TOKEN: str = Form("")):
+    """Save or clear this listener's own token, having checked it first.
+
+    Checked rather than stored on trust. A wrong token otherwise fails inside a
+    background shelf build six hours later, where the only trace is a log line
+    nobody is reading, and the page would have said "saved".
+    """
+    if setup.needs_setup():
+        return RedirectResponse(url="/setup", status_code=303)
+    try:
+        user = viewer(request)
+    except LookupError as exc:
+        return _signin_page(request, detail=str(exc), status=401)
+
+    if action == "disconnect":
+        store.put_user_setting(user.key, "HARDCOVER_TOKEN", "")
+        hardcover_shelf.forget(user.key)
+        book_shelves.expire(user.key)
+        return RedirectResponse(
+            url="/account?msg=" + quote(
+                "Hardcover disconnected. Your suggestions will stop using it."),
+            status_code=303)
+
+    token = HARDCOVER_TOKEN.strip()
+    if not token:
+        return RedirectResponse(
+            url="/account?msg=" + quote(
+                "Nothing changed. Leave the box empty to keep the token you "
+                "already saved."), status_code=303)
+    try:
+        found = hardcover_shelf.verify(token)
+    except hardcover_shelf.Refused as exc:
+        return RedirectResponse(
+            url="/account?msg=" + quote(f"{exc}. Nothing was saved."),
+            status_code=303)
+    except (httpx.HTTPError, ValueError):
+        return RedirectResponse(
+            url="/account?msg=" + quote(
+                "Hardcover did not answer, so the token was not saved. "
+                "Try again in a moment."), status_code=303)
+
+    store.put_user_setting(user.key, "HARDCOVER_TOKEN", token)
+    hardcover_shelf.forget(user.key)
+    # The shelf somebody is looking at was built without any of this. Expiring
+    # it means the next visit rebuilds rather than showing yesterday's answer
+    # under a page that says Hardcover is connected.
+    book_shelves.expire(user.key)
+    return RedirectResponse(
+        url="/account?msg=" + quote(
+            f"Connected as {found['username']}. Your suggestions will use it "
+            f"from now on."), status_code=303)
 
 
 @app.get("/backends", response_class=HTMLResponse)

@@ -129,6 +129,14 @@ def _surnames(authors) -> set[str]:
     return found
 
 
+#: The two normalising steps, named publicly because the personal-shelf matcher
+#: in `books.hardcover_shelf` has to file its entries by exactly the same rules
+#: the community-rating matcher compares by. Two spellings of "the same book"
+#: in one codebase is how a shelf claims a rating for the wrong edition.
+main_title = _main_title
+surnames = _surnames
+
+
 def matches(
     wanted_title: str,
     wanted_authors,

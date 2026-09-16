@@ -97,6 +97,22 @@ CREATE TABLE IF NOT EXISTS account_caps (
     PRIMARY KEY (user_key, medium)
 );
 
+-- What one account has told this service about itself, as opposed to what the
+-- household has told it about its wiring. Today that is one thing: a personal
+-- Hardcover token, which names a person -- `me` answers with the account that
+-- issued it -- and reads that person's own ratings and shelves.
+--
+-- In SCHEMA rather than BOOK_SCHEMA deliberately. Everything in that one is a
+-- cache and is DROPPED on a version bump; this is something somebody typed in,
+-- and losing it silently would look like a feature that stopped working.
+CREATE TABLE IF NOT EXISTS user_settings (
+    user_key TEXT NOT NULL,
+    name     TEXT NOT NULL,
+    value    TEXT NOT NULL,
+    set_at   REAL NOT NULL,
+    PRIMARY KEY (user_key, name)
+);
+
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -878,6 +894,19 @@ def get_external(cache_key: str, ttl_hours: float):
     return json.loads(row["payload"]) if row else None
 
 
+def drop_external(cache_key: str) -> None:
+    """Forget one cached answer outright.
+
+    A real DELETE rather than storing null. `get_external` would read a stored
+    null as "nothing cached" and do the right thing, but only by accident --
+    the row would still be there, and the next person to read this code would
+    have to work out which of the two nothings it meant.
+    """
+    with db() as conn:
+        conn.execute("DELETE FROM external_facts WHERE cache_key=?",
+                     (cache_key,))
+
+
 def put_external(cache_key: str, payload) -> None:
     with db() as conn:
         conn.execute(
@@ -885,3 +914,62 @@ def put_external(cache_key: str, payload) -> None:
             "VALUES(?,?,?) ON CONFLICT(cache_key) DO UPDATE SET "
             "payload=excluded.payload, fetched_at=excluded.fetched_at",
             (cache_key, json.dumps(payload), time.time()))
+
+
+# --- what one account has told this service about itself ---------------------
+
+#: Only these may be written per account. The same allowlist reasoning as
+#: `settings.WRITABLE`: a table that can hold arbitrary names is one where a
+#: bug writes something load-bearing.
+USER_WRITABLE = frozenset({"HARDCOVER_TOKEN"})
+
+#: Never logged, never rendered back into a form field. All of it, so far --
+#: the only thing an account can set is a credential.
+USER_SECRET = frozenset({"HARDCOVER_TOKEN"})
+
+
+def user_setting(user_key: str, name: str) -> str | None:
+    """One account's own value for a setting, or None if they have not set it.
+
+    Deliberately NOT falling back to the household's value here. Some callers
+    want that fallback and some must not have it -- a personal reading history
+    read with somebody else's token is the wrong answer, not a degraded one --
+    so the fallback is the caller's decision and is spelled out where it is
+    made.
+    """
+    with db() as conn:
+        row = conn.execute(
+            "SELECT value FROM user_settings WHERE user_key=? AND name=?",
+            (user_key, name)).fetchone()
+    return row["value"] if row else None
+
+
+def put_user_setting(user_key: str, name: str, value: str) -> None:
+    """Set or clear one account's value. An empty value deletes the row.
+
+    Deleting rather than storing an empty string, for the reason `account_caps`
+    deletes to clear: absent is the only way to say "I have not set this", and
+    an empty string is a value somebody could have meant.
+    """
+    if name not in USER_WRITABLE:
+        raise ValueError(f"{name} is not a per-account setting")
+    with db() as conn:
+        if not value:
+            conn.execute(
+                "DELETE FROM user_settings WHERE user_key=? AND name=?",
+                (user_key, name))
+            return
+        conn.execute(
+            "INSERT INTO user_settings (user_key, name, value, set_at) "
+            "VALUES (?,?,?,?) ON CONFLICT (user_key, name) DO UPDATE SET "
+            "value=excluded.value, set_at=excluded.set_at",
+            (user_key, name, value, time.time()))
+
+
+def accounts_with_setting(name: str) -> int:
+    """How many accounts have set one thing. For the doctor, never the value."""
+    with db() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM user_settings WHERE name=?",
+            (name,)).fetchone()
+    return int(row["n"]) if row else 0

@@ -21,7 +21,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 
 from .. import config, external_books, jellyfin, listenarr, logs
-from . import audible, store, textmodel
+from . import audible, hardcover_shelf, store, textmodel
 
 log = logs.get("engine")
 
@@ -81,6 +81,20 @@ RATING_CONFIDENT_AT = 1000
 # 3.6 out of 5" is not an argument for reading anything.
 RATING_REASON_THRESHOLD = 4.0
 
+# What somebody's own Hardcover shelf is worth.
+#
+# A book on a want-to-read list outranks every inferred signal below the series
+# frontier, because it is not inferred: they said it. Sized under
+# W_SERIES_NEXT, which is the only thing that beats being told -- somebody five
+# books into a series wants the sixth even if they never wrote it down.
+W_WANT_TO_READ = 60.0
+
+# A rating somebody gave on Hardcover joins the taste profile through the same
+# machinery a Jellyfin rating does, so there is no weight for it here. That is
+# the point: a book read in print should shape a shelf exactly as one listened
+# to on this server does, and a second weight would make it a different kind of
+# evidence rather than the same evidence from elsewhere.
+
 # Explanations describe stable signals, not the TF-IDF model's incidental
 # vocabulary. Weak lexical overlap affects ordering but does not earn a claim.
 TEXT_REASON_THRESHOLD = 0.12
@@ -92,7 +106,7 @@ MAX_REASONS = 2
 SERIES_REPEAT_PENALTY = 0.8
 AUTHOR_REPEAT_PENALTY = 0.35
 
-RANKER_VERSION = "3"
+RANKER_VERSION = "4"
 
 GENERIC_GENRE_REASONS = {
     "audiobooks",
@@ -718,6 +732,45 @@ def _diversify(rows: list[dict], limit: int) -> list[dict]:
     return selected
 
 
+def _shelf_index(entries: list[dict]) -> dict[str, list[str]]:
+    """Somebody's Hardcover entries, keyed by normalised main title.
+
+    A title alone, with the authors kept beside it, because the match against a
+    library book or an Audible candidate is `external_books.matches` -- the
+    guard that already knows a part is not the book and an omnibus is not the
+    book. Going through a plain title key first is just what makes that
+    affordable: a 500-book shelf against a 2,275-book library is a million
+    comparisons done properly, and a dictionary lookup done this way.
+    """
+    index: dict[str, list[str]] = {}
+    for entry in entries:
+        key = external_books.main_title(entry.get("title") or "")
+        if key:
+            index.setdefault(key, []).extend(entry.get("authors") or [])
+    return index
+
+
+def shelf_entry(index: dict[str, list[str]], title: str, authors) -> bool:
+    """Whether one book is on a shelf built by `_shelf_index`.
+
+    The key settles the title and the surname settles the author, which is the
+    same two-part rule `external_books.matches` applies -- reached differently
+    because the key has already done the title half. So a shelf holding "The
+    Way of Kings" does not claim the library's "The Way of Kings, Part 1"
+    (different key), and a same-title book by somebody else is not a read.
+
+    An author nobody recorded cannot disagree, exactly as over there.
+    """
+    key = external_books.main_title(title or "")
+    found = index.get(key) if key else None
+    if found is None:
+        return False
+    wanted = external_books.surnames(authors)
+    if not wanted:
+        return True
+    return bool(wanted & external_books.surnames(found))
+
+
 def rating_prior(rating: "external_books.Rating") -> float:
     """A community rating as a signed multiplier in -1.0 through 1.0.
 
@@ -953,7 +1006,26 @@ def run(user: jellyfin.User, update_playlist: bool = True) -> dict:
     run_id = store.start_run(user.key)
     library = jellyfin.books(user.id)
 
+    # This listener's own Hardcover shelf, if they have connected one. Never
+    # the household's token: a reading history read with somebody else's
+    # credential is not a degraded answer, it is another person's taste.
+    shelf = hardcover_shelf.for_user(user.key)
+    read_elsewhere = _shelf_index(hardcover_shelf.finished(shelf))
+    rated_elsewhere = _shelf_index(hardcover_shelf.rated(shelf))
+    wants_elsewhere = _shelf_index(hardcover_shelf.wanted(shelf))
+
     seeds = [i for i in library if _is_seed(i, user)]
+    # A book they rated on Hardcover is a book they have an opinion about, and
+    # the profile has never seen it. Added to the seeds where this library
+    # happens to hold it, so a rating given in print counts exactly as one
+    # given here -- through the same taste machinery, not a weight of its own.
+    if rated_elsewhere:
+        known = {i.get("Id") for i in seeds}
+        seeds += [
+            i for i in library
+            if i.get("Id") not in known
+            and shelf_entry(rated_elsewhere, i.get("Name") or "", _authors(i))
+        ]
 
     # Signed mode -- where a bad rating pushes rather than merely failing to pull
     # -- needs enough ratings that no single one can steer the result. Counted
@@ -1045,6 +1117,12 @@ def run(user: jellyfin.User, update_playlist: bool = True) -> dict:
             continue
         if item.get("Id") in series_blocked:
             continue
+        # Finished on Hardcover -- read, abandoned or ignored. Offering it back
+        # is the most obviously wrong row a shelf can carry, and this is the
+        # only place that can know: nothing in Jellyfin says they read it in
+        # print.
+        if shelf_entry(read_elsewhere, item.get("Name") or "", _authors(item)):
+            continue
         # Floored at zero on this shelf. A negative cosine is real evidence, but
         # W_TEXT is large enough that it could cancel a genuine author match and
         # then trip the `score <= 0` drop below -- silently removing a book by an
@@ -1113,11 +1191,24 @@ def run(user: jellyfin.User, update_playlist: bool = True) -> dict:
         for asin, cand in pool.items():
             if asin in suppressed:
                 continue
+            title, people = cand.get("title") or "", cand.get("authors") or []
+            # Same exclusion as the owned shelf, and it matters more here:
+            # these are books to go and acquire, and acquiring one somebody
+            # has already read is a wasted request as well as a wrong row.
+            if shelf_entry(read_elsewhere, title, people):
+                continue
             if not _is_reading_order_candidate(cand, taste):
                 continue
             text = text_score(f"asin:{asin}")
             score, why = _score_candidate(
                 cand, taste, votes, text, seed_of.get(asin, []))
+            # Checked after the scorer and before the drop, so a book they
+            # asked for reaches the shelf even when nothing else about it
+            # matches: being told outranks anything inferred.
+            wanted_here = shelf_entry(wants_elsewhere, title, people)
+            if wanted_here:
+                score += W_WANT_TO_READ
+                why.insert(0, "on your Hardcover want-to-read shelf")
             if score <= 0:
                 continue
             if text >= TEXT_REASON_THRESHOLD:

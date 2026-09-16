@@ -11,10 +11,11 @@ draws no control and says nothing about why.
 Read-only throughout: it asks four backends and Jellyfin whether they are
 there, and changes nothing.
 """
+import sqlite3
 import sys
 
 from . import (backends, config, external_books, jellyfin, media,
-               selfcheck, tmdb)
+               selfcheck, store, tmdb)
 
 #: What a medium needs from Jellyfin, said the way a person would look for it.
 _LIBRARY_KIND = {"movie": "Movies", "series": "Shows",
@@ -100,6 +101,26 @@ def _recommendation_source_lines() -> tuple[list[str], bool]:
             "TMDb: no key, so films and shows are recommended from this "
             "library's metadata alone. Set TMDB_API_KEY to add the "
             "'people who liked this also liked' signal.")
+
+    # Caught rather than allowed to raise. This module is the thing somebody
+    # runs when the installation is broken, and a database that has never been
+    # initialised is one of the ways it can be -- a doctor that dies of the
+    # condition it was called to diagnose is no use at all.
+    try:
+        connected = store.accounts_with_setting("HARDCOVER_TOKEN")
+    except sqlite3.Error as exc:
+        ok = False
+        lines.append(f"Hardcover accounts: the database could not be read "
+                     f"({exc}). Nothing per-account can be reported.")
+    else:
+        lines.append(
+            f"Hardcover accounts: {connected} listener(s) have connected their "
+            "own, so their ratings, reading history and want-to-read shelf "
+            "shape their own suggestions."
+            if connected else
+            "Hardcover accounts: nobody has connected one. A listener can, "
+            "from Your reading accounts, and it only ever reads their own "
+            "shelf.")
 
     sources = external_books.configured_sources()
     lines.append(
