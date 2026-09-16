@@ -96,6 +96,31 @@ def _row_position(row: dict, series_asin: str) -> str | None:
     return None
 
 
+def _catalogue_name(rows: list, series_asin: str) -> str | None:
+    """What Audible calls the series these rows belong to.
+
+    The name a plan was asked under is the *library's* spelling, or -- from
+    search -- whatever somebody typed. Neither is safe to put on a row that
+    offers to acquire ten books: `_series_by_name` accepts a name whose words
+    are all present rather than an exact match, so "iron druid" resolves the
+    Iron Druid Chronicles and a row titled "iron druid" would not say what is
+    about to be asked for. Display and identity are separated for that reason,
+    and only display uses this.
+    """
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for membership in row.get("series") or []:
+            if not isinstance(membership, dict):
+                continue
+            if _text(membership.get("asin")).upper() != series_asin.upper():
+                continue
+            found = _text(membership.get("name")) or _text(membership.get("title"))
+            if found:
+                return found
+    return None
+
+
 def _not_out_yet(row: dict, today: date) -> bool:
     """A book nothing can acquire, because it has not been published.
 
@@ -178,7 +203,7 @@ def _series_from_members(members: list[dict], name: str) -> tuple[str, str] | No
     return best[1], best[2]
 
 
-def _series_by_name(name: str) -> tuple[str, str] | None:
+def _series_by_name(name: str) -> tuple[tuple[str, str] | None, int]:
     """Audible's own series search, trusted only when it is unambiguous.
 
     The fallback for a series none of whose books carries an Audible id --
@@ -190,6 +215,13 @@ def _series_by_name(name: str) -> tuple[str, str] | None:
     with its trailing qualifier dropped. Two matches at any step is a guess
     about which edition somebody meant, and a guess here acquires the wrong
     narrator's books, so it refuses rather than trying a looser reading.
+
+    Answers with the resolution *and* how many series answered to the name at
+    all, because those are two different failures and the caller owes a
+    different sentence for each: a name nothing in the catalogue carries is not
+    a series, while one carried by three is a series this cannot pick an
+    edition of. They were the same `None` while the only caller had a library
+    book behind the name to fall back on describing.
     """
     full = name.strip()
     unqualified = _QUALIFIER.sub("", name).strip()
@@ -205,7 +237,7 @@ def _series_by_name(name: str) -> tuple[str, str] | None:
             if asin and asin not in rows_by_asin:
                 rows_by_asin[asin] = row
     if not rows_by_asin:
-        return None
+        return None, 0
 
     wanted = engine._norm(full)
     wanted_tokens = _tokens(full)
@@ -219,12 +251,13 @@ def _series_by_name(name: str) -> tuple[str, str] | None:
                    if rule(engine._norm(_text(row.get("name"))))]
         if len(matches) == 1:
             asin, row = matches[0]
-            return asin, (_text(row.get("region")) or config.AUDIBLE_REGION)
+            return (asin, _text(row.get("region")) or config.AUDIBLE_REGION), \
+                len(rows_by_asin)
         if len(matches) > 1:
             log.info("series name %r matches %d Audible series; refusing to guess",
                      full, len(matches))
-            return None
-    return None
+            return None, len(rows_by_asin)
+    return None, len(rows_by_asin)
 
 
 def plan(user: jellyfin.User, name: str, anchor_item_id: str | None = None) -> dict:
@@ -241,20 +274,43 @@ def plan(user: jellyfin.User, name: str, anchor_item_id: str | None = None) -> d
     nothing else. A book this listener hid on the Discover shelf is left out
     and said to be, not folded in with the ones on their way. A book Audible
     has not published is held back the same way -- see `_not_out_yet`.
+
+    **A series the library holds none of is a valid plan, not an error.** It
+    used to be refused, because the only caller was the series screen, which
+    can only be reached through a book already here. Search is the second
+    caller and asks the opposite question -- "get me this whole series" --
+    and answering it is the difference between acquiring a series in one tap
+    and acquiring book one, waiting for it to import, and then asking again
+    from a screen that has only now appeared. With no members, `_series_by_name`
+    resolves it from the catalogue alone, which is the same fallback a series
+    whose books carry no Audible id already relies on, and every row comes back
+    as a gap. An *anchored* plan still requires its anchor: that caller names a
+    book on screen and a name that does not hold it is a mismatch worth
+    refusing.
     """
     library = jellyfin.books(user.id)
     members = [book for book in library if _same_series(book, name)]
-    if not members:
-        raise NotASeries(f"None of the books in your library is filed under {name}.")
     if anchor_item_id and all(book.get("Id") != anchor_item_id for book in members):
         raise NotASeries(f"That book is not filed under {name} in your library.")
 
-    resolved = _series_from_members(members, name) or _series_by_name(name)
+    resolved = _series_from_members(members, name)
+    listed = 0
     if resolved is None:
+        resolved, listed = _series_by_name(name)
+    if resolved is None:
+        if not members and not listed:
+            # Nothing here is filed under it and the catalogue has never heard
+            # of it either. That is not a series at all, which is a different
+            # answer from one that exists and cannot be pinned to an edition --
+            # and the caller shows a row for the second and none for the first.
+            raise NotASeries(
+                f"Neither your library nor Audible has a series called {name}.")
         raise Unresolvable(
-            f"Could not tell which Audible series {name} is. None of these books "
-            "carries an Audible id that names one, and the name alone is not "
-            "enough to pick an edition.")
+            f"Could not tell which Audible series {name} is. "
+            + ("The name alone is not enough to pick an edition."
+               if not members else
+               "None of these books carries an Audible id that names one, and "
+               "the name alone is not enough to pick an edition."))
     series_asin, region = resolved
 
     rows = listenarr.series_books(series_asin, region)
@@ -360,6 +416,10 @@ def plan(user: jellyfin.User, name: str, anchor_item_id: str | None = None) -> d
              len(left_out), len(not_out), len(missing))
     return {
         "series": name,
+        # Identity stays `series` -- it is what re-plans to this same answer,
+        # and what the anchored caller and the ledger already use. This is the
+        # name to *show*, which is not always the same string.
+        "catalogueName": _catalogue_name(rows, series_asin) or name,
         "seriesAsin": series_asin,
         "region": region,
         "have": have,
