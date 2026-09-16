@@ -20,8 +20,8 @@ from threading import Lock
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query
 
-from . import (config, describarr, jellyfin, logs, media, recommendations,
-               store, wants)
+from . import (config, describarr, gone, jellyfin, logs, media,
+               recommendations, store, wants)
 
 log = logs.get("api")
 
@@ -194,6 +194,12 @@ def capabilities(protocol: int = 1,
         # same reason it is reported from configuration rather than from a
         # probe. Additive, so a client that predates it goes on working.
         "describe": {"supported": describarr.configured()},
+        # Whether this server will clear an acquisition tool's row when
+        # something is deleted from the library. Additive, and reported from
+        # configuration for the same reason `describe` is: a deployment with
+        # no acquisition tool at all has nothing to clear, and a client told
+        # false says nothing about it rather than offering a no-op.
+        "deleted": {"supported": gone.supported()},
         "recommendations": {
             "media": recommendation_media,
         },
@@ -502,6 +508,51 @@ def get_allowance(caller_user: jellyfin.User = Depends(caller),
                             "ownCap": store.cap_override(target.key, key),
                             "remainingToday": wants.allowance(target, key)}
                            for key in sorted(media.available())]}
+
+
+@router.post("/deleted")
+def post_deleted(user: jellyfin.User = Depends(caller),
+                 item_id: str = Body("", embed=True, alias="itemId"),
+                 kind: str = Body("", embed=True, alias="type"),
+                 name: str = Body("", embed=True),
+                 provider_ids: dict | None = Body(None, embed=True,
+                                                  alias="providerIds"),
+                 authors: list | None = Body(None, embed=True)) -> dict:
+    """Something has been deleted from the library; clear what still points at it.
+
+    A report of a fact rather than an instruction, which is why it is named
+    for what happened rather than for what to do about it: the client knows a
+    file has gone and nothing else, and what that means -- a Radarr row to
+    remove, a Listenarr row to drop, a ledger entry to sweep, or nothing at
+    all -- is this service's to decide.
+
+    Not a DELETE on anything. The Jellyfin id it carries has already stopped
+    naming a resource, and the thing being changed is a row in a different
+    tool entirely.
+
+    Every caller is checked against the library rather than believed: see
+    `gone`, which re-reads Jellyfin for the provider id before it touches
+    anything.
+    """
+    item = {"itemId": item_id, "type": kind, "name": name,
+            "providerIds": provider_ids or {},
+            "authors": [a for a in (authors or []) if isinstance(a, str)]}
+    try:
+        report = gone.clear(item)
+    except gone.StillHere as exc:
+        # 409 rather than 400: nothing about the request was malformed, the
+        # world simply is not in the state it described. The sentence is the
+        # server's own and is worth repeating to whoever pressed delete.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except gone.Unsettled as exc:
+        log.warning("deleted user=%s id=%s unsettled: %s", user.key, item_id, exc)
+        raise HTTPException(
+            status_code=503,
+            detail="The library could not be checked, so nothing was changed."
+        ) from exc
+    log.info("deleted user=%s id=%s type=%s cleared=%s",
+             user.key, item_id, kind, report["cleared"])
+    return report
 
 
 @router.post("/cancel")

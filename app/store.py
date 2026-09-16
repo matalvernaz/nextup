@@ -619,6 +619,50 @@ def release(user_key: str, medium: str,
     return existed, others - {user_key}
 
 
+def waiting(medium: str, item_key: str) -> set[str]:
+    """Every account still waiting on this, whoever is asking.
+
+    `others_waiting` excludes the caller, which is the right question for "may
+    I cancel my own row". This is the question a deletion asks: the file has
+    gone for the whole household, and one unfulfilled row anywhere means
+    somebody is owed an acquisition that must keep running.
+    """
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT user_key FROM requests WHERE medium=? AND item_key=? "
+            "AND fulfilled_at IS NULL", (medium, item_key)).fetchall()
+    return {row["user_key"] for row in rows}
+
+
+def drop_settled(medium: str, item_key: str) -> int:
+    """Erase every settled ledger row for one thing. Returns how many went.
+
+    Settled only -- an unfulfilled row is somebody's outstanding request and
+    deleting it would take away the allowance they spent as well as the row.
+    The caller checks `waiting` first and does not get here while any exist;
+    the WHERE clause repeats the condition anyway, because this is the one
+    statement in the file that reaches across accounts.
+    """
+    with db() as conn:
+        cur = conn.execute(
+            "DELETE FROM requests WHERE medium=? AND item_key=? "
+            "AND fulfilled_at IS NOT NULL", (medium, item_key))
+    return cur.rowcount
+
+
+def settled_rows(medium: str) -> list[sqlite3.Row]:
+    """Every arrived request for one medium, across accounts.
+
+    Books are matched on title and author rather than on a key -- the ASIN a
+    book was asked for is not the one it arrives under -- so the book path has
+    to look at the rows themselves rather than ask about a key it can build.
+    """
+    with db() as conn:
+        return list(conn.execute(
+            "SELECT * FROM requests WHERE medium=? AND fulfilled_at IS NOT NULL",
+            (medium,)))
+
+
 def others_waiting(user_key: str, medium: str, item_key: str) -> set[str]:
     """Other accounts still outstanding on the same thing.
 
