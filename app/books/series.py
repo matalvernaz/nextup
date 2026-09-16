@@ -36,6 +36,9 @@ class Unavailable(Exception):
 #: How many titles a spoken sentence names before it counts the rest.
 NAMED_TITLES = 5
 
+#: What a search row calls itself when it stands for a whole series.
+SERIES_KIND = "series"
+
 # A trailing qualifier a library adds to tell editions apart -- "(Jim Dale)",
 # "(Full-Cast Editions)" -- which Audible's own series name may or may not
 # carry. Tried as written first, then without it.
@@ -430,6 +433,85 @@ def plan(user: jellyfin.User, name: str, anchor_item_id: str | None = None) -> d
         "rows": {_text(row.get("asin")).upper(): row
                  for row in rows if isinstance(row, dict)},
     }
+
+
+def state_sentence(have: int, on_order: int, missing: int) -> str:
+    """What a row says about a series, before anybody asks for it.
+
+    Deliberately not `sentence`, which describes what one tap just did and
+    reads as a past tense. This describes the state a person is choosing from.
+
+    Owning none of it is an ordinary answer rather than a refusal, so the counts
+    have to read as a sentence at zero too: "0 of 12 in your library" is
+    arithmetic where "none of the 12" is English, and it is spoken aloud.
+
+    Lives here rather than in one adapter because both search routes put the
+    same row on screen and a second copy is a second wording to drift.
+    """
+    total = have + on_order + missing
+    if not missing:
+        if have:
+            return f"You already have all {have} that Audible lists."
+        # Nothing to ask for and nothing here: every book is on order, held
+        # back as unpublished, or dismissed. Claiming to own all zero of them
+        # would be the one reading that is simply false.
+        return f"Nothing left to ask for out of the {total} Audible lists."
+    parts = [f"{have} of {total} in your library" if have
+             else f"None of the {total} in your library"]
+    if on_order:
+        parts.append(f"{on_order} already on order")
+    parts.append(f"{missing} to ask for")
+    return ", ".join(parts) + "."
+
+
+def search_rows(user: jellyfin.User, query: str) -> list[dict]:
+    """One series, in the shape the audiobook search results are already in.
+
+    The nextup route answers with its own hit shape; this is the same plan in
+    the shape the recommendation screen's search has always decoded, because
+    that screen is where a listener searches for a book and is therefore where
+    they will look for a series. Two shapes rather than one because the two
+    clients decode different keys, and quietly handing either the other's is
+    the seam that cost a round here once already.
+
+    `asin` is the *series* ASIN: it is real, unique, and the identifier the
+    client keys a row on. `series` is the name that planned this and is what
+    asking for it must send back -- `want_series` re-plans from a name and has
+    no ASIN door -- so identity for the row and identity for the request are
+    two fields, not one.
+    """
+    try:
+        planned = plan(user, query.strip())
+    except NotASeries:
+        return []
+    except (Unresolvable, Unavailable) as exc:
+        log.info("series search unresolved query=%r (%s)", query, exc)
+        return []
+    have = len(planned.get("have") or ())
+    on_order = len(planned.get("onOrder") or ())
+    missing = len(planned.get("missing") or ())
+    return [{
+        "asin": planned["seriesAsin"],
+        "title": planned.get("catalogueName") or planned["series"],
+        # A series is not written by one person and the row has no room to
+        # claim it is. Empty rather than absent: the client requires the key.
+        "authors": [],
+        "narrators": [],
+        "runtimeMinutes": None,
+        # Owned is nothing left to ask for AND nothing outstanding; a series
+        # every book of which is on order is `requested`, the same distinction
+        # a single book draws.
+        "owned": missing == 0 and on_order == 0,
+        "requested": missing == 0 and on_order > 0,
+        # Additive, and the reason a client can tell these rows apart: a server
+        # that predates this sends no `kind` and every row is a book.
+        "kind": SERIES_KIND,
+        "series": planned["series"],
+        "have": have,
+        "onOrder": on_order,
+        "missing": missing,
+        "detail": state_sentence(have, on_order, missing),
+    }]
 
 
 def want_series(user: jellyfin.User, name: str,

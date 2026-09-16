@@ -88,35 +88,10 @@ def _series_hits(user: jellyfin.User, query: str) -> list[dict]:
         # book: what "owned" means for it is that the library already holds
         # everything Audible lists.
         "owned": missing == 0,
-        "overview": _series_detail(have, on_order, missing),
+        "overview": book_series.state_sentence(have, on_order, missing),
     }]
 
 
-def _series_detail(have: int, on_order: int, missing: int) -> str:
-    """What the row says about a series, before anybody asks for it.
-
-    Deliberately not `series.sentence`, which describes what one tap just did
-    and reads as a past tense. This describes the state a person is choosing
-    from.
-
-    Owning none of it is now an ordinary answer rather than a refusal, so the
-    counts have to read as a sentence at zero too: "0 of 12 in your library"
-    is arithmetic where "none of the 12" is English, and it is spoken aloud.
-    """
-    total = have + on_order + missing
-    if not missing:
-        if have:
-            return f"You already have all {have} that Audible lists."
-        # Nothing to ask for and nothing here: every book is on order, held
-        # back as unpublished, or dismissed. Claiming to own all zero of them
-        # would be the one reading that is simply false.
-        return f"Nothing left to ask for out of the {total} Audible lists."
-    parts = [f"{have} of {total} in your library" if have
-             else f"None of the {total} in your library"]
-    if on_order:
-        parts.append(f"{on_order} already on order")
-    parts.append(f"{missing} to ask for")
-    return ", ".join(parts) + "."
 
 
 def _as_hit(row: dict) -> dict:
