@@ -13,7 +13,8 @@ there, and changes nothing.
 """
 import sys
 
-from . import backends, config, jellyfin, media, selfcheck
+from . import (backends, config, external_books, jellyfin, media,
+               selfcheck, tmdb)
 
 #: What a medium needs from Jellyfin, said the way a person would look for it.
 _LIBRARY_KIND = {"movie": "Movies", "series": "Shows",
@@ -62,6 +63,75 @@ def _backend_lines() -> tuple[list[str], bool]:
             continue
         lines.append(f"{status.name}: answered.")
     return lines, ok
+
+
+def _recommendation_source_lines() -> tuple[list[str], bool]:
+    """The outside catalogues a shelf may consult, and whether they answer.
+
+    Every one of these is optional and every one fails silently by design -- a
+    shelf built without them is a shelf with fewer signals, not an error. Which
+    is exactly why they belong here: an unreachable Radarr shows up as a search
+    box that finds nothing, and a mistyped TMDb key shows up as nothing at all.
+
+    Deliberately not in `backends`. That module answers "can this medium be
+    acquired", one status per medium, and a rating source acquires nothing. A
+    Status with no medium would be a lie in the shape of the type.
+    """
+    lines: list[str] = []
+    ok = True
+
+    if tmdb.configured():
+        # A real lookup, not a ping. TMDb's error for a bad key is a 401 on the
+        # first request and nothing at all before it, so "configured" and
+        # "working" are only distinguishable by asking something.
+        found = tmdb.recommendations(_TMDB_PROBE_ID, "movie")
+        if found:
+            lines.append(
+                f"TMDb: answered, {len(found)} neighbour(s) for the probe "
+                "title. Films and shows will be recommended from it.")
+        else:
+            ok = False
+            lines.append(
+                "TMDb: a key is set but the catalogue returned nothing. "
+                "Check TMDB_API_KEY; films and shows will fall back to this "
+                "library's own metadata.")
+    else:
+        lines.append(
+            "TMDb: no key, so films and shows are recommended from this "
+            "library's metadata alone. Set TMDB_API_KEY to add the "
+            "'people who liked this also liked' signal.")
+
+    sources = external_books.configured_sources()
+    lines.append(
+        "Book ratings: " + ", ".join(sources) + "."
+        if sources else
+        "Book ratings: none configured, so books are ranked without one.")
+
+    if config.HARDCOVER_TOKEN:
+        # The one source whose query shape could not be verified when it was
+        # written -- doing so needs a token from an account. So it is asked a
+        # real question here, and a schema that has moved shows up as a line
+        # somebody reads rather than as a signal that never fires.
+        try:
+            rows = external_books.hardcover_books(_HARDCOVER_PROBE_TITLE)
+        except Exception as exc:  # noqa: BLE001 -- the message is the point
+            ok = False
+            lines.append(f"Hardcover: the query was refused ({exc}). "
+                         "Book ratings will come from the other sources.")
+        else:
+            lines.append(
+                f"Hardcover: answered, {len(rows)} row(s) for the probe title.")
+
+    return lines, ok
+
+
+#: Fight Club, which TMDb has had since the beginning and which has neighbours.
+#: A probe needs a title the catalogue certainly knows, so that an empty answer
+#: means the key is wrong rather than the film being obscure.
+_TMDB_PROBE_ID = "550"
+
+#: Likewise: a title every book catalogue carries.
+_HARDCOVER_PROBE_TITLE = "Dune"
 
 
 def _library_lines() -> tuple[list[str], bool]:
@@ -141,6 +211,10 @@ def report() -> str:
     lines, ok = _library_lines()
     healthy &= ok
     sections.append("Media offered\n  " + "\n  ".join(lines))
+
+    lines, ok = _recommendation_source_lines()
+    healthy &= ok
+    sections.append("Recommendation sources\n  " + "\n  ".join(lines))
 
     lines, ok = _route_lines()
     healthy &= ok

@@ -60,6 +60,16 @@ class FakeClient:
         return FakeResponse(self.by_region.get(region, []))
 
 
+# `audible_metadata` falls back to Audible's own product endpoint before it
+# gives up, and only the SEARCH path is stubbed by the fake client above. So
+# this file was making live requests to api.audible.ca and api.audible.com on
+# every run -- up to one per region per lookup -- and passing because those
+# ASINs happen to answer empty from whichever store was asked. That is a
+# network dependency, a rate limit, and a result that can change without the
+# code changing. Stubbed to the same answer it was getting, deterministically;
+# `harness.forbid_network` is what turned the silence into a failure.
+audible.product = lambda asin: None
+
 US_ONLY = {"asin": "B0HC7V8ZR4", "title": "Unicorn Breeder",
            "authors": [{"name": "Virgil Knightley"}]}
 CA_ONLY = {"asin": "B0CWW1L8NL", "title": "I Ran Away to Evil",

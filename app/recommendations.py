@@ -10,13 +10,38 @@ import time
 from collections import Counter
 from dataclasses import dataclass
 
-from . import config, jellyfin, logs
+from . import config, jellyfin, logs, tmdb
 
 log = logs.get("recommendations")
 
-SERIES_RANKER_VERSION = "series-owned-v2"
-MOVIE_RANKER_VERSION = "movie-owned-v1"
+SERIES_RANKER_VERSION = "series-owned-v3"
+MOVIE_RANKER_VERSION = "movie-owned-v2"
 SUPPORTED_MEDIA = ("series", "movie")
+
+# What one TMDb neighbour vote is worth against the metadata evidence beside
+# it.
+#
+# Sized to matter without deciding. `_evidence` weights a shared person at 4.0
+# and a shared genre at 3.0 per seed, so a title carrying a full cap of
+# neighbour votes is worth about one strong cast overlap: enough to lift
+# something the metadata alone would not have found, not enough to reorder a
+# shelf around a single external opinion. Capped for the same reason
+# `books.engine` caps its Audible votes -- one prolific franchise should not own
+# every position.
+W_TMDB_VOTE = 2.5
+MAX_TMDB_WEIGHT = 3.0
+
+# Position one in TMDb's list is evidence; position ten is weaker evidence. The
+# same rank discount the book engine applies to an Audible neighbour.
+TMDB_RANK_OFFSET = 1
+
+# How many seeds may contribute neighbours to one build.
+#
+# A household account can have watched hundreds of things, and a cold cache
+# would then be hundreds of requests in front of somebody waiting for a page.
+# The heaviest-weighted seeds are the ones whose neighbours are worth having,
+# so the cut is by weight rather than arbitrary. Warm, the whole thing is free.
+MAX_TMDB_SEEDS = 20
 
 # Cast is useful evidence, but a full TV cast is large enough that incidental
 # guest overlap drowns everything else. Jellyfin preserves billing order, so
@@ -193,12 +218,54 @@ def _genre_reason(values: list[str], medium: str) -> str:
     return f"shares the {_joined(values)} {noun} with {_watched_label(medium)}"
 
 
+def _tmdb_id(item: dict) -> str:
+    value = (item.get("ProviderIds") or {}).get("Tmdb")
+    return str(value).strip() if value else ""
+
+
+def _tmdb_votes(
+    seeds: list[tuple[dict, float]],
+    medium: str,
+) -> tuple[Counter, dict[str, list[str]]]:
+    """Neighbour votes from TMDb, and which watched title earned each one.
+
+    The signal a Jellyfin-only ranker cannot derive: genre, cast and studio all
+    come out of this library's own metadata, and every one of them is a
+    statement about what a title *is*. TMDb's list is a statement about what
+    other people went on to watch, which is a different question and the one a
+    recommendation is actually asking.
+
+    Empty without a key, which is the shipped state, so the shelf is exactly
+    what it was before.
+    """
+    votes: Counter = Counter()
+    because: dict[str, list[str]] = {}
+    if not tmdb.configured():
+        return votes, because
+
+    ranked = sorted(
+        ((seed, weight) for seed, weight in seeds if weight > 0),
+        key=lambda pair: (-pair[1], _normalise(pair[0].get("Name") or "")))
+    for seed, weight in ranked[:MAX_TMDB_SEEDS]:
+        seed_id = _tmdb_id(seed)
+        if not seed_id:
+            continue
+        neighbours = tmdb.recommendations(seed_id, medium)
+        title = seed.get("Name") or ""
+        for position, neighbour in enumerate(neighbours, start=1):
+            votes[neighbour] += weight / (position + TMDB_RANK_OFFSET)
+            if title and title not in because.setdefault(neighbour, []):
+                because[neighbour].append(title)
+    return votes, because
+
+
 def _score_candidates(
     library: list[dict],
     seeds: list[tuple[dict, float]],
     medium: str,
 ) -> list[dict]:
     profiles, displays = _profiles(seeds)
+    votes, vote_because = _tmdb_votes(seeds, medium)
 
     rows = []
     for item in library:
@@ -217,6 +284,12 @@ def _score_candidates(
             _studios(item), profiles["studios"], displays["studios"])
 
         evidence = _evidence(item, profiles)
+        # A neighbour vote is evidence in its own right, so it can carry a
+        # title the metadata says nothing about -- which is the point of having
+        # a source outside the library. Added before the gate, not after it.
+        neighbour = votes.get(_tmdb_id(item), 0.0)
+        if neighbour:
+            evidence += W_TMDB_VOTE * min(MAX_TMDB_WEIGHT, neighbour)
         if evidence <= 0:
             continue
 
@@ -226,6 +299,14 @@ def _score_candidates(
             quality_tiebreak = (
                 max(0.0, min(10.0, float(community)) - 5.0) / 20.0)
         reasons: list[str] = []
+        # First, where there is one. It is the most specific thing that can be
+        # said about a candidate -- a named title somebody actually watched --
+        # and the two metadata reasons below are true of dozens of rows each.
+        if neighbour and (watched := vote_because.get(_tmdb_id(item))):
+            source_kind = "film" if medium == "movie" else "show"
+            reasons.append(
+                f"watched by people who liked {watched[0]}, "
+                f"a {source_kind} you've seen")
         if people_matches:
             source_kind = "film" if medium == "movie" else "show"
             name = people_matches[0][0]
@@ -240,7 +321,8 @@ def _score_candidates(
                 f"from {studio_matches[0][0]}, whose {_watched_label(medium)}")
 
         source = (
-            "person" if people_matches
+            "neighbour" if neighbour
+            else "person" if people_matches
             else "genre" if genre_matches
             else "studio"
         )

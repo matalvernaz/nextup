@@ -20,7 +20,7 @@ import math
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 
-from .. import config, jellyfin, listenarr, logs
+from .. import config, external_books, jellyfin, listenarr, logs
 from . import audible, store, textmodel
 
 log = logs.get("engine")
@@ -51,6 +51,36 @@ SIMILARITY_RANK_OFFSET = 1
 # book and blocks later volumes rather than making all of them look like "next".
 SERIES_COMPLETION_PROGRESS = 0.9
 
+# What a community rating is worth at full strength.
+#
+# Sized against W_AUTHOR deliberately. A book strangers love is about as much
+# evidence as a book by an author this listener has already chosen -- worth
+# breaking a tie on, never worth outranking the series they are five books
+# into. Signed, so a poorly-rated volume is pushed behind a well-rated one
+# rather than merely failing to be lifted.
+W_RATING = 8.0
+
+# Where a rating stops being an endorsement and starts being a warning. Not the
+# midpoint of the scale: every catalogue here is rated by people who chose the
+# book, so the population average sits well above 2.5. Measured on Open
+# Library's own distribution, about 3.5 is the middle of what books actually
+# score.
+RATING_NEUTRAL = 3.5
+
+# How far from neutral counts as the full swing, so the prior saturates instead
+# of letting one five-star outlier outrun a genuine author match.
+RATING_SPREAD = 1.5
+
+# Ratings needed before an average is believed in full. Below it the prior is
+# damped rather than discarded -- forty readers is weak evidence, not no
+# evidence -- and `external_books.MIN_RATING_COUNT` has already thrown away the
+# handful-of-readers case entirely.
+RATING_CONFIDENT_AT = 1000
+
+# Only claim a rating as a reason when it is genuinely good. A row saying "rated
+# 3.6 out of 5" is not an argument for reading anything.
+RATING_REASON_THRESHOLD = 4.0
+
 # Explanations describe stable signals, not the TF-IDF model's incidental
 # vocabulary. Weak lexical overlap affects ordering but does not earn a claim.
 TEXT_REASON_THRESHOLD = 0.12
@@ -62,7 +92,7 @@ MAX_REASONS = 2
 SERIES_REPEAT_PENALTY = 0.8
 AUTHOR_REPEAT_PENALTY = 0.35
 
-RANKER_VERSION = "2"
+RANKER_VERSION = "3"
 
 GENERIC_GENRE_REASONS = {
     "audiobooks",
@@ -688,6 +718,73 @@ def _diversify(rows: list[dict], limit: int) -> list[dict]:
     return selected
 
 
+def rating_prior(rating: "external_books.Rating") -> float:
+    """A community rating as a signed multiplier in -1.0 through 1.0.
+
+    Two questions, multiplied: how far from neutral the average is, and how
+    much weight the number of raters earns it. A 4.6 from twenty thousand
+    readers is a strong yes; the same 4.6 from thirty is a shrug.
+
+    Logarithmic in the count because that is how the evidence actually grows --
+    the difference between 20 and 200 raters is large and the difference
+    between 20,000 and 200,000 is not.
+    """
+    centred = (rating.average - RATING_NEUTRAL) / RATING_SPREAD
+    centred = max(-1.0, min(1.0, centred))
+    confidence = min(
+        1.0,
+        math.log10(max(1, rating.count)) / math.log10(RATING_CONFIDENT_AT))
+    return centred * confidence
+
+
+def rating_reason(rating: "external_books.Rating") -> str:
+    """What a row says about a rating worth mentioning."""
+    readers = f"{rating.count:,}"
+    return (f"rated {rating.average:.1f} out of 5 "
+            f"by {readers} readers elsewhere")
+
+
+def apply_ratings(rows: list[dict], budget: int) -> int:
+    """Fold community ratings into already-ranked rows. Returns what is left.
+
+    Ranked first and rated second, on purpose. A rating is the expensive signal
+    -- one search per book per catalogue -- and the cheap signals already know
+    which forty of two thousand books are worth arguing about. So the budget is
+    spent from the top of the order down, and the tail keeps whatever is
+    already cached.
+
+    Nothing is dropped here, only reordered. A row reached this list by earning
+    a reason, and a middling rating is not grounds for withdrawing one.
+
+    Only the head is *consulted*, not just the head fetched. The budget bounds
+    requests; it does not bound `pending` and `cached_rating`, which are a
+    handful of SQLite round trips each. On the 2,275-book library the owned
+    pool is most of the library, times every account in the upkeep pass, for
+    rows that could not reach a shelf of `MAX_SHELF` however well rated. The
+    sort at the end still covers all of them.
+    """
+    for row in rows[:config.MAX_SHELF * 2]:
+        title = row.get("title") or ""
+        authors = row.get("authors") or []
+        if not title:
+            continue
+        if external_books.pending(title, authors) and budget > 0:
+            found = external_books.rating(title, authors)
+            budget -= 1
+        else:
+            # Free either way: everything worth asking has been asked, or the
+            # budget is spent and this is whatever happens to be known.
+            found = external_books.cached_rating(title, authors)
+        if found is None:
+            continue
+        row["score"] = round(row["score"] + W_RATING * rating_prior(found), 1)
+        if found.average >= RATING_REASON_THRESHOLD:
+            row["why"] = _curate_reasons(
+                list(row.get("why") or []) + [rating_reason(found)])
+    rows.sort(key=lambda row: (-row["score"], _norm(row.get("title") or "")))
+    return budget
+
+
 def _score_owned(
     item: dict,
     taste: dict,
@@ -981,6 +1078,13 @@ def run(user: jellyfin.User, update_playlist: bool = True) -> dict:
             "why": reasons,
             "source": source,
         })
+    # Ratings last, after the cheap signals have decided which rows are worth
+    # the requests, and before the cut -- so a well-rated book can still reach
+    # the shelf and a poor one can still be pushed off it. The budget is one
+    # per build across both shelves; the owned one spends first because it is
+    # the shelf somebody is looking at now.
+    rating_budget = config.BOOK_RATING_LOOKUPS_PER_BUILD
+    rating_budget = apply_ratings(own, rating_budget)
     own = _diversify(_dedupe_works(own), config.MAX_SHELF)
 
     # With no history there is no honest taste claim to make. A recent-arrivals
@@ -1022,6 +1126,8 @@ def run(user: jellyfin.User, update_playlist: bool = True) -> dict:
                         "why": _curate_reasons(why),
                         "because_of": seed_of.get(asin, [])[:3]})
         out.sort(key=lambda r: -r["score"])
+        nonlocal rating_budget
+        rating_budget = apply_ratings(out, rating_budget)
         return out
 
     # Keyword picks are capped: the channel is broad by nature and must not drown

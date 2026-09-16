@@ -59,6 +59,7 @@ def setup(**overrides: str) -> str:
     X` copy that a reload would leave stale.
     """
     global _tempdir
+    forbid_network()
     _tempdir = tempfile.mkdtemp(prefix="nextup-tests-")
     db_path = os.path.join(_tempdir, f"{TEST_DB_PREFIX}{os.getpid()}.db")
 
@@ -103,6 +104,80 @@ def cleanup() -> None:
     if _tempdir and os.path.isdir(_tempdir):
         shutil.rmtree(_tempdir, ignore_errors=True)
     _tempdir = None
+
+
+#: The outside catalogues, by hostname. Blocked in tests; everything else is
+#: not.
+#:
+#: A blanket "no HTTP at all" guard is the wrong shape here and was tried: the
+#: backend probes are *supposed* to make a request to a Radarr that is not
+#: there, and half the suite asserts on what happens when one fails. What must
+#: never happen is a test reaching a public catalogue, which is a different and
+#: much smaller list.
+FORBIDDEN_HOSTS = (
+    "audible.com", "audible.ca", "audible.co.uk", "audible.com.au",
+    "audible.de", "audible.fr", "audible.it", "audible.es",
+    "audible.co.jp", "audible.in", "audible.com.br",
+    "api.themoviedb.org",
+    "openlibrary.org",
+    "api.hardcover.app",
+    "googleapis.com",
+)
+
+_network_guarded = False
+
+
+def forbid_network() -> None:
+    """Make a test that reaches a public catalogue fail loudly, once.
+
+    Five of them are now one `httpx.Client` call away from a test that forgot
+    to stub one -- Audible, TMDb, Open Library, Hardcover and Google Books --
+    and each has its own way of punishing a suite that reaches it. Audible and
+    Open Library rate-limit, Google Books shares one daily quota across every
+    anonymous caller and was measured already exhausted from this address, and
+    all of them make a green run depend on the network being up.
+
+    The failure is a raised assertion rather than a stub answering nothing,
+    because "no rating" is a legitimate result this code path is designed to
+    produce. A silent stub would let a broken lookup pass as a book nobody has
+    rated.
+    """
+    global _network_guarded
+    if _network_guarded:
+        return
+    import httpx
+
+    real_send = httpx.Client.send
+
+    def guarded(self, request, **kwargs):
+        host = (request.url.host or "").lower()
+        if any(host == name or host.endswith("." + name)
+               for name in FORBIDDEN_HOSTS):
+            raise AssertionError(
+                f"a test tried to reach {request.url} for real. Stub the "
+                f"catalogue rather than asking it.")
+        return real_send(self, request, **kwargs)
+
+    httpx.Client.send = guarded
+    _network_guarded = True
+
+
+def no_book_ratings() -> None:
+    """Silence the community-rating lookups for a test that is not about them.
+
+    Any test that builds a real book shelf reaches `external_books`, which is
+    three public catalogues. Stubbed to "nobody has rated this", which is a
+    state the ranker has to handle anyway and leaves every other signal exactly
+    where the test put it.
+
+    Not the default, and not done inside `setup`. A test that builds a shelf
+    without saying this gets `forbid_network`'s assertion, which is a sentence
+    naming the catalogue -- better than a silently different shelf.
+    """
+    from app import external_books
+    external_books.rating = lambda title, authors: None
+    external_books.cached_rating = lambda title, authors: None
+    external_books.pending = lambda title, authors: False
 
 
 class Check:
@@ -154,6 +229,7 @@ def use(name: str) -> str:
     rather than temporary-directoried so a failing run leaves something to
     look at, and `discard` is what deletes it.
     """
+    forbid_network()
     path = os.path.join(tempfile.gettempdir(), f"{TEST_DB_PREFIX}{name}.db")
     if os.path.exists(path):
         os.remove(path)
