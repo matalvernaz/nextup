@@ -755,8 +755,15 @@ def apply_ratings(rows: list[dict], budget: int) -> int:
 
     Nothing is dropped here, only reordered. A row reached this list by earning
     a reason, and a middling rating is not grounds for withdrawing one.
+
+    Only the head is *consulted*, not just the head fetched. The budget bounds
+    requests; it does not bound `pending` and `cached_rating`, which are a
+    handful of SQLite round trips each. On the 2,275-book library the owned
+    pool is most of the library, times every account in the upkeep pass, for
+    rows that could not reach a shelf of `MAX_SHELF` however well rated. The
+    sort at the end still covers all of them.
     """
-    for row in rows:
+    for row in rows[:config.MAX_SHELF * 2]:
         title = row.get("title") or ""
         authors = row.get("authors") or []
         if not title:

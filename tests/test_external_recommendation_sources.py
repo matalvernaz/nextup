@@ -9,6 +9,8 @@ The near-miss cases here are not invented. They are what openlibrary.org
 actually returns for "The Way of Kings": the book, a five-star rating from four
 people on "The Way of Kings, Part One", and a four-volume omnibus.
 """
+import os
+
 import harness
 
 harness.setup()
@@ -18,6 +20,15 @@ from app.books import engine  # noqa: E402
 
 check = harness.Check("external recommendation sources")
 store.init()
+
+# Kept because the shelf block below replaces them, and the cache block after
+# it needs the shipped ones back.
+_ORIGINALS = {
+    "rating": external_books.rating,
+    "cached_rating": external_books.cached_rating,
+    "pending": external_books.pending,
+    "PROVIDERS": external_books.PROVIDERS,
+}
 
 
 # --- is this the book that was asked for? ------------------------------------
@@ -186,13 +197,88 @@ check.equal(asked, [],
             "a book every catalogue has already answered for costs nothing")
 
 
+# --- the cache, which is what makes the budget mean anything -----------------
+#
+# Exercised for real: the store, the TTL, the key, and the one distinction the
+# module rests on -- a catalogue that says "never heard of it" is remembered,
+# and one that could not be reached is not. Stubbed at the catalogue boundary
+# rather than at `rating`, so everything between is the shipped code.
+
+for name in ("rating", "cached_rating", "pending"):
+    setattr(external_books, name, _ORIGINALS[name])
+
+fetches: list[str] = []
+
+
+def answering(result):
+    def fetch(title, authors):
+        fetches.append(title)
+        return result
+    return fetch
+
+
+MISSING_BOOK = "A Book Nobody Rated"
+external_books.PROVIDERS = (("openlibrary", answering(external_books.NOT_ASKED)),)
+check.that(external_books.pending(MISSING_BOOK, SANDERSON),
+           "a book nothing has been asked about is pending")
+check.equal(external_books.rating(MISSING_BOOK, SANDERSON), None,
+            "an unreachable catalogue produces no rating")
+check.that(external_books.pending(MISSING_BOOK, SANDERSON),
+           "and is NOT remembered: an outage must not switch the signal off "
+           "for the whole TTL")
+
+fetches.clear()
+external_books.PROVIDERS = (
+    ("openlibrary", answering(external_books.Answer(True, None))),)
+check.equal(external_books.rating(MISSING_BOOK, SANDERSON), None,
+            "a catalogue that has never heard of the book answers nothing")
+check.equal(len(fetches), 1, "which cost one request")
+check.that(not external_books.pending(MISSING_BOOK, SANDERSON),
+           "the miss is remembered, so the budget is not spent on it again")
+fetches.clear()
+check.equal(external_books.rating(MISSING_BOOK, SANDERSON), None,
+            "and asking again gives the same answer")
+check.equal(fetches, [], "without a second request")
+
+fetches.clear()
+FOUND = external_books.Rating(average=4.4, count=900, source="hardcover")
+os.environ["HARDCOVER_TOKEN"] = "probe-token"
+external_books.PROVIDERS = (
+    ("openlibrary", answering(external_books.Answer(True, None))),
+    ("hardcover", answering(external_books.Answer(True, FOUND))),
+)
+SECOND_BOOK = "Only The Second Catalogue Has It"
+found = external_books.rating(SECOND_BOOK, SANDERSON)
+check.that(found is not None and found.source == "hardcover",
+           "a miss on the first catalogue falls through to the next")
+check.equal(len(fetches), 2, "having asked both, once each")
+fetches.clear()
+again = external_books.rating(SECOND_BOOK, SANDERSON)
+check.that(again is not None and again.average == 4.4,
+           "the hit is cached, down to the score")
+check.equal(fetches, [], "and costs nothing the second time")
+check.that(not external_books.pending(SECOND_BOOK, SANDERSON),
+           "with both catalogues answered, nothing is left to buy")
+
+check.that(external_books.cached_rating(SECOND_BOOK, SANDERSON) is not None,
+           "a cached hit is readable without asking anything")
+check.equal(external_books.cached_rating("Never Looked Up", SANDERSON), None,
+            "and a book nobody has looked up reads as no rating")
+
+# A title differing only in subtitle and punctuation is the same cache entry:
+# the key is the normalised main title, which is what the match is on.
+check.that(not external_books.pending(
+    "Only The Second Catalogue Has It: A Novel", SANDERSON),
+    "the cache key is the main title, so an edition's subtitle is not a miss")
+
+os.environ.pop("HARDCOVER_TOKEN")
+external_books.PROVIDERS = _ORIGINALS["PROVIDERS"]
+
+
 # --- which catalogues are available ------------------------------------------
 
 check.equal(external_books.configured_sources(), ("openlibrary",),
             "open library needs no credential, so it is always available")
-
-config.__dict__.pop("GOOGLE_BOOKS_API_KEY", None)
-import os  # noqa: E402
 
 os.environ["HARDCOVER_TOKEN"] = "probe-token"
 check.that("hardcover" in external_books.configured_sources(),
