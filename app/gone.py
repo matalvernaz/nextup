@@ -222,7 +222,11 @@ def _clear_book(item: dict) -> dict:
         raise StillHere(
             "Somebody is still waiting on that, so it has been left alone.")
 
-    stopped = all(book_wants._stop_acquiring(key) for key in sorted(keys))
+    # A list, not a generator inside `all`: that short-circuits on the first
+    # failure and would leave the remaining Listenarr rows untouched, which is
+    # the half of the job nobody would notice was missing.
+    outcomes = [book_wants._stop_acquiring(key) for key in sorted(keys)]
+    stopped = all(outcomes)
     dropped = sum(store.drop_settled(media.BOOK, key) for key in sorted(keys))
     log.info("deleted book name=%r asins=%s stopped=%s ledger_rows=%d",
              name, sorted(keys), stopped, dropped)

@@ -246,6 +246,35 @@ check.equal(stopped, ["B0FMS8SNXH"],
             "the two -- and the initials spelling must not break it")
 check.equal(report["ledgerRows"], 1, "and the settled row goes")
 
+print("=== one failure does not skip the other rows ===")
+reset_ledger()
+# The same book under both marketplaces' ASINs, which is the ordinary shape
+# here: the id it was asked for is not the id it arrives under.
+book_store.record_request(USER.key, "B0AAAA", "Splinter Angel: Book 1",
+                          ["R. C. Joshua"])
+book_store.record_request(OTHER.key, "B0BBBB", "Splinter Angel: Book 1",
+                          ["R. C. Joshua"])
+store.mark_arrived(USER.key, "book", {"B0AAAA"})
+store.mark_arrived(OTHER.key, "book", {"B0BBBB"})
+jellyfin.books_named = lambda _title: []
+tried: list[str] = []
+
+
+def stubborn(asin):
+    tried.append(asin)
+    return asin != "B0AAAA"
+
+
+book_wants._stop_acquiring = stubborn
+report = gone.clear({"itemId": "b3", "type": "AudioBook",
+                     "name": "Splinter Angel: Book 1", "providerIds": {},
+                     "authors": ["R. C. Joshua"]})
+check.equal(tried, ["B0AAAA", "B0BBBB"],
+            "the second row is still tried after the first fails -- short "
+            "circuiting here leaves a Listenarr row nobody would notice")
+check.equal(report["stopped"], False, "and the report does not claim success")
+check.equal(report["ledgerRows"], 2, "while both settled rows still go")
+
 print("=== a book still on the shelf is refused ===")
 reset_ledger()
 book_store.record_request(USER.key, "B0FMS8SNXH", "Splinter Angel: Book 1",
