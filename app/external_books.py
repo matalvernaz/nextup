@@ -331,11 +331,31 @@ def _hardcover(title: str, authors) -> Answer:
         r.get("rating"), r.get("ratings_count"))))
 
 
-#: Tried in this order, first confident answer wins. Keyless first, so an
-#: installation with no credentials is not a degraded version of one with them.
+#: Tried in this order, first confident answer wins.
+#:
+#: Hardcover leads because it is the one with the readers behind it, measured
+#: against this library on 2026-09-16:
+#:
+#:     The Way of Kings       open library 4.51 from 165    hardcover 4.64 from 3,669
+#:     Skyward                open library 4.24 from  45    hardcover 4.40 from 1,150
+#:     Dungeon Crawler Carl   open library none             hardcover 4.34 from 3,708
+#:
+#: Open Library first was the original order, on the reasoning that an
+#: installation with no credentials should not be a degraded version of one
+#: with them. It is not, and that reasoning does not need this order to hold:
+#: Hardcover is only *tried* where a token is set, so an installation without
+#: one behaves exactly as before. What the old order actually did was take 165
+#: readers over 3,669 wherever both answered, and consult a token the household
+#: had supplied only for the books Open Library had never heard of.
+#:
+#: Still first-wins rather than best-of. Asking every catalogue about every
+#: book and keeping the most-rated would be two or three times the requests
+#: against somebody's personal token, to improve the case where the fuller
+#: catalogue is thinner on one book -- which is the opposite of what was
+#: measured. Revisit if a counter-example turns up.
 PROVIDERS = (
-    ("openlibrary", _open_library),
     ("hardcover", _hardcover),
+    ("openlibrary", _open_library),
     ("googlebooks", _google_books),
 )
 
