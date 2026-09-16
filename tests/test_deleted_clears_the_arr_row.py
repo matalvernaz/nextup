@@ -64,8 +64,14 @@ class Tool:
 
 
 def library(movies=(), series=()):
-    """Stub the owned index: what the library still holds after the delete."""
-    media.owned = lambda force=False: jellyfin.Owned(
+    """Stub the owned index: what the library still holds after the delete.
+
+    Stubbed at `jellyfin.owned_index`, which is what the guard calls. Stubbing
+    `media.owned` instead would prove nothing about the thing that matters:
+    the cache in front of it hands back a stale index during an outage, and
+    the whole point is that this caller does not accept one.
+    """
+    jellyfin.owned_index = lambda: jellyfin.Owned(
         movie_tmdb=frozenset(movies), series_tvdb=frozenset(series))
 
 
@@ -131,11 +137,11 @@ print("=== Jellyfin unreachable changes nothing ===")
 reset_ledger()
 
 
-def unavailable(force=False):
+def unavailable():
     raise jellyfin.JellyfinUnavailable("library listing timed out")
 
 
-media.owned = unavailable
+jellyfin.owned_index = unavailable
 radarr_tool = Tool(row={"id": 44, "title": "The 5th Wave", "hasFile": True})
 use(movie_tool=radarr_tool)
 
@@ -143,6 +149,15 @@ check.raises(gone.Unsettled, lambda: gone.clear(MOVIE),
              "an outage is its own answer, not a deletion")
 check.equal(radarr_tool.deleted, [],
             "and nothing is cleared on an unverified claim")
+
+# The cache in front of the index answers an outage with the LAST index it
+# built, which is right for "what does the library hold" and wrong here twice:
+# the outage stops being reported, and a film added since that index was built
+# is missing from it, which reads exactly like a film that has gone.
+media.owned = lambda force=False: jellyfin.Owned(
+    movie_tmdb=frozenset(["299687"]))
+check.raises(gone.Unsettled, lambda: gone.clear(MOVIE),
+             "and a stale index is not accepted as the answer either")
 
 print("=== a row with no file is work in flight, and is left alone ===")
 reset_ledger()
@@ -353,7 +368,7 @@ check.equal(resp.status_code, 409,
             "still in the library is a 409: the request was fine, the world "
             "is not what it described")
 
-media.owned = unavailable
+jellyfin.owned_index = unavailable
 resp = client.post("/api/v1/deleted", headers={"X-Emby-Token": "t"},
                    json={"itemId": "jf-1", "type": "Movie",
                          "name": "The 5th Wave",

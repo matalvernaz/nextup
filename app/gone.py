@@ -138,15 +138,24 @@ def _clear_by_provider_id(medium: str, item: dict) -> dict:
 def _require_absent(medium: str, provider_id: str) -> None:
     """Refuse unless the library really has stopped holding this id.
 
-    Read fresh, and read as the whole index rather than as a filter, because
+    Read as the whole index rather than as a filter, because
     `/Items?anyProviderIdEquals=` is silently ignored on this Jellyfin --
     verified 2026-09-16, it returns every row in the library, so a guard built
     on it would have passed everything. The index costs 0.87 s for 428 films
     and 130 series, and it is the same index that decides a request has
     *arrived*: a thing entered it when it turned up and has left it now.
+
+    **`jellyfin.owned_index()` and deliberately not `media.owned(force=True)`.**
+    The cache in front of that one falls back to the previous index when
+    Jellyfin cannot be reached, which is the right behaviour for the question
+    it was built for -- an hour-old answer about what the library holds beats
+    no answer. It is the wrong behaviour here twice over: an outage would stop
+    being reported as one, and a film added since that index was built is
+    absent from it, which is indistinguishable from a film that has gone. This
+    is the one caller that must have a fresh answer or none.
     """
     try:
-        owned = media.owned(force=True)
+        owned = jellyfin.owned_index()
     except jellyfin.JellyfinUnavailable as exc:
         raise Unsettled(str(exc)) from exc
     present = (owned.movie_tmdb if medium == media.MOVIE else owned.series_tvdb)
