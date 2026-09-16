@@ -138,6 +138,24 @@ def add(unit: str, hit: dict, requested_by: str) -> arr.AddResult:
         "album": hit.get("album") or "",
         "requestedBy": requested_by,
     }
+    # Year and duration were published by the search and then dropped here, and
+    # buskarr has accepted both all along. Duration is the one with teeth: its
+    # matcher reads an absent duration as "cannot judge" and admits a candidate
+    # of any length, so a thirty-second track could be satisfied by a two-second
+    # file carrying the same artist and title. Only sent when actually known --
+    # a zero would be a claim, not a blank.
+    year = str(hit.get("year") or "").strip()
+    if year:
+        body["year"] = year
+    duration = hit.get("durationSeconds")
+    if duration is None:
+        duration = hit.get("duration")
+    try:
+        duration = float(duration) if duration is not None else None
+    except (TypeError, ValueError):
+        duration = None
+    if duration and duration > 0:
+        body["duration"] = duration
     try:
         with _client() as c:
             resp = c.post("/add", json=body)

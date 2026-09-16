@@ -137,8 +137,19 @@ def want(user: jellyfin.User, medium: str, item_key: str, unit: str = "",
     # separate steps it let two taps arriving together both find the allowance
     # unspent, so a cap of one bought two -- and a request the backend had
     # accepted could be written twice.
+    # Two locks, always in this order. The per-account one makes the allowance
+    # arithmetic a single decision. The household one -- keyed on the thing
+    # rather than the asker -- makes admitting this item and calling it off
+    # mutually exclusive across accounts: cancel counts the remaining waiters
+    # and then stops the backend, and a request admitted between those two
+    # steps used to be stopped by somebody else's cancellation while its ledger
+    # row and its spent allowance survived.
+    #
+    # Cancel takes only the household lock, so there is no pair of locks it can
+    # hold in the opposite order and no cycle to deadlock on.
     with store.key_lock(user.key, medium):
-        return _admit(user, found, medium, item_key, unit, hit or {})
+        with store.key_lock("item", medium, item_key):
+            return _admit(user, found, medium, item_key, unit, hit or {})
 
 
 def _admit(user: jellyfin.User, found: media.Medium, medium: str,
@@ -322,8 +333,16 @@ def states(user: jellyfin.User, medium: str | None = None) -> list[dict]:
                   reverse=True)
 
 
+#: "No one has asked buskarr about this row yet", which is a different thing from
+#: buskarr having been asked and been unable to say. ``state()`` returns None for
+#: the second, so using None for both meant an unreachable buskarr was probed twice
+#: per music row -- once by the caller, once again inside ``_arrived`` -- and each
+#: probe carries its own timeout. Three rows cost six waits during an outage.
+NOT_ASKED = object()
+
+
 def _state(row, medium: str, index: jellyfin.Owned | None = None,
-           reported: dict | None = None,
+           reported: dict | None | object = NOT_ASKED,
            episodes: dict[str, int] | None = None,
            series_progress: dict[str, sonarr.AcquisitionProgress | None]
            | None = None) -> str:
@@ -346,7 +365,7 @@ def _state(row, medium: str, index: jellyfin.Owned | None = None,
 
 
 def _arrived(row, medium: str, index: jellyfin.Owned,
-             reported: dict | None = None,
+             reported: dict | None | object = NOT_ASKED,
              episodes: dict[str, int] | None = None,
              series_progress: dict[str, sonarr.AcquisitionProgress | None]
              | None = None) -> bool:
@@ -372,7 +391,7 @@ def _arrived(row, medium: str, index: jellyfin.Owned,
     # Music asks buskarr, which placed the file and holds its exact identity.
     # An unreachable buskarr answers None, which is "unknown" and must not be
     # read as "not here" -- the row simply keeps waiting.
-    if reported is None:
+    if reported is NOT_ASKED:
         reported = buskarr.state(row["backend_id"])
     return bool(reported and reported.get("state") == "have")
 
@@ -437,18 +456,24 @@ def cancel(user: jellyfin.User, medium: str, item_key: str) -> tuple[bool, str]:
     # film at the same moment each used to read the other as still waiting, so
     # neither called the acquisition off and both rows went -- leaving a
     # download running that nothing pointed at.
-    existed, others = store.release(user.key, medium, item_key)
-    if not existed:
-        return False, "That is not on your list."
-    if others:
-        log.info("cancel user=%s key=%s kept: %d other(s) still waiting",
-                 user.key, item_key, len(others))
-        return True, ("Taken off your list. Somebody else is still waiting "
-                      "for it, so it is still being looked for.")
+    # The household lock for this item, held across the count and the stop.
+    # release() is atomic in itself, but _stop ran after its transaction closed,
+    # so a request admitted in that gap was killed by this cancellation while
+    # keeping its ledger row and the allowance it had spent -- invisible to
+    # whoever asked, and unexplainable.
+    with store.key_lock("item", medium, item_key):
+        existed, others = store.release(user.key, medium, item_key)
+        if not existed:
+            return False, "That is not on your list."
+        if others:
+            log.info("cancel user=%s key=%s kept: %d other(s) still waiting",
+                     user.key, item_key, len(others))
+            return True, ("Taken off your list. Somebody else is still waiting "
+                          "for it, so it is still being looked for.")
 
-    stopped = _stop(medium, row)
-    log.info("cancel user=%s medium=%s key=%s backend_stopped=%s",
-             user.key, medium, item_key, stopped)
+        stopped = _stop(medium, row)
+        log.info("cancel user=%s medium=%s key=%s backend_stopped=%s",
+                 user.key, medium, item_key, stopped)
     if not stopped:
         return True, ("Taken off your list. The acquisition tool could not be "
                       "reached, so it may still be looking.")

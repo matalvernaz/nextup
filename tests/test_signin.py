@@ -112,5 +112,32 @@ check.equal(sessions.is_secure(None, "http"), False,
             "and a direct plain-http install is supported, not refused: that "
             "is what a first install on a home network looks like")
 
+# --- the proxy header is a claim, not a credential ---------------------------
+#
+# It is read BEFORE the signed session cookie, so on an install reachable on its
+# own port -- which the compose this repository ships publishes -- anyone could
+# send it and be anybody, including an administrator. Believed only where the
+# deployment says a proxy sets it.
+jellyfin.user = lambda name=None: (
+    USER if name == "matt" else
+    OTHER if name == "kadija" else
+    (_ for _ in ()).throw(LookupError("no such user")))
+
+header = {config.AUTH_USER_HEADER: "matt"}
+
+config.TRUST_PROXY_AUTH_HEADER = False
+unproxied = client.get("/", headers=header, follow_redirects=False)
+check.equal(unproxied.status_code, 401,
+            "a header alone does not sign anybody in where no proxy is declared")
+check.that("Jellyfin username" in unproxied.text,
+           "and the sign-in form is what is offered instead")
+
+config.TRUST_PROXY_AUTH_HEADER = True
+proxied = client.get("/", headers=header)
+check.equal(proxied.status_code, 200,
+            "and where a proxy IS declared the header is the authority, as before")
+check.that("Signed in as matt" in proxied.text, "naming the person it carried")
+config.TRUST_PROXY_AUTH_HEADER = False
+
 harness.cleanup()
 raise SystemExit(check.report())
