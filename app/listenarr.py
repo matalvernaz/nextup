@@ -573,6 +573,46 @@ def enqueue_search(audiobook_id: int) -> bool:
     return True
 
 
+def unmonitor(audiobook_id: int) -> bool:
+    """Take one book out of Listenarr's six-hourly automatic search.
+
+    `monitored` is the flag that sweep selects on, so clearing it is what stops
+    an owned book being searched for again. Deliberately not `delete`: the row,
+    its files, its history and its path belong to the library rather than to
+    this service, and monitoring is one switch away in Listenarr's own
+    interface if it is ever wanted back.
+
+    Only the one field is sent, and that matters -- `bulk-update` reads its
+    updates by name and leaves out what it is not given, so a quality profile
+    cleared here by accident would stop the books that ARE still wanted from
+    being searched at all.
+    """
+    try:
+        with _client() as c:
+            token = _csrf(c)
+            resp = c.post(
+                f"{_API}/library/bulk-update",
+                json={"ids": [audiobook_id], "updates": {"monitored": False}},
+                headers={"X-XSRF-TOKEN": token},
+            )
+    except httpx.HTTPError as exc:
+        log.warning("unmonitor failed id=%s (%s)", audiobook_id, exc)
+        return False
+    return resp.status_code < 400
+
+
+def unmonitor_by_asin(asin: str) -> bool:
+    """`unmonitor`, for a caller that knows the book by its ASIN.
+
+    False where Listenarr has no row for it, which is the ordinary case for a
+    book that reached the library some other way.
+    """
+    audiobook_id = _audiobook_id(find_by_asin(asin))
+    if audiobook_id is None:
+        return False
+    return unmonitor(audiobook_id)
+
+
 def delete(audiobook_id: int) -> bool:
     """Remove a Listenarr row without touching files. Used to clean up test adds."""
     try:

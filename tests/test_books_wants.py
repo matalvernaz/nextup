@@ -217,5 +217,53 @@ assert removed, "an unreachable Listenarr must still clear the row"
 assert "may still turn up" in message, message
 assert not any(r["asin"] == "LISTENARR-DOWN" for r in store.requests_for(matt.key))
 
+# --- an arrived book is taken out of Listenarr's sweep ----------------------
+# Listenarr adds monitored, and its six-hourly automatic search selects on
+# monitored. Nothing here ever cleared it, so a book went on being searched for
+# after it was in the library: 162 of 184 monitored books already had their
+# files, and one cycle put 757 MyAnonaMouse queries through on their behalf.
+# This service asked for the book, so it is what should say it has stopped.
+unmonitored = []
+listenarr.unmonitor_by_asin = lambda asin: unmonitored.append(asin) or True
+listenarr.add = lambda asin, monitored=True: listenarr.AddResult(
+    True, "Sent to Listenarr", 55)
+listenarr.enqueue_search = lambda audiobook_id: True
+
+wants.want(matt, "ARRIVES-NOW", "Turns up")
+rows = {r["asin"]: r for r in wants.states(matt.key, ({"ARRIVES-NOW"}, {}))}
+assert rows["ARRIVES-NOW"]["state"] == wants.IN_LIBRARY
+assert unmonitored == ["ARRIVES-NOW"], unmonitored
+
+# Only on the transition. A request already settled must not ask again every
+# time the list is read -- that would be a Listenarr write per page view.
+unmonitored.clear()
+rows = {r["asin"]: r for r in wants.states(matt.key, ({"ARRIVES-NOW"}, {}))}
+assert rows["ARRIVES-NOW"]["state"] == wants.IN_LIBRARY
+assert unmonitored == [], "a book settled earlier must not be unmonitored again"
+
+# A book that never arrived stays monitored, because it still has to be found.
+unmonitored.clear()
+wants.want(matt, "STILL-COMING", "Not yet")
+rows = {r["asin"]: r for r in wants.states(matt.key, (set(), {}))}
+assert rows["STILL-COMING"]["state"] != wants.IN_LIBRARY
+assert unmonitored == [], "an unfulfilled request must stay in the sweep"
+
+# Best effort: the book has arrived either way. A Listenarr that refuses must
+# not take the request list down with it, and must not un-fulfil the row.
+listenarr.unmonitor_by_asin = lambda asin: False
+wants.want(matt, "ARRIVES-UNREACHABLE", "Turns up anyway")
+rows = {r["asin"]: r for r in wants.states(matt.key, ({"ARRIVES-UNREACHABLE"}, {}))}
+assert rows["ARRIVES-UNREACHABLE"]["state"] == wants.IN_LIBRARY, \
+    "an unreachable Listenarr must not stop a book counting as arrived"
+
+# The same, for a Listenarr that raises rather than refusing.
+def _raises(asin):
+    raise RuntimeError("listenarr is down")
+listenarr.unmonitor_by_asin = _raises
+wants.want(matt, "ARRIVES-RAISES", "Turns up regardless")
+rows = {r["asin"]: r for r in wants.states(matt.key, ({"ARRIVES-RAISES"}, {}))}
+assert rows["ARRIVES-RAISES"]["state"] == wants.IN_LIBRARY, \
+    "a raising Listenarr must not stop a book counting as arrived"
+
 harness.discard(DB_PATH)
 print("want path checks passed")
