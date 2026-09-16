@@ -243,5 +243,133 @@ check.equal((hardcover_shelf.for_user(SAM) or {}).get("username"), "sam",
             "and leaves everybody else's alone")
 
 
+# --- end to end: what a connected shelf does to a built shelf ----------------
+#
+# Stubbed at `for_user`, which is the seam `engine.run` actually calls, so
+# everything between it and the finished shelves is the shipped code.
+
+from app import config, jellyfin, listenarr  # noqa: E402
+
+READER = jellyfin.User(id="reader", name="Reader")
+
+LIBRARY = [
+    # Played here, so it is a seed whatever Hardcover says.
+    {"Id": "played", "Name": "A Book Heard Here", "Type": "AudioBook",
+     "Genres": ["Fantasy"], "Overview": "wizards and a long walk",
+     "ProviderIds": {}, "UserData": {"PlaybackPositionTicks": 1, "Played": True},
+     "RunTimeTicks": 10, "People": []},
+    # Never touched here, finished on Hardcover. Must not be suggested.
+    {"Id": "read-in-print", "Name": "Elantris", "Type": "AudioBook",
+     "Genres": ["Fantasy"], "Overview": "wizards and a long walk",
+     "ProviderIds": {}, "UserData": {}, "RunTimeTicks": 10,
+     "People": [{"Name": "Brandon Sanderson", "Type": "Author"}]},
+    # Never touched here, rated 5 on Hardcover. Must become a seed.
+    {"Id": "rated-in-print", "Name": "Mistborn", "Type": "AudioBook",
+     "Genres": ["Fantasy"], "Overview": "wizards and a long walk",
+     "ProviderIds": {}, "UserData": {}, "RunTimeTicks": 10,
+     "People": [{"Name": "Brandon Sanderson", "Type": "Author"}]},
+]
+
+# A candidate with no Audible votes behind it and nothing in common with
+# anything: without the want-to-read shelf it has no way onto the discover
+# list at all. It is also book three of a series the reader has not started,
+# so it is behind the reading-order guard as well.
+WANTED_CANDIDATE = {
+    "asin": "WANTED", "title": "Skyward", "authors": ["Brandon Sanderson"],
+    "narrators": [], "series": "Skyward", "series_position": "3",
+    "description": "nothing whatever to do with the library",
+}
+
+MY_SHELF = {
+    "username": "reader", "books_count": 3,
+    "books": [
+        {"title": "Elantris", "authors": ["Brandon Sanderson"],
+         "rating": None, "status_id": hardcover_shelf.READ},
+        {"title": "Mistborn", "authors": ["Brandon Sanderson"],
+         "rating": 5.0, "status_id": hardcover_shelf.WANT_TO_READ},
+        {"title": "Skyward", "authors": ["Brandon Sanderson"],
+         "rating": None, "status_id": hardcover_shelf.WANT_TO_READ},
+    ],
+}
+
+
+def build(shelf):
+    saved = {
+        "books": jellyfin.books,
+        "sims": engine._seed_sims,
+        "queued": listenarr.queued_asins,
+        "playlist": jellyfin.set_playlist,
+        "for_user": hardcover_shelf.for_user,
+        "keywords": engine._keyword_candidates,
+        "max_shelf": config.MAX_SHELF,
+    }
+    try:
+        jellyfin.books = lambda uid: [dict(i) for i in LIBRARY]
+        engine._seed_sims = lambda seed: [WANTED_CANDIDATE]
+        engine._keyword_candidates = lambda queries, owned: {}
+        listenarr.queued_asins = lambda: set()
+        jellyfin.set_playlist = lambda uid, name, ids: "playlist"
+        hardcover_shelf.for_user = lambda key: shelf
+        config.MAX_SHELF = 10
+        return engine.run(READER, update_playlist=False)
+    finally:
+        jellyfin.books = saved["books"]
+        engine._seed_sims = saved["sims"]
+        engine._keyword_candidates = saved["keywords"]
+        listenarr.queued_asins = saved["queued"]
+        jellyfin.set_playlist = saved["playlist"]
+        hardcover_shelf.for_user = saved["for_user"]
+        config.MAX_SHELF = saved["max_shelf"]
+
+
+harness.no_book_ratings()
+without = build(None)
+withshelf = build(MY_SHELF)
+
+owned_without = [r["title"] for r in without["own"]]
+owned_with = [r["title"] for r in withshelf["own"]]
+
+check.that("Elantris" in owned_without,
+           "with no shelf connected, a book nobody here has played is an "
+           "ordinary suggestion")
+check.that("Elantris" not in owned_with,
+           "connected, a book finished in print stops being suggested -- and "
+           "nothing in Jellyfin could have known that")
+
+check.that("Mistborn" not in owned_with,
+           "a book rated on Hardcover is not offered back either: an opinion "
+           "already given is not a suggestion")
+
+discover_with = [r["title"] for r in withshelf["discover"]]
+check.that("Skyward" in discover_with,
+           "a want-to-read book reaches the discover shelf even as book three "
+           "of a series never started, because they asked for it")
+wanted_row = next(r for r in withshelf["discover"] if r["title"] == "Skyward")
+check.that(wanted_row["why"] and "want-to-read" in wanted_row["why"][0],
+           "and says so first, ahead of anything inferred")
+
+check.that("Skyward" not in [r["title"] for r in without["discover"]],
+           "without the shelf it is behind the reading-order guard, which is "
+           "what makes the case above a real one")
+
+# The rating has to reach the machinery, not just the library. An appended
+# seed carried weight zero and did nothing at all; this is the assertion that
+# would have caught it.
+check.that(withshelf["seeds"] > without["seeds"],
+           "a rating given on Hardcover makes that book a seed here")
+check.that(withshelf["ratings"] > without["ratings"],
+           "and counts toward the ratings ramp, which is what makes it a "
+           "rating rather than a book with a flag on it")
+
+# Matt's account on the day it was connected.
+empty = build({"username": "matt1211", "books_count": 0, "books": []})
+check.equal([r["title"] for r in empty["own"]], owned_without,
+            "a connected account with nothing on it builds exactly the shelf "
+            "it built before, rather than excluding everything")
+check.equal((empty["seeds"], empty["ratings"]),
+            (without["seeds"], without["ratings"]),
+            "and changes no weights")
+
+
 harness.cleanup()
 raise SystemExit(check.report())

@@ -175,9 +175,9 @@ def no_book_ratings() -> None:
     naming the catalogue -- better than a silently different shelf.
     """
     from app import external_books
-    external_books.rating = lambda title, authors: None
+    external_books.rating = lambda title, authors, token=None: None
     external_books.cached_rating = lambda title, authors: None
-    external_books.pending = lambda title, authors: False
+    external_books.pending = lambda title, authors, token=None: False
 
 
 class Check:

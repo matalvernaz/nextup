@@ -771,6 +771,61 @@ def shelf_entry(index: dict[str, list[str]], title: str, authors) -> bool:
     return bool(wanted & external_books.surnames(found))
 
 
+#: Jellyfin scores out of ten and Hardcover out of five, so a Hardcover rating
+#: is doubled on the way in. The weight table above is written in Jellyfin's
+#: scale -- 9 is "loved it", 5 is indifferent -- and a 4.5 arriving as 4.5
+#: would read as "disliked".
+HARDCOVER_TO_JELLYFIN = 2.0
+
+
+def with_shelf_ratings(library: list[dict], rated: list[dict]) -> list[dict]:
+    """The library with this person's Hardcover ratings written onto it.
+
+    Merged into the library rather than appended to the seed list, which was
+    the first attempt and did nothing at all. A seed's pull is
+    `_seed_weight * _engagement_weight`, and `_engagement_weight` of a book
+    never played *here* is its listening progress, which is zero -- so an
+    appended seed carried weight zero, was skipped by `if weight <= 0`, and
+    contributed to neither the taste profile nor the similarity votes. Written
+    onto `UserData.Rating` instead, every existing mechanism picks it up: it
+    counts toward the ratings ramp, it becomes a seed by the ordinary test, and
+    it stops being offered back on the owned shelf because a book somebody has
+    rated is not a suggestion.
+
+    A rating given on *this* server always wins. That is this listener scoring
+    this copy, and a stale Hardcover entry must not overwrite it.
+
+    Copies rather than mutation: `jellyfin.books` hands back a fresh list each
+    run today, and a function that quietly rewrites its argument is one that
+    will eventually be called somewhere that does not.
+    """
+    if not rated:
+        return library
+    index: dict[str, list[str]] = {}
+    scores: dict[str, float] = {}
+    for entry in rated:
+        key = external_books.main_title(entry.get("title") or "")
+        if not key:
+            continue
+        index.setdefault(key, []).extend(entry.get("authors") or [])
+        scores[key] = float(entry["rating"]) * HARDCOVER_TO_JELLYFIN
+    merged: list[dict] = []
+    for item in library:
+        title = item.get("Name") or ""
+        if (item.get("UserData") or {}).get("Rating") is not None:
+            merged.append(item)
+            continue
+        if not shelf_entry(index, title, _authors(item)):
+            merged.append(item)
+            continue
+        score = scores.get(external_books.main_title(title))
+        merged.append({
+            **item,
+            "UserData": {**(item.get("UserData") or {}), "Rating": score},
+        })
+    return merged
+
+
 def rating_prior(rating: "external_books.Rating") -> float:
     """A community rating as a signed multiplier in -1.0 through 1.0.
 
@@ -797,7 +852,8 @@ def rating_reason(rating: "external_books.Rating") -> str:
             f"by {readers} readers elsewhere")
 
 
-def apply_ratings(rows: list[dict], budget: int) -> int:
+def apply_ratings(rows: list[dict], budget: int,
+                  token: str | None = None) -> int:
     """Fold community ratings into already-ranked rows. Returns what is left.
 
     Ranked first and rated second, on purpose. A rating is the expensive signal
@@ -821,8 +877,8 @@ def apply_ratings(rows: list[dict], budget: int) -> int:
         authors = row.get("authors") or []
         if not title:
             continue
-        if external_books.pending(title, authors) and budget > 0:
-            found = external_books.rating(title, authors)
+        if external_books.pending(title, authors, token) and budget > 0:
+            found = external_books.rating(title, authors, token)
             budget -= 1
         else:
             # Free either way: everything worth asking has been asked, or the
@@ -1011,21 +1067,13 @@ def run(user: jellyfin.User, update_playlist: bool = True) -> dict:
     # credential is not a degraded answer, it is another person's taste.
     shelf = hardcover_shelf.for_user(user.key)
     read_elsewhere = _shelf_index(hardcover_shelf.finished(shelf))
-    rated_elsewhere = _shelf_index(hardcover_shelf.rated(shelf))
     wants_elsewhere = _shelf_index(hardcover_shelf.wanted(shelf))
+    # Before anything reads the library. A rating given elsewhere has to be
+    # part of it by the time seeds, the ratings ramp and the taste profile are
+    # worked out, or it is not a rating at all.
+    library = with_shelf_ratings(library, hardcover_shelf.rated(shelf))
 
     seeds = [i for i in library if _is_seed(i, user)]
-    # A book they rated on Hardcover is a book they have an opinion about, and
-    # the profile has never seen it. Added to the seeds where this library
-    # happens to hold it, so a rating given in print counts exactly as one
-    # given here -- through the same taste machinery, not a weight of its own.
-    if rated_elsewhere:
-        known = {i.get("Id") for i in seeds}
-        seeds += [
-            i for i in library
-            if i.get("Id") not in known
-            and shelf_entry(rated_elsewhere, i.get("Name") or "", _authors(i))
-        ]
 
     # Signed mode -- where a bad rating pushes rather than merely failing to pull
     # -- needs enough ratings that no single one can steer the result. Counted
@@ -1162,7 +1210,11 @@ def run(user: jellyfin.User, update_playlist: bool = True) -> dict:
     # per build across both shelves; the owned one spends first because it is
     # the shelf somebody is looking at now.
     rating_budget = config.BOOK_RATING_LOOKUPS_PER_BUILD
-    rating_budget = apply_ratings(own, rating_budget)
+    # Asked as this listener where they have connected an account, so their
+    # quota is spent on their shelf rather than the household's credential
+    # serving everybody. The answer is a public number either way.
+    rating_token = store.user_setting(user.key, "HARDCOVER_TOKEN")
+    rating_budget = apply_ratings(own, rating_budget, rating_token)
     own = _diversify(_dedupe_works(own), config.MAX_SHELF)
 
     # With no history there is no honest taste claim to make. A recent-arrivals
@@ -1197,15 +1249,20 @@ def run(user: jellyfin.User, update_playlist: bool = True) -> dict:
             # has already read is a wasted request as well as a wrong row.
             if shelf_entry(read_elsewhere, title, people):
                 continue
-            if not _is_reading_order_candidate(cand, taste):
+            wanted_here = shelf_entry(wants_elsewhere, title, people)
+            # The reading-order guard drops a numbered sequel somebody has not
+            # reached yet, which is right for a book the engine picked and
+            # wrong for one the listener put on their own want-to-read shelf.
+            # They can see it is book three. Telling them they may not have it
+            # is the app arguing with a decision they already made.
+            if not wanted_here and not _is_reading_order_candidate(cand, taste):
                 continue
             text = text_score(f"asin:{asin}")
             score, why = _score_candidate(
                 cand, taste, votes, text, seed_of.get(asin, []))
-            # Checked after the scorer and before the drop, so a book they
+            # Applied after the scorer and before the drop, so a book they
             # asked for reaches the shelf even when nothing else about it
             # matches: being told outranks anything inferred.
-            wanted_here = shelf_entry(wants_elsewhere, title, people)
             if wanted_here:
                 score += W_WANT_TO_READ
                 why.insert(0, "on your Hardcover want-to-read shelf")
@@ -1218,7 +1275,7 @@ def run(user: jellyfin.User, update_playlist: bool = True) -> dict:
                         "because_of": seed_of.get(asin, [])[:3]})
         out.sort(key=lambda r: -r["score"])
         nonlocal rating_budget
-        rating_budget = apply_ratings(out, rating_budget)
+        rating_budget = apply_ratings(out, rating_budget, rating_token)
         return out
 
     # Keyword picks are capped: the channel is broad by nature and must not drown
