@@ -16,6 +16,12 @@ services:
       # Supplied by the sso@file chain in front of the browser pages. The JSON
       # API never reads it.
       AUTH_USER_HEADER: "X-Auth-Request-Preferred-Username"
+      # Believed only because this file puts a forward-auth proxy in front.
+      # The header is read ahead of the signed session cookie, so a
+      # deployment that publishes a port without a proxy must leave this
+      # off: a header is a claim, and anyone who can reach the app directly
+      # can send one naming an administrator.
+      TRUST_PROXY_AUTH_HEADER: "true"
       # Empty on purpose. This is a household service, so a fallback naming
       # one person would hand his allowance to anyone whose header went
       # missing. With none, the pages refuse instead of guessing.

@@ -62,6 +62,10 @@ radarr.add = lambda tmdb, title="", year="", monitored=True: (
     added.append(("movie", tmdb)) or arr.AddResult(True, "Sent to Radarr.", "r1", title, year))
 sonarr.add = lambda tvdb, title="", monitored=True: (
     added.append(("series", tvdb)) or arr.AddResult(True, "Sent to Sonarr.", "s1", title))
+#: The real adapter, kept aside because the stub below replaces it for the
+#: allowance tests and one case further down is about the body it builds.
+REAL_BUSKARR_ADD = buskarr.add
+
 buskarr.add = lambda unit, hit, by: (
     added.append(("music", unit)) or arr.AddResult(True, "Sent to buskarr.", "job:7",
                                                    hit.get("title", "")))
@@ -284,6 +288,136 @@ check.equal(len(stopped), 1,
 check.that(store.get(KID.key, media.MOVIE, "tmdb:777") is None
            and store.get(OTHER.key, media.MOVIE, "tmdb:777") is None,
            "and both rows are gone")
+
+# --- an unreachable buskarr is asked once per row, not twice ------------------
+#
+# `state()` returns None both when buskarr cannot say and, previously, to mean
+# "nobody has asked yet". So during an outage the batch caller asked, got None,
+# and `_arrived` read that as unasked and asked again. Each probe carries its own
+# timeout, so three music rows cost six waits inside one response.
+for n in range(3):
+    store.record(MATT.key, media.MUSIC, f"probe-{n}", "album", f"Album {n}",
+                 "", 1, f"backend-{n}")
+
+probes = []
+buskarr.state = lambda backend_id: probes.append(backend_id) or None
+rows = {row["itemKey"]: row for row in wants.states(MATT)}
+check.equal(len(probes), 3,
+            "one probe per music row while buskarr is unreachable, not two")
+check.that(all(rows[f"probe-{n}"]["state"] != "in_library" for n in range(3)),
+           "and an unknown answer still leaves the rows waiting")
+
+# The same rows, with buskarr answering: still one probe each, and now arrived.
+probes.clear()
+buskarr.state = lambda backend_id: probes.append(backend_id) or {"state": "have"}
+rows = {row["itemKey"]: row for row in wants.states(MATT)}
+check.equal(len(probes), 3, "one probe per row when buskarr is healthy too")
+check.that(all(rows[f"probe-{n}"]["state"] == "in_library" for n in range(3)),
+           "and a positive answer arrives them")
+
+# --- a track request carries what the search already knew --------------------
+#
+# buskarr's matcher treats an unknown duration as "cannot judge" and admits a
+# candidate of any length, so a thirty-second track asked for without its
+# duration can be satisfied by a two-second file of the same name. The search
+# result published durationSeconds and album; the adapter dropped both, plus the
+# year, on the way to /add.
+sent_body = {}
+
+
+class _FakeResponse:
+    status_code = 200
+
+    @staticmethod
+    def json():
+        return {"reference": "r1", "message": "ok"}
+
+
+class _FakeClient:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def post(self, path, json):
+        sent_body.clear()
+        sent_body.update(json)
+        return _FakeResponse()
+
+
+buskarr._client = lambda: _FakeClient()
+
+REAL_BUSKARR_ADD("track", {
+    "ref": "42", "source": "deezer", "artist": "Cobalt Ensemble",
+    "title": "Recovery Recording", "album": "Requested Album",
+    "year": "2019", "durationSeconds": 30.0,
+}, "matt")
+check.equal(sent_body.get("duration"), 30.0,
+            "the track's duration reaches buskarr, so its matcher can judge length")
+check.equal(sent_body.get("album"), "Requested Album",
+            "and the album it belongs to")
+check.equal(sent_body.get("year"), "2019", "and the year")
+
+# A hit that genuinely does not know stays silent rather than claiming zero.
+REAL_BUSKARR_ADD("track", {"ref": "43", "artist": "A", "title": "B"}, "matt")
+check.that("duration" not in sent_body,
+           "an unknown duration is omitted, not sent as nothing-in-particular")
+check.that("year" not in sent_body, "and so is an unknown year")
+
+# --- cancelling must not stop somebody else's just-accepted request ----------
+#
+# release() counts the remaining waiters atomically and then _stop() ran after
+# that transaction closed. A request admitted in that gap was killed by the
+# older cancellation while its ledger row and its spent allowance survived:
+# charged for a download that never happens, with nothing on screen to explain
+# it. Both sides now take one household lock for the item, so an admission of
+# the same thing cannot land between the count and the stop.
+import threading  # noqa: E402
+
+timeline = []
+
+
+def _slow_stop(medium, row):
+    # Stands in for the round trip to Radarr, long enough that an admission
+    # arriving meanwhile would land inside it.
+    timeline.append("stop-begins")
+    time.sleep(0.4)
+    timeline.append("stop-ends")
+    return True
+
+
+def _record_admit(unit_or_pid, *rest):
+    timeline.append("admitted")
+    return arr.AddResult(True, "Added", "999", "Shared Film")
+
+
+radarr.add = _record_admit
+store.record(KID.key, media.MOVIE, "tmdb:888", "movie", "Shared Film", "2020", 1, "888")
+
+real_stop = wants._stop
+wants._stop = _slow_stop
+try:
+    canceller = threading.Thread(
+        target=lambda: wants.cancel(KID, media.MOVIE, "tmdb:888"))
+    canceller.start()
+    # Long enough for the cancellation to be inside _stop, short enough that
+    # it is still there.
+    time.sleep(0.15)
+    asker = threading.Thread(
+        target=lambda: wants.want(OTHER, media.MOVIE, "tmdb:888", "movie",
+                                  {"title": "Shared Film", "year": "2020"}))
+    asker.start()
+    canceller.join(timeout=10)
+    asker.join(timeout=10)
+finally:
+    wants._stop = real_stop
+
+check.equal(timeline, ["stop-begins", "stop-ends", "admitted"],
+            "the new request waits for the cancellation to finish stopping the "
+            "old one, instead of being admitted into the middle of it")
+check.that(store.get(OTHER.key, media.MOVIE, "tmdb:888") is not None,
+           "and it is on the asker's list afterwards")
 
 harness.cleanup()
 raise SystemExit(check.report())

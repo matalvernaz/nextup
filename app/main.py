@@ -149,8 +149,14 @@ def viewer(request: Request) -> jellyfin.User:
     Raises `LookupError` when none of the three resolves, which the pages turn
     into the sign-in form. That fallback chain is why this resolver is not
     shared with the JSON API: there it would hand any caller the owner's list.
+
+    The header is only believed where the deployment has said a proxy sets it.
+    It is read before the signed cookie, so on an installation reachable on its
+    own port -- which the shipped compose publishes -- believing it by default
+    let any caller name themselves an administrator.
     """
-    name = (request.headers.get(config.AUTH_USER_HEADER) or "").strip()
+    name = ((request.headers.get(config.AUTH_USER_HEADER) or "").strip()
+            if config.TRUST_PROXY_AUTH_HEADER else "")
     if name:
         return jellyfin.user(name)
     token = sessions.read(request.cookies.get(sessions.COOKIE_NAME))
@@ -170,7 +176,8 @@ def viewer(request: Request) -> jellyfin.User:
 def _signin_page(request: Request, detail: str = "", status: int = 200,
                  headers: dict[str, str] | None = None):
     """The sign-in form, and why it is being shown."""
-    proxied = bool(request.headers.get(config.AUTH_USER_HEADER))
+    proxied = bool(config.TRUST_PROXY_AUTH_HEADER
+                   and request.headers.get(config.AUTH_USER_HEADER))
     return templates.TemplateResponse(
         request=request, name="signin.html", status_code=status,
         headers=headers,

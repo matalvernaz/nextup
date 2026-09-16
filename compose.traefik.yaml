@@ -30,6 +30,12 @@ services:
       # Supplied by the forward-auth proxy in front of the browser pages. The
       # JSON API never reads it.
       AUTH_USER_HEADER: "X-Auth-Request-Preferred-Username"
+      # Believed only because this file puts a forward-auth proxy in front.
+      # The header is read ahead of the signed session cookie, so a
+      # deployment that publishes a port without a proxy must leave this
+      # off: a header is a claim, and anyone who can reach the app directly
+      # can send one naming an administrator.
+      TRUST_PROXY_AUTH_HEADER: "true"
       # Who a browser request is, when no proxy header is present. Leave empty
       # in any deployment reachable by more than one person.
       JELLYFIN_USER: ""

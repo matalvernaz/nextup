@@ -69,9 +69,31 @@ PUBLIC_URLS = [x.strip().rstrip("/")
 # themselves fetched, which on an established server is a small fraction of it.
 
 
+def _flag(name: str, default: bool = False) -> bool:
+    """A yes/no from the environment. Anything unrecognised is the default."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 # The trusted forward-auth proxy supplies this for browser requests. The JSON
 # API never reads it -- see `api.caller`.
 AUTH_USER_HEADER = _text("AUTH_USER_HEADER", "X-Auth-Request-Preferred-Username")
+
+# Whether a request naming a user in that header is believed.
+#
+# **Off unless the deployment says otherwise**, because a header is not a
+# credential: it is trusted ahead of the signed session cookie, so anyone who
+# can reach this application directly can claim to be anybody, including an
+# administrator. Behind a forward-auth proxy that is exactly right -- the proxy
+# is the authority and strips what the client sent. Reachable on its own port,
+# as the compose this repository ships makes it, it is a sign-in bypass.
+#
+# There is no safe default that is also convenient, so this picks safe. An
+# installation with a proxy sets it once, and until it does the pages fall
+# through to their own sign-in form rather than to whatever was in a header.
+TRUST_PROXY_AUTH_HEADER = _flag("TRUST_PROXY_AUTH_HEADER")
 
 # Deliberately empty, and deliberately not a name. This is the identity assumed
 # for a browser request arriving with no proxy header. A default that names
