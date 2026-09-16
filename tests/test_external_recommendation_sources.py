@@ -123,6 +123,116 @@ check.that(
     "a result with no average at all is skipped rather than read as zero")
 
 
+# --- Hardcover, against what the live API actually returns -------------------
+#
+# These five are the real answer to "The Way of Kings Brandon Sanderson" on
+# 2026-09-16. They are kept verbatim because three of them are traps and one of
+# them defeats the obvious guard.
+
+HARDCOVER_HITS = [
+    {"title": "Brandon Sanderson Sampler: The Way of Kings and Mistborn",
+     "rating": 4.607142857142857, "ratings_count": 14,
+     "author_names": ["Brandon Sanderson"]},
+    {"title": "The Stormlight Archive, Books 1-5 : The Way of Kings Book, "
+              "Words of Radiance Book, Oathbringer Book, Rythm of War Book "
+              "& Wind and Truth",
+     "rating": 1.0, "ratings_count": 1, "author_names": ["Brandon Sanderson"]},
+    {"title": "The Way of Kings", "rating": 4.635322976287817,
+     "ratings_count": 3669, "author_names": ["Brandon Sanderson"]},
+    {"title": "The Way of Kings (3 of 5) [Dramatized Adaptation]",
+     "rating": 4.5, "ratings_count": 2,
+     "author_names": ["Brandon Sanderson", "Dylan Lynch"]},
+    {"title": "The Way of Kings, Part 1", "rating": 4.536111111111111,
+     "ratings_count": 180, "author_names": ["Brandon Sanderson"]},
+]
+
+
+def read_hardcover(row):
+    return (row["title"], row["author_names"],
+            row["rating"], row["ratings_count"])
+
+
+hardcover_pick = external_books._pick(
+    HARDCOVER_HITS, "The Way of Kings", SANDERSON, "hardcover", read_hardcover)
+check.that(hardcover_pick is not None and hardcover_pick.count == 3669,
+           "the book itself is taken out of a sampler, an omnibus, a "
+           "dramatisation and a part")
+check.that(hardcover_pick is not None and hardcover_pick.average > 4.6,
+           "with its own score, not the sampler's")
+
+# The one that matters. Part 1 is rated by 180 people, so MIN_RATING_COUNT --
+# the obvious guard, and the one that saves us from Open Library's four-reader
+# rows -- would have let it straight through. Only the part marker stops it,
+# and a shelf claiming a partial edition's score for the whole book is exactly
+# the wrong rating this module refuses to produce.
+check.that(
+    180 > external_books.MIN_RATING_COUNT,
+    "Part 1 clears the ratings floor, so the floor is not what rejects it")
+check.that(
+    not external_books.matches(
+        "The Way of Kings", SANDERSON, "The Way of Kings, Part 1", SANDERSON),
+    "and the part marker is what does")
+
+# `_ilike` is refused by the server and `_eq` is case sensitive; both were
+# tried live. The query must be neither.
+check.that("_ilike" not in external_books.HARDCOVER_QUERY,
+           "the refused operator is gone")
+check.that("_eq" not in external_books.HARDCOVER_QUERY,
+           "and the case-sensitive one is not what replaced it")
+check.that("search" in external_books.HARDCOVER_QUERY,
+           "their own search is")
+
+
+class FakeResponse:
+    def __init__(self, body): self._body = body
+    def raise_for_status(self): return self
+    def json(self): return self._body
+
+
+class FakeClient:
+    def __init__(self, body): self.body = body; self.sent = []
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def post(self, url, headers=None, json=None):
+        self.sent.append(json)
+        return FakeResponse(self.body)
+
+
+saved_httpx_client = external_books.httpx.Client
+
+# A refused operator answers a BARE {"error": ...} with no `errors` array at
+# all. Checking only for the array reads that as "no results", which is how a
+# query the server rejects outright looks exactly like a book nobody rated.
+external_books.httpx.Client = lambda **kw: FakeClient(
+    {"error": "ilike and related operations are not permitted on this server."})
+check.raises(ValueError,
+             lambda: external_books.hardcover_books("Dune", ["Frank Herbert"]),
+             "a refusal with no errors array is still raised, not read as empty")
+
+external_books.httpx.Client = lambda **kw: FakeClient(
+    {"errors": [{"message": "field 'ratings_count' not found"}]})
+check.raises(ValueError,
+             lambda: external_books.hardcover_books("Dune", ["Frank Herbert"]),
+             "and so is an ordinary GraphQL error")
+
+sent_client = FakeClient(
+    {"data": {"search": {"results": {"hits": [
+        {"document": HARDCOVER_HITS[2]}]}}}})
+external_books.httpx.Client = lambda **kw: sent_client
+docs = external_books.hardcover_books("The Way of Kings", SANDERSON)
+check.equal([d["title"] for d in docs], ["The Way of Kings"],
+            "a good answer is unwrapped from hits[].document")
+# Lower case, because the surname comes through the same normalising the
+# matching uses. Confirmed live 2026-09-16 that it makes no difference to what
+# comes back: "The Way of Kings sanderson" returns the same three rows.
+check.that(
+    "sanderson" in (sent_client.sent[0]["variables"]["query"] or "").lower(),
+    "and the author rides along in the search text, because a bare title "
+    "returns every edition anybody has ever listed")
+
+external_books.httpx.Client = saved_httpx_client
+
+
 # --- what a rating is worth --------------------------------------------------
 
 def rating(average, count):

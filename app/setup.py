@@ -22,7 +22,8 @@ leaves the field alone rather than writing a value that will not be read.
 """
 from dataclasses import dataclass
 
-from . import backends, config, jellyfin, logs, media, settings
+from . import (backends, config, external_books, jellyfin, logs, media,
+               settings, tmdb)
 
 log = logs.get("setup")
 
@@ -57,6 +58,11 @@ class BackendForm:
     root_field: str = ""
     root_value: str = ""
     note: str = ""
+    #: Shown instead of the connected/not-connected sentence, for a form whose
+    #: fields are independent of each other. "Not connected" is a true thing to
+    #: say about one Radarr and a meaningless one to say about three optional
+    #: catalogues, two of which may be deliberately off.
+    summary: str = ""
 
 
 def _field(name: str, label: str, secret: bool = False,
@@ -138,6 +144,57 @@ def _buskarr_form() -> BackendForm:
     )
 
 
+def _recommendation_sources_form() -> BackendForm:
+    """The outside catalogues a shelf may consult.
+
+    On this page rather than a page of its own, because it is the same act --
+    telling this service how to reach something else -- and because everything
+    the secret fields need already works here: the value is never rendered
+    back, an empty box keeps the saved key, and a value held in the environment
+    says so instead of pretending it can be changed.
+
+    Not a `backends.Status`, and the "connected / not answering" sentence is
+    replaced for it. That model is one status per medium and answers "can this
+    be acquired"; a rating source acquires nothing, and three independent
+    optional keys have no single connected state between them. What each one is
+    doing is `python -m app.doctor`'s answer, which asks all three.
+    """
+    configured = external_books.configured_sources()
+    rating_sources = [name for name in configured if name != "openlibrary"]
+    summary = (
+        "Open Library is always on and needs no key. "
+        + ("Also asking " + ", ".join(rating_sources) + ". "
+           if rating_sources else "")
+        + ("TMDb is connected." if tmdb.configured() else
+           "TMDb is off, so films and shows are recommended from this "
+           "library's own metadata alone."))
+    return BackendForm(
+        key="recommendations", name="recommendations",
+        label="Recommendation sources", medium="", status=None,
+        summary=summary,
+        fields=(
+            _field(
+                "TMDB_API_KEY", "TMDb API key", secret=True,
+                help_text="Free, from themoviedb.org: your account, then "
+                          "Settings, then API. Adds what people who liked a "
+                          "film went on to watch, for films and shows."),
+            _field(
+                "HARDCOVER_TOKEN", "Hardcover API token", secret=True,
+                help_text="From hardcover.app: your account, then Settings, "
+                          "then API. Adds a book's community rating, from the "
+                          "catalogue with the most of them."),
+            _field(
+                "GOOGLE_BOOKS_API_KEY", "Google Books API key", secret=True,
+                help_text="From console.cloud.google.com: APIs and Services, "
+                          "then Credentials, then Create credentials, then "
+                          "API key, with the Books API enabled on that "
+                          "project. A key is required -- without one Google "
+                          "shares a single daily quota across everybody "
+                          "asking anonymously, and it is routinely used up."),
+        ),
+    )
+
+
 def forms() -> tuple[BackendForm, ...]:
     """Every backend, in the order somebody is most likely to want them."""
     return (
@@ -145,6 +202,9 @@ def forms() -> tuple[BackendForm, ...]:
         _arr_form("sonarr", "Sonarr", "series", 8989),
         _listenarr_form(),
         _buskarr_form(),
+        # Last: these change how a shelf is ordered, and the four above decide
+        # whether anything can be asked for at all.
+        _recommendation_sources_form(),
     )
 
 

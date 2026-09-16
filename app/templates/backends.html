@@ -17,7 +17,9 @@
   <h3>{{ backend.label }}</h3>
 
   <p>
-    {% if not backend.status or not backend.status.configured %}
+    {% if backend.summary %}
+      {{ backend.summary }}
+    {% elif not backend.status or not backend.status.configured %}
       Not connected.
     {% elif backend.status.reachable %}
       Connected, and answering.

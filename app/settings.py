@@ -37,12 +37,17 @@ WRITABLE = frozenset({
     "LISTENARR_URL", "LISTENARR_QUALITY_PROFILE_ID",
     "MOVIE_LIBRARY_IDS", "SERIES_LIBRARY_IDS", "MUSIC_LIBRARY_IDS",
     "BOOK_LIBRARY_IDS",
+    "TMDB_API_KEY", "GOOGLE_BOOKS_API_KEY", "HARDCOVER_TOKEN",
 })
 
 #: Never logged, never rendered back into a form field, never in the doctor's
 #: output. A key that has been set is shown as the fact that it is set.
 SECRET = frozenset({
     "JELLYFIN_TOKEN", "RADARR_API_KEY", "SONARR_API_KEY", "BUSKARR_API_KEY",
+    # All three of the outside catalogues. A Hardcover token is a *personal*
+    # access token -- `me` answers with the account that issued it -- so it is
+    # a credential that names somebody, not just one that opens a door.
+    "TMDB_API_KEY", "GOOGLE_BOOKS_API_KEY", "HARDCOVER_TOKEN",
 })
 
 _PREFIX = "setting:"

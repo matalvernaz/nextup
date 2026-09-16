@@ -252,16 +252,24 @@ def _google_books(title: str, authors) -> Answer:
         i.get("averageRating"), i.get("ratingsCount"))))
 
 
-#: Asked by title and filtered here rather than in GraphQL: the server's filter
-#: syntax is the part most likely to differ from what this was written against,
-#: and a query that fails outright is a source that is simply off.
+#: Their own search, not a filter on `books`. Both alternatives were tried
+#: against the live API on 2026-09-16 and neither works:
+#:
+#: * `where: {title: {_ilike: ...}}` is REFUSED outright -- "ilike and related
+#:   operations are not permitted on this server".
+#: * `where: {title: {_eq: ...}}` is accepted and is CASE SENSITIVE, so "dune"
+#:   finds nothing while "Dune" finds everything. A library title is whatever
+#:   the tagger wrote, so exact case is not a lookup.
+#:
+#: `search` handles the casing and the near-spellings, and returns the noise
+#: this module's matching rules exist for: the live answer for The Way of Kings
+#: is a sampler, a five-book omnibus, the book at 3,669 ratings, a dramatised
+#: adaptation, and "The Way of Kings, Part 1" at 180 -- which the ratings floor
+#: would NOT have caught.
 HARDCOVER_QUERY = """
-query BookRating($title: String!) {
-  books(where: {title: {_ilike: $title}}, limit: 5) {
-    title
-    rating
-    ratings_count
-    contributions { author { name } }
+query BookSearch($query: String!) {
+  search(query: $query, query_type: "Book", per_page: 5) {
+    results
   }
 }
 """
@@ -269,51 +277,57 @@ query BookRating($title: String!) {
 HARDCOVER_URL = "https://api.hardcover.app/v1/graphql"
 
 
-def hardcover_books(title: str) -> list[dict]:
-    """Raw Hardcover rows for one title. Raises on anything going wrong.
+def hardcover_books(title: str, authors=None) -> list[dict]:
+    """Raw Hardcover documents for one title. Raises on anything going wrong.
 
     Separate from the adapter below so `doctor` can ask the same question and
     report what came back, rather than swallowing it the way a shelf build has
-    to.
+    to. That separation is not hypothetical: the first shipped query was
+    refused by the server, and this is the route that says so.
     """
+    query = title
+    people = sorted(_surnames(authors))
+    if people:
+        query = f"{title} {people[0]}"
     with httpx.Client(timeout=_TIMEOUT) as client:
         resp = client.post(
             HARDCOVER_URL,
             headers={"Authorization": f"Bearer {config.HARDCOVER_TOKEN}"},
-            json={"query": HARDCOVER_QUERY, "variables": {"title": title}})
+            json={"query": HARDCOVER_QUERY, "variables": {"query": query}})
         resp.raise_for_status()
         body = resp.json()
-    if body.get("errors"):
-        # GraphQL answers 200 with an errors array, so a wrong field name is a
-        # success as far as HTTP is concerned. Raised rather than returned
-        # empty, because this is the failure that would otherwise look exactly
-        # like "Hardcover has never heard of any book".
-        raise ValueError(f"hardcover rejected the query: {body['errors']}")
-    return ((body.get("data") or {}).get("books")) or []
+    # Two shapes of refusal, and only one of them is GraphQL's. A rejected
+    # operator answers a bare `{"error": "..."}` with no `errors` array at all,
+    # which a check for the array alone reads as an empty result -- the exact
+    # failure this raise exists to make loud.
+    if body.get("errors") or body.get("error"):
+        raise ValueError(
+            f"hardcover refused the query: "
+            f"{body.get('error') or body['errors']}")
+    results = ((body.get("data") or {}).get("search") or {}).get("results") or {}
+    return [hit.get("document") or {} for hit in (results.get("hits") or [])]
 
 
 def _hardcover(title: str, authors) -> Answer:
     """api.hardcover.app, token required.
 
     The catalogue worth having now that Goodreads and StoryGraph publish no
-    usable API: it is the one with rating volume behind it. The endpoint and
-    the `Authorization: Bearer` shape are verified against the live service;
-    the query is not, because verifying it needs a token from an account. So
-    `python -m app.doctor` asks it a real question the moment a token exists,
-    and a wrong field name shows up as a line in a report rather than as a
-    signal that quietly never fires.
+    usable API: it is the one with rating volume behind it, and the live answer
+    for The Way of Kings is 3,669 ratings against Open Library's 165.
+
+    Verified against the live API 2026-09-16, which took two attempts -- see
+    `HARDCOVER_QUERY`. `python -m app.doctor` still asks it a real question
+    whenever a token is set, because that is what caught the first one.
     """
     if not config.HARDCOVER_TOKEN:
         return NOT_ASKED
     try:
-        rows = hardcover_books(title)
+        rows = hardcover_books(title, authors)
     except (httpx.HTTPError, ValueError) as exc:
         log.warning("hardcover lookup failed for %r (%s)", title, exc)
         return NOT_ASKED
     return Answer(True, _pick(rows, title, authors, "hardcover", lambda r: (
-        r.get("title"),
-        [((c.get("author") or {}).get("name") or "")
-         for c in (r.get("contributions") or [])],
+        r.get("title"), r.get("author_names"),
         r.get("rating"), r.get("ratings_count"))))
 
 
