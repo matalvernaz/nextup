@@ -246,6 +246,7 @@ def states(user_key: str, owned: tuple[set, dict] | None) -> list[dict]:
         if arrived:
             log.info("requests fulfilled user=%s asins=%s",
                      user_key, sorted(arrived))
+            _stop_looking(arrived)
         store.fulfil_requests(user_key, arrived)
     else:
         log.warning("reporting %d book request(s) unsettled user=%s: the "
@@ -262,6 +263,38 @@ def states(user_key: str, owned: tuple[set, dict] | None) -> list[dict]:
             "state": _state(row),
         })
     return out
+
+
+def _stop_looking(asins: set[str]) -> None:
+    """Take books that have just arrived out of Listenarr's search sweep.
+
+    Listenarr adds monitored, and monitored is what its six-hourly automatic
+    search selects on -- so a book went on being searched for after it was in
+    the library, for as long as the quality evaluator could not prove the copy
+    met the profile's cutoff. Measured on the live server 2026-09-12: of 184
+    monitored books, 162 already had their files, and one cycle put 757 queries
+    through MyAnonaMouse on their behalf. This service asked for those books,
+    so it is the thing that should say when it has stopped asking.
+
+    Best effort, and never raised: the book has arrived either way, and a
+    request list that failed because a cleanup step could not reach Listenarr
+    would be reporting the wrong thing entirely. A failure is logged with what
+    it costs, because the cost is silent otherwise.
+    """
+    for asin in sorted(asins):
+        # Broad on purpose. `unmonitor` handles the HTTP errors it expects, but
+        # the lookup in front of it is a second call and this runs inside the
+        # request list: anything that escapes here would blank a page that had
+        # already worked out the right answer.
+        try:
+            stopped = listenarr.unmonitor_by_asin(asin)
+        except Exception:
+            log.warning("unmonitor raised for %s", asin, exc_info=True)
+            stopped = False
+        if not stopped:
+            log.warning(
+                "could not stop Listenarr looking for %s; it stays in the "
+                "six-hourly sweep until it is unmonitored by hand", asin)
 
 
 def _arrived(row: dict, asins: set, by_title: dict) -> bool:
