@@ -106,7 +106,7 @@ MAX_REASONS = 2
 SERIES_REPEAT_PENALTY = 0.8
 AUTHOR_REPEAT_PENALTY = 0.35
 
-RANKER_VERSION = "4"
+RANKER_VERSION = "5"
 
 GENERIC_GENRE_REASONS = {
     "audiobooks",
@@ -1049,6 +1049,69 @@ def _keyword_candidates(queries: list[str], owned_check) -> dict[str, dict]:
     return found
 
 
+def _want_candidates(
+    wanted: list[dict], owned_check, suppressed: set
+) -> dict[str, dict]:
+    """Books from a Hardcover want-to-read shelf, as things that can be asked for.
+
+    The shelf used to be a re-ranker and nothing else: `wanted` lifted a
+    candidate Audible's similarity graph had already produced, so a book
+    somebody shelved that no finished book resembles never appeared at all.
+    That is backwards. Everything else on the discover shelf is inferred, and
+    this is the one channel where the listener has simply said what they want.
+
+    Resolved through Listenarr's Audible search, the same route
+    `_keyword_candidates` uses -- measured 7 of 7 on this household's own
+    shelf, which is unsurprising: these are books they bought from Audible.
+
+    Every hit goes through `external_books.matches` rather than being taken on
+    trust. A wrong row on a shelf is a bad suggestion; a wrong row *here* is a
+    download of a book nobody asked for, so the strict rule applies -- exact
+    main title, no part or omnibus marker, author surname agreeing.
+    """
+    found: dict[str, dict] = {}
+    for entry in wanted:
+        title = (entry.get("title") or "").strip()
+        if not title:
+            continue
+        people = entry.get("authors") or []
+        query = title
+        surnames = sorted(external_books.surnames(people))
+        if surnames:
+            query = f"{title} {surnames[0]}"
+        try:
+            hits = listenarr.audible_search(query) or []
+        except Exception as exc:  # noqa: BLE001 -- one bad search is not a run
+            log.warning("could not resolve want-to-read %r (%s)", title, exc)
+            continue
+        for row in hits:
+            asin = row.get("asin")
+            if not asin or asin in suppressed:
+                continue
+            authors = [a.get("name", "")
+                       for a in (row.get("authors") or []) if a.get("name")]
+            if not external_books.matches(
+                    title, people, row.get("title") or "", authors):
+                continue
+            cand = {
+                "asin": asin,
+                "title": (row.get("title") or "").strip(),
+                "authors": authors,
+                "narrators": [n.get("name", "")
+                              for n in (row.get("narrators") or []) if n.get("name")],
+                "runtime_min": row.get("lengthMinutes"),
+                "description": _candidate_description(asin),
+                "source": "hardcover_want",
+            }
+            # A book they want that this library already holds is not a thing
+            # to acquire -- it is a thing to read, and it belongs on the owned
+            # shelf, where the same want reason is applied.
+            if not owned_check(cand):
+                found.setdefault(asin, cand)
+            break
+    return found
+
+
 def _playlist_name(user: jellyfin.User) -> str:
     """Keep the owning account's playlist stable; make every other name unique."""
     owner = config.PLAYLIST_OWNER
@@ -1184,8 +1247,18 @@ def run(user: jellyfin.User, update_playlist: bool = True) -> dict:
             continue
         if text >= TEXT_REASON_THRESHOLD:
             why.append("matches themes in books you've enjoyed")
+        # A book they shelved that this library already holds. It is not
+        # something to acquire -- it is already here -- so it belongs on this
+        # shelf rather than the discover one, with the same reason and the same
+        # standing above everything inferred.
+        on_want_shelf = shelf_entry(
+            wants_elsewhere, item.get("Name") or "", _authors(item))
+        if on_want_shelf:
+            score += W_WANT_TO_READ
+            why.insert(0, "on your Hardcover want-to-read shelf, and already here")
         source = (
-            "series" if item.get("Id") in series_next
+            "hardcover_want" if on_want_shelf
+            else "series" if item.get("Id") in series_next
             else "audible_sims" if asin and votes.get(asin)
             else "affinity"
         )
@@ -1277,6 +1350,20 @@ def run(user: jellyfin.User, update_playlist: bool = True) -> dict:
         nonlocal rating_budget
         rating_budget = apply_ratings(out, rating_budget, rating_token)
         return out
+
+    # Books this listener put on their own want-to-read shelf, resolved to
+    # something that can actually be acquired. Added to the pool rather than
+    # left to re-rank what the similarity graph happened to find -- see
+    # `_want_candidates`. Resolved after `suppressed` exists so a want already
+    # on order costs no search at all.
+    want_found = _want_candidates(
+        hardcover_shelf.wanted(shelf), owned_check, suppressed)
+    for asin, cand in want_found.items():
+        unowned.setdefault(asin, cand)
+        key = f"asin:{asin}"
+        if key not in vectors:
+            vectors[key] = textmodel.vectorise(
+                textmodel.tokenise(cand.get("description") or ""), idf)
 
     # Keyword picks are capped: the channel is broad by nature and must not drown
     # the ones traceable to a specific book already listened to.

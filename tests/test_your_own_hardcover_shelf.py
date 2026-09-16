@@ -371,5 +371,105 @@ check.equal((empty["seeds"], empty["ratings"]),
             "and changes no weights")
 
 
+# --- a want-to-read shelf that produces candidates, not just re-ranking ------
+#
+# The defect this closes: `wanted` used to lift a book Audible's similarity
+# graph had already found, so a book somebody shelved that no finished book
+# resembles never appeared at all. Everything else on the discover shelf is
+# inferred; this is the one channel where they simply said what they want.
+
+SEARCHED = []
+
+
+def fake_audible_search(query):
+    SEARCHED.append(query)
+    # Keyed case-insensitively: the surname reaches the query through the same
+    # normalising the matcher uses, so it arrives lower case.
+    query = query.casefold()
+    rows = {
+        "soul fraud givler": [
+            {"asin": "SOULFRAUD", "title": "Soul Fraud",
+             "authors": [{"name": "Andrew Givler"}], "narrators": [],
+             "lengthMinutes": 600},
+        ],
+        # The trap, and the reason the strict matcher is used here rather than
+        # the loose one: a search for a book returns a part of it, and asking
+        # for the wrong thing here is a download, not a bad row.
+        "the way of kings sanderson": [
+            {"asin": "WRONGPART", "title": "The Way of Kings, Part 1",
+             "authors": [{"name": "Brandon Sanderson"}], "narrators": [],
+             "lengthMinutes": 600},
+        ],
+        # A same-title book by somebody else.
+        "ascension rinoz": [
+            {"asin": "WRONGAUTHOR", "title": "Ascension",
+             "authors": [{"name": "Someone Else"}], "narrators": [],
+             "lengthMinutes": 600},
+        ],
+    }
+    return rows.get(query, [])
+
+
+def want(title, authors):
+    return {"title": title, "authors": authors, "rating": None,
+            "status_id": hardcover_shelf.WANT_TO_READ}
+
+
+saved_search = listenarr.audible_search
+saved_desc = engine._candidate_description
+listenarr.audible_search = fake_audible_search
+engine._candidate_description = lambda asin: "a blurb"
+try:
+    found = engine._want_candidates(
+        [want("Soul Fraud", ["Andrew Givler"])],
+        owned_check=lambda cand: False, suppressed=set())
+    check.equal(list(found), ["SOULFRAUD"],
+                "a book on the want-to-read shelf becomes something that can "
+                "be acquired, with no similarity link to anything")
+    check.equal(found["SOULFRAUD"]["source"], "hardcover_want",
+                "and says where it came from")
+
+    check.equal(
+        engine._want_candidates(
+            [want("The Way of Kings", ["Brandon Sanderson"])],
+            owned_check=lambda cand: False, suppressed=set()),
+        {},
+        "a search returning a PART of the wanted book resolves to nothing: a "
+        "wrong row here is a download of the wrong book")
+
+    check.equal(
+        engine._want_candidates(
+            [want("Ascension", ["RinoZ"])],
+            owned_check=lambda cand: False, suppressed=set()),
+        {},
+        "and so is a same-title book by somebody else")
+
+    check.equal(
+        engine._want_candidates(
+            [want("Soul Fraud", ["Andrew Givler"])],
+            owned_check=lambda cand: True, suppressed=set()),
+        {},
+        "a wanted book the library already holds is not offered as something "
+        "to acquire -- it belongs on the owned shelf")
+
+    SEARCHED.clear()
+    check.equal(
+        engine._want_candidates(
+            [want("Soul Fraud", ["Andrew Givler"])],
+            owned_check=lambda cand: False, suppressed={"SOULFRAUD"}),
+        {},
+        "and one already on order is dropped")
+
+    SEARCHED.clear()
+    check.equal(engine._want_candidates([], lambda c: False, set()), {},
+                "an empty want list resolves nothing")
+    check.equal(SEARCHED, [],
+                "without asking Audible anything at all, which is what an "
+                "account that has connected nothing must cost")
+finally:
+    listenarr.audible_search = saved_search
+    engine._candidate_description = saved_desc
+
+
 harness.cleanup()
 raise SystemExit(check.report())
