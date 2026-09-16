@@ -282,17 +282,28 @@ def post_want(user: jellyfin.User = Depends(caller),
               year: str = Body("", embed=True),
               artist: str = Body("", embed=True),
               source: str = Body("", embed=True),
-              ref: str = Body("", embed=True)) -> dict:
+              ref: str = Body("", embed=True),
+              album: str = Body("", embed=True),
+              duration_seconds: float | None = Body(
+                  None, embed=True, alias="durationSeconds")) -> dict:
     """Ask for one thing. Repeating it is free and spends no allowance.
 
     The extra fields are what the search hit said. Films and series need none
     of them -- their ledger key carries the provider id and the acquisition
     tool looks the rest up itself -- but music has no such id, so the credit
     and the catalogue reference have to travel with the request.
+
+    `album` and `durationSeconds` are what the search result already published
+    and this route used to drop. Duration is the one that matters: buskarr's
+    matcher treats an unknown duration as "cannot judge" and lets any length
+    through, so a request that forgets a thirty-second track is thirty seconds
+    long will accept a two-second file of the same name. Both are optional --
+    a client that does not send them is no worse off than before.
     """
     log.info("api want user=%s medium=%s key=%s", user.key, medium, item_key)
     hit = {"title": title, "year": year, "artist": artist,
-           "source": source, "ref": ref}
+           "source": source, "ref": ref, "album": album,
+           "durationSeconds": duration_seconds}
     try:
         state, message = wants.want(user, medium, item_key, unit, hit)
     except wants.Denied as denied:

@@ -80,8 +80,16 @@ def want(
     # the Listenarr add and the ledger write are four steps with three
     # decisions between them, and two taps arriving together both used to find
     # the day's allowance unspent.
+    # And the household lock for this book, taken second and always in this
+    # order. It makes admitting a book and calling it off mutually exclusive
+    # across accounts: cancel counts the remaining waiters and then tells
+    # Listenarr to stop, and a request admitted between those two steps used to
+    # be stopped by somebody else's cancellation while keeping its ledger row
+    # and its spent allowance. Cancel takes only the household lock, so there is
+    # no opposite ordering and no cycle.
     with store.key_lock(user.key, store.MEDIUM):
-        return _admit(user, asin, title, recommendation_id, metadata)
+        with store.key_lock("item", store.MEDIUM, asin):
+            return _admit(user, asin, title, recommendation_id, metadata)
 
 
 def _admit(user, asin, title, recommendation_id, metadata):
@@ -166,19 +174,24 @@ def cancel(user: jellyfin.User, asin: str) -> tuple[bool, str]:
     # Dropped and counted in one transaction, so two accounts cancelling the
     # same book at the same moment cannot each read the other as still waiting
     # and leave Listenarr searching for something nobody is on the list for.
-    existed, others = store.release_request(user.key, asin)
-    if not existed:
-        log.info("cancel user=%s asin=%s no-such-request", user.key, asin)
-        return False, "That book is not on your list."
+    # Held across the count and the stop. release_request is atomic in itself,
+    # but the Listenarr delete ran after its transaction closed, and a request
+    # admitted in that gap was called off by this cancellation while its ledger
+    # row and its spent allowance survived.
+    with store.key_lock("item", store.MEDIUM, asin):
+        existed, others = store.release_request(user.key, asin)
+        if not existed:
+            log.info("cancel user=%s asin=%s no-such-request", user.key, asin)
+            return False, "That book is not on your list."
 
-    if others:
-        store.record_feedback(user.key, asin, "cancel")
-        log.info("cancel user=%s asin=%s kept in Listenarr for %s",
-                 user.key, asin, sorted(others))
-        return True, ("Taken off your list. Somebody else is waiting on it, "
-                      "so it is still being looked for.")
+        if others:
+            store.record_feedback(user.key, asin, "cancel")
+            log.info("cancel user=%s asin=%s kept in Listenarr for %s",
+                     user.key, asin, sorted(others))
+            return True, ("Taken off your list. Somebody else is waiting on it, "
+                          "so it is still being looked for.")
 
-    called_off = _stop_acquiring(asin)
+        called_off = _stop_acquiring(asin)
     store.record_feedback(user.key, asin, "cancel")
     log.info("cancel user=%s asin=%s listenarr_deleted=%s",
              user.key, asin, called_off)
