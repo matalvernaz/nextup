@@ -129,6 +129,14 @@ def _surnames(authors) -> set[str]:
     return found
 
 
+#: The two normalising steps, named publicly because the personal-shelf matcher
+#: in `books.hardcover_shelf` has to file its entries by exactly the same rules
+#: the community-rating matcher compares by. Two spellings of "the same book"
+#: in one codebase is how a shelf claims a rating for the wrong edition.
+main_title = _main_title
+surnames = _surnames
+
+
 def matches(
     wanted_title: str,
     wanted_authors,
@@ -186,7 +194,7 @@ def _pick(rows, title, authors, source, read) -> Rating | None:
 # --- the three catalogues ----------------------------------------------------
 
 
-def _open_library(title: str, authors) -> Answer:
+def _open_library(title: str, authors, token: str | None = None) -> Answer:
     """openlibrary.org, which needs no credential at all.
 
     `search.json` with an explicit field list: the default response carries
@@ -217,7 +225,7 @@ def _open_library(title: str, authors) -> Answer:
         d.get("ratings_average"), d.get("ratings_count"))))
 
 
-def _google_books(title: str, authors) -> Answer:
+def _google_books(title: str, authors, token: str | None = None) -> Answer:
     """books.googleapis.com, keyed.
 
     Deliberately not the keyless form. Unauthenticated callers share one Google
@@ -277,7 +285,7 @@ query BookSearch($query: String!) {
 HARDCOVER_URL = "https://api.hardcover.app/v1/graphql"
 
 
-def hardcover_books(title: str, authors=None) -> list[dict]:
+def hardcover_books(title: str, authors=None, token: str | None = None) -> list[dict]:
     """Raw Hardcover documents for one title. Raises on anything going wrong.
 
     Separate from the adapter below so `doctor` can ask the same question and
@@ -292,7 +300,9 @@ def hardcover_books(title: str, authors=None) -> list[dict]:
     with httpx.Client(timeout=_TIMEOUT) as client:
         resp = client.post(
             HARDCOVER_URL,
-            headers={"Authorization": f"Bearer {config.HARDCOVER_TOKEN}"},
+            headers={
+                "Authorization":
+                    f"Bearer {token or config.HARDCOVER_TOKEN}"},
             json={"query": HARDCOVER_QUERY, "variables": {"query": query}})
         resp.raise_for_status()
         body = resp.json()
@@ -308,7 +318,7 @@ def hardcover_books(title: str, authors=None) -> list[dict]:
     return [hit.get("document") or {} for hit in (results.get("hits") or [])]
 
 
-def _hardcover(title: str, authors) -> Answer:
+def _hardcover(title: str, authors, token: str | None = None) -> Answer:
     """api.hardcover.app, token required.
 
     The catalogue worth having now that Goodreads and StoryGraph publish no
@@ -319,10 +329,15 @@ def _hardcover(title: str, authors) -> Answer:
     `HARDCOVER_QUERY`. `python -m app.doctor` still asks it a real question
     whenever a token is set, because that is what caught the first one.
     """
-    if not config.HARDCOVER_TOKEN:
+    # The asking listener's own token where they have one, so the request is
+    # made as them rather than as the household. The ANSWER is the same either
+    # way -- a community rating is public -- which is why the cache below stays
+    # shared and user-free. What changes is whose credential spends the quota.
+    token = token or config.HARDCOVER_TOKEN
+    if not token:
         return NOT_ASKED
     try:
-        rows = hardcover_books(title, authors)
+        rows = hardcover_books(title, authors, token=token)
     except (httpx.HTTPError, ValueError) as exc:
         log.warning("hardcover lookup failed for %r (%s)", title, exc)
         return NOT_ASKED
@@ -360,12 +375,18 @@ PROVIDERS = (
 )
 
 
-def configured_sources() -> tuple[str, ...]:
-    """Which catalogues this installation can actually ask."""
+def configured_sources(token: str | None = None) -> tuple[str, ...]:
+    """Which catalogues can actually be asked, for this listener.
+
+    `token` is their own Hardcover credential. An account that has connected
+    one can be asked Hardcover even where the household has not set a
+    service-level token at all -- which is the ordinary case once per-account
+    connections exist.
+    """
     available = {
         "openlibrary": True,
         "googlebooks": bool(config.GOOGLE_BOOKS_API_KEY),
-        "hardcover": bool(config.HARDCOVER_TOKEN),
+        "hardcover": bool(token or config.HARDCOVER_TOKEN),
     }
     return tuple(name for name, _ in PROVIDERS if available[name])
 
@@ -424,7 +445,7 @@ def cached_rating(title: str, authors) -> Rating | None:
     return None
 
 
-def pending(title: str, authors) -> bool:
+def pending(title: str, authors, token: str | None = None) -> bool:
     """Whether asking would cost a request.
 
     True when at least one configured catalogue has nothing fresh cached for
@@ -432,14 +453,14 @@ def pending(title: str, authors) -> bool:
     free -- from "nobody has asked yet", which is what the budget is for. A
     cached miss must not be re-bought on every pass.
     """
-    configured = set(configured_sources())
+    configured = set(configured_sources(token))
     for name, _ in PROVIDERS:
         if name in configured and not _cached(name, title, authors).answered:
             return True
     return False
 
 
-def rating(title: str, authors) -> Rating | None:
+def rating(title: str, authors, token: str | None = None) -> Rating | None:
     """This book's community rating, fetching what is not already cached.
 
     The first confident answer wins. A catalogue that has never heard of the
@@ -454,7 +475,7 @@ def rating(title: str, authors) -> Rating | None:
             if known.rating is not None:
                 return known.rating
             continue
-        answer = fetch(title, authors)
+        answer = fetch(title, authors, token)
         if not answer.answered:
             continue
         _remember(name, title, authors, answer.rating)

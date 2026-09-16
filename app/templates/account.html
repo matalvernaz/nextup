@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}Your reading accounts — Nextup{% endblock %}
+{% block main %}
+
+<h2>Your reading accounts</h2>
+
+<p>
+  Anything you connect here is yours alone. It is read for your suggestions
+  and nobody else's, and no other account on this server can see it or use it.
+</p>
+
+<h3>Hardcover</h3>
+
+<p>{{ hardcover.summary }}</p>
+
+{% if hardcover.detail %}
+<p>{{ hardcover.detail }}</p>
+{% endif %}
+
+<form method="post" action="/account">
+  <p>
+    <label for="HARDCOVER_TOKEN">Hardcover API token</label><br>
+    <input type="password" id="HARDCOVER_TOKEN" name="HARDCOVER_TOKEN"
+           value="" autocomplete="off" autocapitalize="none"
+           autocorrect="off" spellcheck="false"
+           aria-describedby="HARDCOVER_TOKEN-help">
+    <br>
+    <span class="help" id="HARDCOVER_TOKEN-help">
+      From hardcover.app: your account, then Settings, then API. Your token is
+      checked with Hardcover before it is saved, so you find out here if it is
+      wrong rather than finding out never.
+      {% if hardcover.connected %}
+        Leave empty to keep the token already saved.
+      {% endif %}
+    </span>
+  </p>
+  <p>
+    <button type="submit" name="action" value="save">Save</button>
+    {% if hardcover.connected %}
+    <button type="submit" name="action" value="disconnect">Disconnect Hardcover</button>
+    {% endif %}
+  </p>
+</form>
+
+<h3>What it is used for</h3>
+
+<ul>
+  <li>Books you have rated join the picture of what you like, so something you
+    read in print counts the same as something you listened to here.</li>
+  <li>Books you have finished, abandoned or ignored stop being suggested.</li>
+  <li>Books on your want-to-read shelf are offered first, because you said so
+    rather than because anything was guessed.</li>
+</ul>
+
+{% endblock %}

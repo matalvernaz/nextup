@@ -29,14 +29,26 @@
     media registry, which probes backends on a cache miss, and a signed-out
     visitor should not be able to make this container reach out to Listenarr
     -- nor learn from how long the page took whether it is configured.
+
+    The condition used to be `discover_media() or user.is_admin`, which was
+    right while every row on it was one or the other. "Your reading accounts"
+    is neither: it belongs to whoever is signed in, and gating it behind a
+    configured backend would hide it from exactly the member it is for. So the
+    nav now renders for anybody signed in, and each row still carries its own
+    condition.
   #}
-  {% if discover_media() or user.is_admin %}
+  {% if user %}
   <nav aria-label="Sections">
     <ul>
       <li><a href="/">Search and requests</a></li>
       {% if discover_media() %}
       <li><a href="/discover">Discover</a></li>
       {% endif %}
+      {#
+        Every account, not just keyholders: what is on it is that person's own
+        reading, and there is nothing there to protect the household from.
+      #}
+      <li><a href="/account">Your reading accounts</a></li>
       {#
         Keyholders only, because it is the only thing on it they can do. A
         page that exists and cannot be reached from anywhere is a page that

@@ -268,14 +268,14 @@ RATINGS = {
 asked: list[str] = []
 
 
-def fake_rating(title, authors):
+def fake_rating(title, authors, token=None):
     asked.append(title)
     return RATINGS.get(title)
 
 
 external_books.rating = fake_rating
 external_books.cached_rating = lambda title, authors: RATINGS.get(title)
-external_books.pending = lambda title, authors: True
+external_books.pending = lambda title, authors, token=None: True
 
 rows = [
     {"title": "Panned", "authors": SANDERSON, "score": 12.0, "why": ["by Brandon Sanderson"]},
@@ -298,7 +298,7 @@ spent = engine.apply_ratings(
     budget=1)
 check.equal(spent, 0, "the budget stops at zero rather than going negative")
 
-external_books.pending = lambda title, authors: False
+external_books.pending = lambda title, authors, token=None: False
 asked.clear()
 engine.apply_ratings(
     [{"title": "Loved", "authors": SANDERSON, "score": 1.0, "why": []}],
@@ -321,7 +321,7 @@ fetches: list[str] = []
 
 
 def answering(result):
-    def fetch(title, authors):
+    def fetch(title, authors, token=None):
         fetches.append(title)
         return result
     return fetch
