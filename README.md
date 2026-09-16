@@ -216,6 +216,20 @@ it placed it under.
 | `GET` | `/api/v1/recommendations?medium=&libraryId=` | Unstarted items from this account's library, ranked |
 | `POST` | `/api/v1/want` | Ask for one thing |
 | `POST` | `/api/v1/cancel` | Take one back |
+| `POST` | `/api/v1/deleted` | Something was deleted from the library; clear what was still acquiring it |
+
+`deleted` is a report rather than an instruction. A client knows a file has
+gone; what that means — a Radarr row to remove so the next sweep does not
+download it again, a Listenarr row to drop, a ledger entry to sweep, or nothing
+at all — is worked out here. It resolves **against the acquisition tool by
+provider id**, not against this service's ledger, because most of what Radarr
+and Sonarr hold was never asked for through Nextup and a ledger-first lookup
+would clear nothing for it.
+
+Nothing is taken on the caller's word: Jellyfin is re-read for the provider id
+(`409` while it is still there, `503` while it cannot be asked), a tool row
+with no file yet is left alone, and an account still waiting on the same thing
+stops the clear outright. Files are never deleted on either side.
 
 Served on three prefixes, because a native client derives its address rather
 than being told it: `/api/v1` for an address typed in directly, `/nextup/api/v1`

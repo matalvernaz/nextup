@@ -603,6 +603,47 @@ def books(uid: str) -> list[dict]:
     return out
 
 
+def books_named(title: str) -> list[dict]:
+    """Audiobooks in the library whose name matches `title`, or [].
+
+    A targeted read where `books()` is a whole-library one. Listing every
+    audiobook to answer "is this one still here" costs 14 s and 3,700 rows;
+    `searchTerm` answers it in a fifth of a second, and the caller does its own
+    exact matching on what comes back -- Jellyfin's search is fuzzy, so this
+    narrows the field and settles nothing.
+
+    `userId` is deliberately absent. The question is whether the library still
+    holds the book, not whether one account can see it, and the play state this
+    would drag along is not wanted here.
+
+    Raised rather than empty on failure, like every other read in this file: an
+    empty answer means "gone", and reporting an outage as that is exactly the
+    mistake this module keeps making a point of not making.
+    """
+    title = title.strip()
+    libraries = library_ids("book")
+    if not title or not libraries:
+        return []
+    out: list[dict] = []
+    try:
+        with _client() as c:
+            for lib in libraries:
+                resp = c.get("/Items", params={
+                    "parentId": lib,
+                    "includeItemTypes": "AudioBook",
+                    "recursive": "true",
+                    "searchTerm": title,
+                    "fields": _BOOK_FIELDS,
+                    "limit": 200,
+                })
+                resp.raise_for_status()
+                out.extend(resp.json().get("Items") or [])
+    except (httpx.HTTPError, ValueError) as exc:
+        log.error("book search failed title=%r (%s)", title, exc)
+        raise JellyfinUnavailable(str(exc)) from exc
+    return out
+
+
 def find_playlist(uid: str, name: str) -> str | None:
     """Id of this account's playlist with that name, or None."""
     with _client() as c:
