@@ -390,6 +390,17 @@ external_books.PROVIDERS = _ORIGINALS["PROVIDERS"]
 check.equal(external_books.configured_sources(), ("openlibrary",),
             "open library needs no credential, so it is always available")
 
+# Measured against this library: where both answer, Hardcover has an order of
+# magnitude more readers behind the same book (3,669 against 165 for The Way of
+# Kings; 1,150 against 45 for Skyward). First-wins therefore has to ask it
+# first, or a household that supplied a token would only ever have it consulted
+# for the books Open Library had never heard of.
+check.equal([name for name, _ in external_books.PROVIDERS][0], "hardcover",
+            "the catalogue with the readers behind it is asked first")
+check.that(
+    "openlibrary" in external_books.configured_sources(),
+    "and the keyless one still answers, so no token is not a degraded install")
+
 os.environ["HARDCOVER_TOKEN"] = "probe-token"
 check.that("hardcover" in external_books.configured_sources(),
            "a token turns hardcover on")
