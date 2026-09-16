@@ -200,6 +200,26 @@ PRODUCT_TTL_HOURS = _int("PRODUCT_TTL_HOURS", 720)
 # Audible caps sims responses; ask for a useful spread per seed.
 SIMS_PER_SEED = _int("SIMS_PER_SEED", 10)
 
+# How long a cached TMDb recommendation list stays fresh. A week, like Audible
+# sims: the graph moves as people watch things, but not within a shelf build.
+TMDB_TTL_HOURS = _int("TMDB_TTL_HOURS", 168)
+
+# A book's community rating. Long, because it is an average over thousands of
+# readers and a month of new ones will not move it -- and because the lookup
+# that produces it is the expensive part of the shelf.
+BOOK_RATING_TTL_HOURS = _int("BOOK_RATING_TTL_HOURS", 720)
+
+# How many books one shelf build may look up for the first time.
+#
+# Not a rate limit -- a budget. Ten household accounts times forty candidates
+# times three catalogues is more lookups in one upkeep pass than Google Books
+# allows an unauthenticated address in a day, and the pass runs every six
+# hours. So each build spends this many on cold books and leaves the rest to
+# the next pass. Shelves converge over a few passes; a build that differs from
+# a fully warm one is the cache-age drift the audit already ruled is not a
+# defect, not a wrong answer.
+BOOK_RATING_LOOKUPS_PER_BUILD = _int("BOOK_RATING_LOOKUPS_PER_BUILD", 25)
+
 # How many recommendations a book shelf shows.
 MAX_SHELF = _int("MAX_SHELF", 40)
 
@@ -381,6 +401,25 @@ _SETTABLE = {
 
     "BUSKARR_URL": ("text", ""),
     "BUSKARR_API_KEY": ("text", ""),
+
+    # Recommendation sources outside the library, all optional and all dormant
+    # without their credential. Each is off by default because each needs an
+    # account somebody has to create, and a shelf built without any of them is
+    # the shelf this service has always built.
+    #
+    # TMDb: the "people who liked this also liked" graph for films and shows.
+    # Free key, registration only. Not their ratings -- Jellyfin's TMDb plugin
+    # already writes `vote_average` onto every item as `CommunityRating`.
+    "TMDB_API_KEY": ("text", ""),
+    # Google Books: a book's average rating. A key rather than the keyless
+    # form, which shares one quota across every unauthenticated caller and was
+    # measured exhausted from this address -- 429, "Quota exceeded ... for
+    # consumer project_number:624717413613" -- before a single request of ours.
+    "GOOGLE_BOOKS_API_KEY": ("text", ""),
+    # Hardcover: a book's average rating, from the catalogue with the most of
+    # them now that Goodreads and StoryGraph publish no API at all. Personal
+    # access token from an account.
+    "HARDCOVER_TOKEN": ("text", ""),
 
     "LISTENARR_URL": ("text", ""),
     "LISTENARR_QUALITY_PROFILE_ID": ("int", 1),

@@ -34,6 +34,12 @@ SIMS_SCHEMA_VERSION = 4
 # request per seed per axis to rebuild.
 PRODUCTS_SCHEMA_VERSION = 3
 
+# And again for anything cached from an outside catalogue that is not Audible:
+# TMDb's recommendation graph, and a book's community rating. Versioned apart
+# for the same reason the two above are -- reshaping one of these must not cost
+# a similarity graph that is one request per seed to rebuild.
+EXTERNAL_SCHEMA_VERSION = 1
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS requests (
     user_key     TEXT NOT NULL,
@@ -112,6 +118,11 @@ CREATE TABLE IF NOT EXISTS audible_aliases (
     source_asin  TEXT PRIMARY KEY,
     audible_asin TEXT NOT NULL,
     resolved_at  REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS external_facts (
+    cache_key   TEXT PRIMARY KEY,
+    payload     TEXT NOT NULL,
+    fetched_at  REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS shelves (
     user_key    TEXT PRIMARY KEY,
@@ -254,6 +265,8 @@ def _drop_outdated_caches(conn: sqlite3.Connection) -> None:
         ("sims_schema_version", SIMS_SCHEMA_VERSION,
          ("sims", "doc_vectors", "audible_aliases", "products")),
         ("products_schema_version", PRODUCTS_SCHEMA_VERSION, ("products",)),
+        ("external_schema_version", EXTERNAL_SCHEMA_VERSION,
+         ("external_facts",)),
     ):
         row = conn.execute("SELECT value FROM meta WHERE key=?",
                            (key,)).fetchone()
@@ -795,3 +808,36 @@ def restore(user_key: str, asin: str) -> bool:
         cur = conn.execute("DELETE FROM dismissed WHERE user_key=? AND asin=?",
                            (user_key, asin))
     return cur.rowcount > 0
+
+
+# --- outside catalogues that are not Audible ---------------------------------
+#
+# One table for all of them, keyed by a string each caller namespaces itself.
+# Separate functions per source would each need the same three lines and the
+# same TTL argument, and the shapes stored are already opaque JSON.
+
+
+def get_external(cache_key: str, ttl_hours: float):
+    """A cached answer from an outside catalogue, or None if absent or stale.
+
+    A *recorded miss* is not None. These caches store misses deliberately --
+    a book no rating source has heard of is an answer, and re-asking three
+    catalogues about it on every shelf build is what the cache exists to stop.
+    Callers tell the two apart by what they stored.
+    """
+    cutoff = time.time() - ttl_hours * 3600
+    with db() as conn:
+        row = conn.execute(
+            "SELECT payload FROM external_facts "
+            "WHERE cache_key=? AND fetched_at>?",
+            (cache_key, cutoff)).fetchone()
+    return json.loads(row["payload"]) if row else None
+
+
+def put_external(cache_key: str, payload) -> None:
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO external_facts(cache_key,payload,fetched_at) "
+            "VALUES(?,?,?) ON CONFLICT(cache_key) DO UPDATE SET "
+            "payload=excluded.payload, fetched_at=excluded.fetched_at",
+            (cache_key, json.dumps(payload), time.time()))
