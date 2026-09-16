@@ -108,17 +108,24 @@ def _main_title(title: str) -> str:
 
 
 def _surnames(authors) -> set[str]:
-    """Last words of each author name, which is the part an edition keeps.
+    """The family name out of each author string, however it is written.
 
     Catalogues disagree about initials, middle names and the order of the two,
-    and "Brandon Sanderson" against "Sanderson, Brandon" must not be a miss.
-    The surname survives all of it.
+    and "Brandon Sanderson" against "Sanderson, Brandon" must not read as two
+    different people. The surname survives all of it -- but only if the comma
+    is read first: taking the last word of "Sanderson, Brandon" gives the
+    given name, and the two forms then share nothing at all.
     """
     found = set()
     for name in authors or []:
-        words = _normalise(name).split()
+        raw = name or ""
+        # A comma in a personal name is a catalogue writing it backwards. Not
+        # split on more than the first: "Sanderson, Brandon, 1975-" is one
+        # person with a birth year attached.
+        head = raw.split(",", 1)[0] if "," in raw else raw
+        words = _normalise(head).split()
         if words:
-            found.add(words[-1])
+            found.add(words[0] if "," in raw else words[-1])
     return found
 
 
@@ -140,8 +147,10 @@ def matches(
     if found_main.split() != _main_title(wanted_title).split():
         return False
     wanted = _surnames(wanted_authors)
-    # An author nobody recorded cannot disagree, and the title test above is
-    # already exact -- so this is a second opinion rather than the only one.
+    # Only when *this* book's author is unknown does the exact title stand
+    # alone. The other way round is not symmetric: a catalogue record with no
+    # author is a thin one, and a thin record is where a junk rating lives. A
+    # wrong rating is worse than no rating, so it is refused.
     if not wanted:
         return True
     return bool(wanted & _surnames(found_authors))
