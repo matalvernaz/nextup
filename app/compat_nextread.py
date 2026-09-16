@@ -149,16 +149,33 @@ def get_shelves(force: bool = False,
 
 
 @router.get("/search")
-def get_search(q: str = "", user: jellyfin.User = Depends(caller)) -> dict:
-    """Catalogue hits for a title the listener already has in mind.
+def get_search(q: str = "", kind: str = "book",
+               user: jellyfin.User = Depends(caller)) -> dict:
+    """Catalogue hits for a title, an author, or a whole series.
 
     Owned books are marked, not dropped: on the shelf an owned book is noise,
     but to somebody typing its title it is the answer.
+
+    `kind` is two values and not three. A keyword search already matches an
+    author -- "Brandon Sanderson" answers with his books, measured against the
+    live catalogue -- so title and author are one search and offering them as
+    two choices would be offering the same thing twice. A series is the one
+    thing the keyword search genuinely cannot find, because a series is not a
+    product in the catalogue and has to be resolved and then planned against
+    the library.
+
+    Defaults to books, so a client that predates this sends no `kind` and gets
+    exactly what it got before.
     """
+    if kind == series.SERIES_KIND:
+        results = series.search_rows(user, q)
+    else:
+        results = search.search(user, q)
     return {
         "version": LEGACY_PROTOCOL,
         "query": q.strip(),
-        "results": search.search(user, q),
+        "kind": kind,
+        "results": results,
     }
 
 

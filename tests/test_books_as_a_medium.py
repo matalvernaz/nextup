@@ -23,7 +23,7 @@ harness.setup(LISTENARR_URL="http://listenarr.invalid:4545",
               BOOK_DAILY_CAP="2")
 
 from app import backends, buskarr, jellyfin, media, store, wants  # noqa: E402
-from app.books import adapter  # noqa: E402
+from app.books import adapter, series as book_series  # noqa: E402
 
 check = harness.Check("books as a medium")
 store.init()
@@ -171,11 +171,13 @@ check.equal(consulted, [],
             "and an account with no book request pays nothing for one")
 
 # --- the series row says what state the series is in -------------------------
-check.equal(adapter._series_detail(have=3, on_order=0, missing=0),
+# Lives on `series` rather than the adapter: both search routes put this same
+# row on screen, and a second copy is a second wording to drift.
+check.equal(book_series.state_sentence(have=3, on_order=0, missing=0),
             "You already have all 3 that Audible lists.",
             "a complete series says so")
-check.that("2 to ask for" in adapter._series_detail(have=3, on_order=1,
-                                                    missing=2),
+check.that("2 to ask for" in book_series.state_sentence(have=3, on_order=1,
+                                                        missing=2),
            "and an incomplete one says how much is left")
 
 harness.cleanup()
