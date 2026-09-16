@@ -381,6 +381,21 @@ def cached_rating(title: str, authors) -> Rating | None:
     return None
 
 
+def pending(title: str, authors) -> bool:
+    """Whether asking would cost a request.
+
+    True when at least one configured catalogue has nothing fresh cached for
+    this book. Lets a shelf build tell "nobody has rated it" -- already known,
+    free -- from "nobody has asked yet", which is what the budget is for. A
+    cached miss must not be re-bought on every pass.
+    """
+    configured = set(configured_sources())
+    for name, _ in PROVIDERS:
+        if name in configured and not _cached(name, title, authors).answered:
+            return True
+    return False
+
+
 def rating(title: str, authors) -> Rating | None:
     """This book's community rating, fetching what is not already cached.
 

@@ -435,7 +435,11 @@ def recommendation_items_for_user(
     item_type = {"movie": "Movie", "series": "Series"}.get(medium)
     if not item_type:
         return []
-    fields = "Genres,People,Studios,CommunityRating,DateCreated,UserData"
+    # ProviderIds rides along so the ranker can ask TMDb what else people who
+    # liked this watched. One extra field on a request already being made, not
+    # a second pass: asking per item would be one round trip per seed.
+    fields = ("Genres,People,Studios,CommunityRating,DateCreated,UserData,"
+              "ProviderIds")
     found: dict[str, dict] = {}
     try:
         with _client() as c:

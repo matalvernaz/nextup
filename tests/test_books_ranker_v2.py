@@ -14,6 +14,11 @@ harness.discard(DB_PATH)
 from app import config, jellyfin, listenarr
 from app.books import engine, store
 
+# This file is about how the ranker weighs series, authors and similarity. A
+# community rating is a separate signal with its own tests; left live it would
+# reorder these fixtures from three public catalogues.
+harness.no_book_ratings()
+
 store.init()
 
 
