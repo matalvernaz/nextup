@@ -192,6 +192,28 @@ check.equal((rows[0].title, rows[0].year), ("Dune", "2021"),
             "a Letterboxd export's Name column is the film's title, and its "
             "Date column is not mistaken for the year")
 
+sequel = imports.read("Title,Year\n"
+                      "Mission: Impossible - Dead Reckoning Part One,2023\n")
+rows, _, _ = imports.rows(sequel, media.MOVIE, "movie")
+check.equal((rows[0].title, rows[0].artist),
+            ("Mission: Impossible - Dead Reckoning Part One", ""),
+            "a film's title is never split on ' - ': only music writes a "
+            "credit into the title that way, and a film does not have one")
+
+remakes = imports.read("Title,Year\nDune,1984\nDune,2021\n")
+rows, dupes, _ = imports.rows(remakes, media.MOVIE, "movie")
+check.equal([(r.title, r.year) for r in rows], [("Dune", "1984"),
+                                                ("Dune", "2021")],
+            "two films of one name in different years are two rows, not a row "
+            "and a duplicate")
+check.equal(dupes, 0, "and neither is reported as ignored")
+
+utf16 = "Artist\tAlbum\nMiles Davis\tKind of Blue\n".encode("utf-16")
+rows, _, _ = imports.rows(imports.read(utf16), media.MUSIC, "album")
+check.equal((rows[0].artist, rows[0].title), ("Miles Davis", "Kind of Blue"),
+            "and Excel's 'Unicode Text' export, which is UTF-16 with a byte "
+            "order mark, is read rather than decoded into interleaved nulls")
+
 accented = "Artist,Album\nSigur Rós,Ágætis byrjun\n".encode("cp1252")
 rows, _, _ = imports.rows(imports.read(accented), media.MUSIC, "album")
 check.equal(rows[0].artist, "Sigur Rós",

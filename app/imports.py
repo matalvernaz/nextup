@@ -135,14 +135,25 @@ class Sheet:
 def _decode(data: bytes | str) -> str:
     """Text out of an upload, whatever a spreadsheet saved it as.
 
-    UTF-8 with the byte-order mark Excel writes, then Windows-1252, which is
-    what "CSV (Comma delimited)" produces on an English Windows and which
-    decodes an accented name as mojibake under UTF-8 rather than failing. Last
-    resort replaces the bytes it cannot read: a file that is 99% legible
-    should import 99% of its rows, not none of them.
+    UTF-16 on its byte-order mark, then UTF-8 with the mark Excel writes, then
+    Windows-1252, which is what "CSV (Comma delimited)" produces on an English
+    Windows and which decodes an accented name as mojibake under UTF-8 rather
+    than failing. Last resort replaces the bytes it cannot read: a file that is
+    99% legible should import 99% of its rows, not none of them.
+
+    UTF-16 is decided on the mark alone and tried first because it is what
+    Excel's "Unicode Text" export writes -- exactly the file a spreadsheet
+    person hands over -- and cp1252 below will decode it without complaining
+    into every character interleaved with a null. A guess that reached that
+    line would produce nonsense instead of an error.
     """
     if isinstance(data, str):
         return data.lstrip("﻿")
+    if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        try:
+            return data.decode("utf-16")
+        except UnicodeDecodeError:
+            pass
     for encoding in ("utf-8-sig", "cp1252"):
         try:
             return data.decode(encoding)
@@ -315,11 +326,23 @@ def rows(sheet: Sheet, medium: str, unit: str) -> tuple[list[Row], int, int]:
             continue
         # A list with no columns writes the credit into the title: "Bill
         # Withers - Lovely Day". Only split where there is no artist column to
-        # contradict, and never for a unit that has no credit of its own.
-        if not artist and unit != "artist" and _PLAIN_SPLIT in title:
+        # contradict, never for a unit that has no credit of its own, and
+        # never outside music -- a film's title is allowed to contain " - "
+        # and nothing else is hiding in front of it. Without that last
+        # condition "Mission: Impossible - Dead Reckoning Part One" is asked
+        # for as a film called "Dead Reckoning Part One" by somebody called
+        # "Mission: Impossible", and films are matched without a credit, so a
+        # same-named hit would tick itself.
+        if (medium == media.MUSIC and not artist and unit != "artist"
+                and _PLAIN_SPLIT in title):
             artist, _, title = title.partition(_PLAIN_SPLIT)
             artist, title = artist.strip(), title.strip()
-        key = (_key(artist), _key(title))
+        year = _year_of(cell(year_at))
+        # The year is part of what makes two rows different, not decoration on
+        # one of them: a film list holding Dune 1984 and Dune 2021 is two
+        # films, and a key without the year keeps one of them and reports the
+        # other as a duplicate somebody never sees again.
+        key = (_key(artist), _key(title), year)
         if key in seen:
             duplicates += 1
             continue
@@ -558,10 +581,14 @@ def _read_through(import_id: str, user: jellyfin.User, medium: str, unit: str,
                                                 "this file. Nothing was asked "
                                                 "for."})
             return
+        # Inside the try, not after it. Out there a failing write leaves the
+        # batch reading forever, and the only thing that would ever move it is
+        # the fifteen-minute stale clock -- which would call a finished match
+        # an interrupted one.
+        _close(import_id, READY, {"rows": matched})
+        log.info("import %s read: %s", import_id, _tally(matched))
     finally:
         _turn.release()
-    _close(import_id, READY, {"rows": matched})
-    log.info("import %s read: %s", import_id, _tally(matched))
 
 
 def _tally(matched: list[dict]) -> str:

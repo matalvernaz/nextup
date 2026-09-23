@@ -70,7 +70,7 @@ import cannot do what a person sitting at the search box could not.
 Headings are recognised rather than guessed at, which means a file straight out
 of Spotify (`Track Name`, `Artist Name(s)`), Letterboxd (`Name`, `Year`) or a
 spreadsheet somebody typed all work, in any column order, separated by commas,
-semicolons or tabs. A list with no headings at all works too, one thing per
+semicolons or tabs, in UTF-8, UTF-16 or Windows-1252. A list with no headings at all works too, one thing per
 line; for music, `Artist - Title` is read apart. A file whose headings name
 nothing recognisable is refused with the names that would have worked, rather
 than being guessed at — the cost of guessing here is a download of the wrong
