@@ -113,6 +113,35 @@ CREATE TABLE IF NOT EXISTS user_settings (
     PRIMARY KEY (user_key, name)
 );
 
+-- A list somebody uploaded, part way between arriving and being asked for.
+--
+-- In SCHEMA rather than BOOK_SCHEMA even though every row of it is
+-- disposable: a version bump DROPS everything in that one, and the thing this
+-- holds is a file a person is in the middle of importing. Losing a cache
+-- costs seconds; losing this loses a five-hundred-row match they waited for
+-- and have not yet looked at.
+--
+-- `payload` is the whole batch as JSON -- the parsed rows, what each matched,
+-- and afterwards what became of each request. One blob rather than a table of
+-- rows because nothing ever queries inside it: it is written once by the
+-- matching pass, read whole by the page, and deleted. `done` is out here on
+-- its own because it is the one field that changes while somebody is watching,
+-- and rewriting the blob per row to move a counter is five hundred writes of
+-- everything to record one number.
+CREATE TABLE IF NOT EXISTS imports (
+    import_id  TEXT PRIMARY KEY,
+    user_key   TEXT NOT NULL,
+    medium     TEXT NOT NULL,
+    state      TEXT NOT NULL,
+    done       INTEGER NOT NULL DEFAULT 0,
+    total      INTEGER NOT NULL DEFAULT 0,
+    payload    TEXT NOT NULL DEFAULT '{}',
+    created_at REAL NOT NULL,
+    touched_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS imports_by_user
+    ON imports(user_key, created_at);
+
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -973,3 +1002,59 @@ def accounts_with_setting(name: str) -> int:
             "SELECT COUNT(*) AS n FROM user_settings WHERE name=?",
             (name,)).fetchone()
     return int(row["n"]) if row else 0
+
+
+# --------------------------------------------------------------------------
+# Imported lists
+# --------------------------------------------------------------------------
+
+def put_import(import_id: str, user_key: str, medium: str, state: str,
+               total: int, payload) -> None:
+    """Write down a list somebody has just uploaded."""
+    now = time.time()
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO imports (import_id, user_key, medium, state, done, "
+            "total, payload, created_at, touched_at) VALUES (?,?,?,?,0,?,?,?,?)",
+            (import_id, user_key, medium, state, total,
+             json.dumps(payload), now, now))
+
+
+def get_import(import_id: str) -> sqlite3.Row | None:
+    with db() as conn:
+        return conn.execute("SELECT * FROM imports WHERE import_id=?",
+                            (import_id,)).fetchone()
+
+
+def touch_import(import_id: str, done: int) -> None:
+    """Say how many rows of a running import are behind it.
+
+    `touched_at` moves with it, which is what tells a later reader the
+    difference between a pass still working and one whose container was
+    restarted out from under it.
+    """
+    with db() as conn:
+        conn.execute("UPDATE imports SET done=?, touched_at=? WHERE import_id=?",
+                     (done, time.time(), import_id))
+
+
+def close_import(import_id: str, state: str, payload) -> None:
+    """Move an import into its next state, with whatever it worked out."""
+    with db() as conn:
+        conn.execute(
+            "UPDATE imports SET state=?, payload=?, touched_at=? "
+            "WHERE import_id=?",
+            (state, json.dumps(payload), time.time(), import_id))
+
+
+def prune_imports(before: float) -> int:
+    """Forget imports older than a cutoff. Returns how many went.
+
+    They are somebody's uploaded file and there is no reason to keep one after
+    it has been acted on -- but they are deleted on a clock rather than on
+    completion, because the report of what was asked for is the most useful
+    page in the feature and it should survive being closed and reopened.
+    """
+    with db() as conn:
+        cur = conn.execute("DELETE FROM imports WHERE created_at < ?", (before,))
+    return cur.rowcount

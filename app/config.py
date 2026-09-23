@@ -320,6 +320,35 @@ MUSIC_ARTIST_COST = _int("MUSIC_ARTIST_COST", 3)
 MUSIC_ALBUM_COST = _int("MUSIC_ALBUM_COST", 1)
 MUSIC_TRACK_COST = _int("MUSIC_TRACK_COST", 1)
 
+# The most rows one uploaded list may hold. Not a technical limit: every row
+# is a catalogue search, so a file ten times this size is an hour of somebody
+# else's rate limit spent before a person sees anything to tick. Splitting a
+# long list is a minute's work and is asked for rather than guessed at.
+IMPORT_MAX_ROWS = _int("IMPORT_MAX_ROWS", 500)
+
+# And the most bytes, read before the file is parsed. A CSV of the row limit
+# above is tens of kilobytes; anything near this is not the kind of file this
+# is for, and finding that out by decoding it is the expensive way.
+IMPORT_MAX_BYTES = _int("IMPORT_MAX_BYTES", 2_000_000)
+
+# Between one row's catalogue search and the next. These land on third-party
+# catalogues -- Deezer, MusicBrainz, iTunes, Audible -- and the way to find
+# out where their rate limits are is to send five hundred queries at machine
+# speed. Set it to 0 to import as fast as the network allows.
+IMPORT_PAUSE_SECONDS = float(_text("IMPORT_PAUSE_SECONDS", "0.4"))
+
+# How long a running import may go without finishing a row before it is
+# assumed dead. A container restarted mid-pass leaves a batch nothing will
+# ever move again, and a page that says "still working" forever is worse than
+# one that says it stopped.
+IMPORT_STALE_SECONDS = _int("IMPORT_STALE_SECONDS", 900)
+
+# How long an imported list is kept afterwards. The report of what was asked
+# for is the most useful page in the feature, so it outlives the visit that
+# produced it -- but it is a copy of somebody's file and there is no reason to
+# hold one for a week.
+IMPORT_RETENTION_HOURS = _int("IMPORT_RETENTION_HOURS", 48)
+
 # How long a request stays on the list after its media arrived. An arrival is
 # the news, and a row that vanishes the moment it lands can only be noticed by
 # its absence.

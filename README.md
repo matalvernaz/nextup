@@ -53,6 +53,29 @@ Every row says why it is there.
 Music is the one medium with no recommendations; there it is search and request
 only.
 
+### Import a list
+
+`/import` takes a CSV of what somebody else has — the albums on their shelf, a
+playlist exported from a streaming service, their films — and turns it into
+requests. In two steps, and never in one.
+
+Uploading acquires nothing. Every row is looked up in the same catalogue the
+search box uses, and the answer is a page of what each one matched: the exact
+matches ticked, the near misses shown unticked beside the closest thing the
+catalogue had, and separate lists of what is already here and what matched
+nothing at all. Only the second step, on the rows still ticked, asks for
+anything — one ordinary request each, against the same daily allowance, so an
+import cannot do what a person sitting at the search box could not.
+
+Headings are recognised rather than guessed at, which means a file straight out
+of Spotify (`Track Name`, `Artist Name(s)`), Letterboxd (`Name`, `Year`) or a
+spreadsheet somebody typed all work, in any column order, separated by commas,
+semicolons or tabs, in UTF-8, UTF-16 or Windows-1252. A list with no headings at all works too, one thing per
+line; for music, `Artist - Title` is read apart. A file whose headings name
+nothing recognisable is refused with the names that would have worked, rather
+than being guessed at — the cost of guessing here is a download of the wrong
+thing.
+
 A shelf is never built while you wait. The first film shelf on a large library
 is around twelve seconds of Jellyfin, so the page says it is working on it and
 has the shelf on the next load. After that it is instant for an hour, and
@@ -217,6 +240,9 @@ it placed it under.
 | `POST` | `/api/v1/want` | Ask for one thing |
 | `POST` | `/api/v1/cancel` | Take one back |
 | `POST` | `/api/v1/deleted` | Something was deleted from the library; clear what was still acquiring it |
+| `POST` | `/api/v1/import` | Hand over a whole list as text; it is matched, and nothing is asked for |
+| `GET` | `/api/v1/import/{id}` | How far that list has got, and what each row matched |
+| `POST` | `/api/v1/import/{id}/confirm` | Ask for the lines somebody chose |
 
 `deleted` is a report rather than an instruction. A client knows a file has
 gone; what that means — a Radarr row to remove so the next sweep does not
@@ -225,6 +251,13 @@ at all — is worked out here. It resolves **against the acquisition tool by
 provider id**, not against this service's ledger, because most of what Radarr
 and Sonarr hold was never asked for through Nextup and a ledger-first lookup
 would clear nothing for it.
+
+`import` takes the file as text rather than rows a client has already parsed.
+Comma quoting, byte-order marks and delimiter sniffing are done once, here, in
+the same code the web page uses — two parsers disagreeing about one file is a
+bug nobody can reproduce. It is two calls on purpose: the first acquires
+nothing and answers with what every row matched, the second asks for the line
+numbers a person ticked. `capabilities` reports `importList`.
 
 Nothing is taken on the caller's word: Jellyfin is re-read for the provider id
 (`409` while it is still there, `503` while it cannot be asked), a tool row

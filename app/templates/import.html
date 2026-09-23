@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+{% block title %}Import a list — Nextup{% endblock %}
+{% block main %}
+
+<h2>Import a list</h2>
+
+{% if not media %}
+<p>No acquisition tool is configured, so there is nothing this server can be
+asked for yet. There is nowhere for a list to go.</p>
+{% else %}
+
+<p>Somebody hands you a spreadsheet of what they have — the albums on their
+shelf, a playlist exported from a streaming service, their films. Upload it
+here and every row is looked up in the catalogue.</p>
+
+<p><strong>Nothing is asked for yet.</strong> When the looking-up has
+finished you get a list of what each row matched, with the exact matches
+ticked and the near-misses left for you to decide about. Only then is
+anything requested.</p>
+
+<form method="post" action="/import" enctype="multipart/form-data">
+  <fieldset>
+    <legend>The list</legend>
+    <p>
+      <label for="medium">What these are</label><br>
+      <select id="medium" name="medium">
+        {% for m in media %}
+        <option value="{{ m.key }}">{{ m.label }}</option>
+        {% endfor %}
+      </select>
+    </p>
+    {#
+      Only meaningful for music, which is the one medium with three units, and
+      shown whenever music is on offer because a form with no script cannot
+      know which medium the select above is sitting on. The default asks the
+      file: a column called Track Name is a list of songs, and saying so twice
+      is a chance to disagree with yourself.
+    #}
+    {% if media | selectattr('key', 'equalto', 'music') | first %}
+    <fieldset>
+      <legend>If these are music, what are they?</legend>
+      <p>
+        <input type="radio" id="unit-guess" name="unit" value="" checked>
+        <label for="unit-guess">Work it out from the column headings</label>
+      </p>
+      <p>
+        <input type="radio" id="unit-album" name="unit" value="album">
+        <label for="unit-album">Albums</label>
+      </p>
+      <p>
+        <input type="radio" id="unit-track" name="unit" value="track">
+        <label for="unit-track">Tracks</label>
+      </p>
+      <p>
+        <input type="radio" id="unit-artist" name="unit" value="artist">
+        <label for="unit-artist">Artists — every one is a whole discography</label>
+      </p>
+    </fieldset>
+    {% endif %}
+    <p>
+      <label for="listing">A CSV file</label><br>
+      <input type="file" id="listing" name="listing" accept=".csv,.tsv,.txt,text/csv,text/plain">
+    </p>
+    <p>
+      <label for="pasted">Or paste the list here instead</label><br>
+      <textarea id="pasted" name="pasted" rows="8" cols="60"></textarea>
+    </p>
+    <p><button type="submit">Read this list</button></p>
+  </fieldset>
+</form>
+
+<h3>What the file should look like</h3>
+
+<p>A heading row, and a column this recognises the name of. These all work,
+whatever order the columns are in and whether they are separated by commas,
+semicolons or tabs:</p>
+
+<ul>
+  <li>Music: <span class="example">Artist, Album</span> or
+    <span class="example">Artist Name(s), Track Name</span> — which is what
+    a Spotify playlist export gives you.</li>
+  <li>Films and series: <span class="example">Title, Year</span>, or
+    <span class="example">Name, Year</span> — which is what a Letterboxd
+    export gives you.</li>
+  <li>Books: <span class="example">Title, Author</span>.</li>
+</ul>
+
+<p>A list with no headings at all works too, as long as it is one thing per
+line and nothing else. For music, write it
+<span class="example">Artist - Title</span> and the two are read apart.</p>
+
+<p>Up to {{ max_rows }} rows at a time. Anything the catalogue has no record
+of is reported rather than dropped, so a row that goes missing is one you can
+see.</p>
+
+<h3>What it will spend</h3>
+
+<p>Every row that is asked for is an ordinary request against your daily
+allowance, exactly as though you had searched for it and pressed the button.
+{% for m in media %}
+{%- set left = allowance.get(m.key) -%}
+{{ m.label }}: {% if left is none %}no limit{% else %}{{ left }} left today{% endif %}.
+{% endfor %}</p>
+
+{% endif %}
+
+{% endblock %}
