@@ -18,14 +18,14 @@ from contextlib import asynccontextmanager
 from urllib.parse import quote, urlsplit
 
 import httpx
-from fastapi import FastAPI, Form, Request, Response
+from fastapi import FastAPI, File, Form, Request, Response, UploadFile
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import (api, backends, compat_nextread, config, jellyfin, logs, media,
-               recommendations, selfcheck, sessions, settings, setup, store,
-               throttle, wants)
+from . import (api, backends, compat_nextread, config, imports, jellyfin,
+               logs, media, recommendations, selfcheck, sessions, settings,
+               setup, store, throttle, wants)
 from .books import hardcover_shelf
 from .books import shelves as book_shelves
 from .books import store as book_store
@@ -129,6 +129,11 @@ templates = Jinja2Templates(directory="app/templates")
 # it is one page that says everything is fine while nothing is.
 templates.env.globals["credential_rejected"] = (
     lambda: jellyfin.credential_rejected(force=False))
+
+# Whether to draw the link to the list importer. Anything at all that can be
+# asked for is enough: importing does not need a ranker, only somewhere to
+# send a request.
+templates.env.globals["can_import"] = lambda: bool(media.available())
 
 # Whether to draw the link to Discover at all. An installation with no
 # rankable library should not be offered a page that has nothing on it.
@@ -777,6 +782,118 @@ def post_cancel(request: Request, medium: str = Form(...),
         return _back(medium, f"Nextup could not work out who you are. {exc}")
     _, message = wants.cancel(user, medium, item_key)
     return _back(medium, message)
+
+
+@app.get("/import", response_class=HTMLResponse)
+def get_import(request: Request, msg: str = ""):
+    """The form that takes somebody else's list."""
+    try:
+        user = viewer(request)
+    except LookupError as exc:
+        return _signin_page(request, detail=str(exc), status=401)
+    offered = media.available()
+    return templates.TemplateResponse(
+        request=request, name="import.html",
+        context={"user": user, "media": list(offered.values()),
+                 "message": msg, "max_rows": config.IMPORT_MAX_ROWS,
+                 "allowance": {key: wants.allowance(user, key)
+                               for key in offered}})
+
+
+@app.post("/import")
+async def post_import(request: Request, medium: str = Form(...),
+                      unit: str = Form(""),
+                      pasted: str = Form(""),
+                      listing: UploadFile | None = File(default=None)):
+    """Read an uploaded list and start matching it.
+
+    A file or a pasted block, whichever arrived. Pasting exists because the
+    commonest small list is half a dozen lines somebody sent in a message, and
+    saving that to a file first to upload it is a step with nothing in it.
+    """
+    try:
+        user = viewer(request)
+    except LookupError as exc:
+        return _signin_page(request, detail=str(exc), status=401)
+    data: bytes | str = pasted
+    filename = ""
+    if listing is not None and listing.filename:
+        filename = listing.filename
+        # Read with the limit in hand rather than into memory first: the form
+        # is reachable by anybody signed in, and `await read()` on an
+        # unbounded upload is the one place this service would hold a whole
+        # file it had not agreed to.
+        data = await listing.read(config.IMPORT_MAX_BYTES + 1)
+    if not data:
+        return RedirectResponse(
+            url="/import?msg=" + quote("Choose a file, or paste a list."),
+            status_code=303)
+    try:
+        import_id = imports.start(user, medium, unit, filename, data)
+    except imports.Unreadable as exc:
+        return RedirectResponse(url="/import?msg=" + quote(str(exc)),
+                                status_code=303)
+    return RedirectResponse(url=f"/import/{import_id}", status_code=303)
+
+
+@app.get("/import/{import_id}", response_class=HTMLResponse)
+def get_import_batch(request: Request, import_id: str, msg: str = ""):
+    """One list: still being read, waiting to be ticked, or reported on."""
+    try:
+        user = viewer(request)
+    except LookupError as exc:
+        return _signin_page(request, detail=str(exc), status=401)
+    batch = imports.get(user, import_id)
+    if batch is None:
+        return RedirectResponse(
+            url="/import?msg=" + quote("That list is no longer here."),
+            status_code=303)
+    ready = batch["state"] == imports.READY
+    grouped = imports.groups(batch)
+    lines = {row["line"] for row in grouped[imports.MATCHED]}
+    return templates.TemplateResponse(
+        request=request, name="import_batch.html",
+        context={
+            "user": user, "batch": batch, "groups": grouped,
+            "message": msg,
+            "medium_label": (media.get(batch["medium"]) or
+                             media.Medium(batch["medium"], batch["medium"],
+                                          (), 0, ())).label,
+            # Only worth working out where there is a button to press.
+            "covered": imports.affordable(user, batch, lines) if ready else 0,
+            "ticked": len(lines),
+            "hit_label": imports.hit_label,
+            "states": {"matched": imports.MATCHED, "uncertain": imports.UNCERTAIN,
+                       "held": imports.HELD, "missing": imports.MISSING},
+        })
+
+
+@app.post("/import/{import_id}/confirm")
+async def post_import_confirm(request: Request, import_id: str):
+    """Ask for the ticked rows.
+
+    The ticks are read from the raw form rather than declared as a parameter
+    because a checkbox that is not ticked sends nothing at all, so the field
+    is absent on a form where somebody unticked every row -- which FastAPI
+    would refuse as a missing parameter rather than treat as "none of them".
+    """
+    try:
+        user = viewer(request)
+    except LookupError as exc:
+        return _signin_page(request, detail=str(exc), status=401)
+    form = await request.form()
+    lines = {int(value) for value in form.getlist("line")
+             if str(value).isdigit()}
+    if not lines:
+        return RedirectResponse(
+            url=f"/import/{import_id}?msg=" + quote(
+                "Nothing was ticked, so nothing was asked for."),
+            status_code=303)
+    if imports.confirm(user, import_id, lines) is None:
+        return RedirectResponse(
+            url="/import?msg=" + quote("That list is no longer here."),
+            status_code=303)
+    return RedirectResponse(url=f"/import/{import_id}", status_code=303)
 
 
 BOOK = "book"

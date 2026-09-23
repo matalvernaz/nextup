@@ -41,6 +41,14 @@
   <nav aria-label="Sections">
     <ul>
       <li><a href="/">Search and requests</a></li>
+      {#
+        Only where there is somewhere for a list to go. On an installation
+        with no acquisition tool configured the page draws, explains itself
+        and can do nothing, which is a row in the nav that wastes a visit.
+      #}
+      {% if can_import() %}
+      <li><a href="/import">Import a list</a></li>
+      {% endif %}
       {% if discover_media() %}
       <li><a href="/discover">Discover</a></li>
       {% endif %}

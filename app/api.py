@@ -20,7 +20,7 @@ from threading import Lock
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query
 
-from . import (config, describarr, gone, jellyfin, logs, media,
+from . import (config, describarr, gone, imports, jellyfin, logs, media,
                recommendations, store, wants)
 
 log = logs.get("api")
@@ -200,6 +200,15 @@ def capabilities(protocol: int = 1,
         # no acquisition tool at all has nothing to clear, and a client told
         # false says nothing about it rather than offering a no-op.
         "deleted": {"supported": gone.supported()},
+        # Whether a whole list can be handed over at once. Additive, and true
+        # wherever anything at all can be asked for -- importing needs
+        # somewhere to send a request and nothing else.
+        #
+        # `importList` rather than `import`, which is a keyword in Python and
+        # in Swift both: a JSON key that cannot be spelled as a field name is
+        # an irritation in every client that reads it.
+        "importList": {"supported": bool(offered),
+                       "maxRows": config.IMPORT_MAX_ROWS},
         "recommendations": {
             "media": recommendation_media,
         },
@@ -571,3 +580,81 @@ def post_cancel(user: jellyfin.User = Depends(caller),
     return {"medium": medium, "itemKey": item_key, "removed": True,
             "message": message,
             "remainingToday": wants.allowance(user, medium)}
+
+
+@router.post("/import")
+def post_import(user: jellyfin.User = Depends(caller),
+                medium: str = Body(..., embed=True),
+                text: str = Body(..., embed=True),
+                unit: str = Body("", embed=True),
+                filename: str = Body("", embed=True)) -> dict:
+    """Read a list somebody has, and start matching it against the catalogue.
+
+    The whole file as text, not rows a client has parsed. A native app that
+    lets somebody pick a CSV out of their documents has the bytes in its hand
+    and nothing to gain from implementing comma quoting, byte-order marks and
+    delimiter sniffing a second time in another language -- and two parsers
+    disagreeing about one file is a bug nobody can reproduce.
+
+    Nothing is acquired here. This answers with what each row matched, and a
+    second call confirms the ones a person has chosen. See `app/imports.py`.
+    """
+    try:
+        import_id = imports.start(user, medium, unit, filename, text)
+    except imports.Unreadable as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log.info("api import %s user=%s medium=%s", import_id, user.key, medium)
+    return _import_state(user, import_id)
+
+
+@router.get("/import/{import_id}")
+def get_import(import_id: str,
+               user: jellyfin.User = Depends(caller)) -> dict:
+    """How far one list has got, and what each of its rows matched."""
+    return _import_state(user, import_id)
+
+
+@router.post("/import/{import_id}/confirm")
+def post_import_confirm(import_id: str,
+                        user: jellyfin.User = Depends(caller),
+                        lines: list[int] = Body(..., embed=True)) -> dict:
+    """Ask for the rows whose line numbers these are.
+
+    Line numbers rather than item keys, because a line is what the person
+    looking at the list chose and an item key is what this service matched it
+    to. Sending the key back would let a client ask for something the review
+    it was shown never offered.
+    """
+    if imports.confirm(user, import_id, set(lines)) is None:
+        raise HTTPException(status_code=404, detail="No such list.")
+    return _import_state(user, import_id)
+
+
+def _import_state(user: jellyfin.User, import_id: str) -> dict:
+    """One list, in the shape a client reads.
+
+    `rows` is sent whole rather than grouped. A client's grouping is its own
+    business -- EchoFin has one screen per section and the web page has four
+    headings on one -- and the state on each row is what both are built from.
+    """
+    batch = imports.get(user, import_id)
+    if batch is None:
+        raise HTTPException(status_code=404, detail="No such list.")
+    return {
+        "version": config.API_VERSION,
+        "importId": batch["id"],
+        "medium": batch["medium"],
+        "unit": batch["unit"],
+        "filename": batch["filename"],
+        # `reading` and `asking` are the two states worth asking about again;
+        # a client polls on those and stops on the rest.
+        "state": batch["state"],
+        "done": batch["done"],
+        "total": batch["total"],
+        "duplicates": batch.get("duplicates", 0),
+        "blanks": batch.get("blanks", 0),
+        "rows": batch.get("rows", []),
+        "report": batch.get("report"),
+        "error": batch.get("error"),
+        "remainingToday": wants.allowance(user, batch["medium"]),
+    }
