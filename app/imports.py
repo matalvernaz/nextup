@@ -312,7 +312,7 @@ def rows(sheet: Sheet, medium: str, unit: str) -> tuple[list[Row], int, int]:
     year_at = sheet.roles.get("year")
 
     found: list[Row] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str]] = set()
     duplicates = 0
     blanks = 0
     for index, row in enumerate(sheet.rows):
