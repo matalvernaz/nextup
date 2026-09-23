@@ -183,5 +183,29 @@ check.that("Kind of Blue by Miles Davis — already asked for" in page.text,
 check.that('name="line"' not in page.text,
            "so there is no tick box on it at all")
 
+# --- the two states nobody can hold still long enough to look at -----------
+# `asking` lasts as long as the requests take and `failed` needs a container
+# to be restarted mid-pass, so both are written straight into the store. They
+# are pages a person will see on a bad day, and a template that raises on one
+# of them would never be found any other way.
+store.put_import("half-way", MATT.id, "music", imports.ASKING, 9,
+                 {"medium": "music", "unit": "album",
+                  "filename": "long.csv", "rows": [], "chosen": 7})
+store.touch_import("half-way", 4)
+page = client.get("/import/half-way")
+check.equal(page.status_code, 200, "a list part way through asking renders")
+check.that("4 of 7 sent so far" in page.text,
+           "saying how far it has got in things, not in a percentage")
+
+store.put_import("stopped", MATT.id, "music", imports.FAILED, 9,
+                 {"medium": "music", "unit": "album", "filename": "long.csv",
+                  "rows": [], "error": "The service was restarted."})
+page = client.get("/import/stopped")
+check.equal(page.status_code, 200, "so does one that stopped")
+check.that("The service was restarted." in page.text
+           and 'role="alert"' in page.text,
+           "with the reason announced rather than left on the page to be "
+           "found")
+
 harness.cleanup()
 raise SystemExit(check.report())
