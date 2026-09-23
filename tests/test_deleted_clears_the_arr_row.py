@@ -36,7 +36,7 @@ check = harness.Check("deleted")
 
 store.init()
 
-USER = jellyfin.User(id="u1", name="matt", is_admin=False)
+USER = jellyfin.User(id="u1", name="matt", is_admin=True)
 OTHER = jellyfin.User(id="u2", name="alex", is_admin=False)
 
 MOVIE = {"itemId": "jf-1", "type": "Movie", "name": "The 5th Wave",

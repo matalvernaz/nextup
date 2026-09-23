@@ -68,6 +68,8 @@ asked for yet.</p>
   <li>
     <h4>{{ r.title }}{% if r.year %} ({{ r.year }}){% endif %}</h4>
     {% if r.artist and r.unit != 'artist' %}<p>By {{ r.artist }}.</p>{% endif %}
+    {% if r.album %}<p>From {{ r.album }}.</p>{% endif %}
+    {% if r.durationSeconds %}<p>{{ (r.durationSeconds / 60) | int }} minutes {{ (r.durationSeconds % 60) | int }} seconds.</p>{% endif %}
     {% if r.narrators %}<p>Read by {{ r.narrators | join(', ') }}.</p>{% endif %}
     {% if r.seasonCount %}<p>{{ r.seasonCount }} season{{ '' if r.seasonCount == 1 else 's' }}{% if r.network %}, {{ r.network }}{% endif %}.</p>{% endif %}
     {% if r.trackCount %}<p>{{ r.trackCount }} tracks.</p>{% endif %}
@@ -86,6 +88,8 @@ asked for yet.</p>
       <input type="hidden" name="title" value="{{ r.title }}">
       <input type="hidden" name="year" value="{{ r.year | default('') }}">
       <input type="hidden" name="artist" value="{{ r.artist | default('') }}">
+      <input type="hidden" name="album" value="{{ r.album | default('') }}">
+      {% if r.durationSeconds %}<input type="hidden" name="durationSeconds" value="{{ r.durationSeconds }}">{% endif %}
       <input type="hidden" name="source" value="{{ r.source | default('') }}">
       <input type="hidden" name="ref" value="{{ r.ref | default('') }}">
       {#

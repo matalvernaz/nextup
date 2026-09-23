@@ -23,7 +23,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import (api, backends, compat_nextread, config, imports, jellyfin,
+from . import (api, arr, backends, compat_nextread, config, imports, jellyfin,
                logs, media, recommendations, selfcheck, sessions, settings,
                setup, store, throttle, wants)
 from .books import hardcover_shelf
@@ -264,6 +264,7 @@ def post_signout(request: Request):
     return response
 
 
+@app.exception_handler(arr.Unavailable)
 @app.exception_handler(jellyfin.JellyfinUnavailable)
 def jellyfin_unavailable(request: Request, exc: Exception):
     """A readable page when Jellyfin cannot be asked who somebody is.
@@ -752,7 +753,8 @@ def post_want(request: Request, medium: str = Form(...),
               item_key: str = Form(...), unit: str = Form(""),
               title: str = Form(""), year: str = Form(""),
               artist: str = Form(""), source: str = Form(""),
-              ref: str = Form("")):
+              ref: str = Form(""), album: str = Form(""),
+              duration_seconds: float | None = Form(None, alias="durationSeconds")):
     """Ask for one thing, then send the browser back to the list.
 
     A redirect rather than a rendered response so that a reload does not
@@ -764,7 +766,8 @@ def post_want(request: Request, medium: str = Form(...),
     except LookupError as exc:
         return _back(medium, f"Nextup could not work out who you are. {exc}")
     hit = {"title": title, "year": year, "artist": artist,
-           "source": source, "ref": ref}
+           "source": source, "ref": ref, "album": album,
+           "durationSeconds": duration_seconds}
     try:
         _, message = wants.want(user, medium, item_key, unit, hit)
     except wants.Denied as denied:

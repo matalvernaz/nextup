@@ -131,7 +131,7 @@ def want(user: jellyfin.User, medium: str, item_key: str, unit: str = "",
             raise Denied(str(denied)) from denied
     unit = unit or found.units[0]
     if unit not in found.units:
-        raise Denied(f"{unit!r} is not something that can be asked for.")
+        raise Denied(f"{unit} is not something that can be asked for.")
 
     # Everything from here to the ledger write is one decision. Read as four
     # separate steps it let two taps arriving together both find the allowance
@@ -171,6 +171,12 @@ def _admit(user: jellyfin.User, found: media.Medium, medium: str,
         log.info("want reopened user=%s medium=%s key=%s: it arrived once and "
                  "is no longer in the library", user.key, medium, item_key)
 
+    if medium in (media.MOVIE, media.SERIES):
+        index = media.owned()
+        owned = index.movie_tmdb if medium == media.MOVIE else index.series_tvdb
+        if _provider_id(item_key) in owned:
+            return IN_LIBRARY, "Already in the library."
+
     price = media.cost(medium, unit)
     remaining = allowance(user, medium)
     if remaining is not None and remaining < price:
@@ -189,13 +195,19 @@ def _admit(user: jellyfin.User, found: media.Medium, medium: str,
                     user.key, item_key, result.message)
         raise Denied(result.message)
 
+    backend_id = result.backend_id
+    if not result.created:
+        # Only our own ledger can prove that an existing household row is ours.
+        backend_id = store.backend_for(medium, item_key)
+        price = 0
+
     store.record(
         user.key, medium, item_key, unit,
         # What the backend resolved it to is preferred over what the caller
         # sent: it is the spelling the library will carry when it lands.
         result.title or hit.get("title") or "",
         result.year or str(hit.get("year") or ""),
-        price, result.backend_id)
+        price, backend_id)
     log.info("want accepted user=%s key=%s backend_id=%s message=%r",
              user.key, item_key, result.backend_id, result.message)
     return ON_ITS_WAY, result.message
@@ -477,12 +489,14 @@ def cancel(user: jellyfin.User, medium: str, item_key: str) -> tuple[bool, str]:
     if not stopped:
         return True, ("Taken off your list. The acquisition tool could not be "
                       "reached, so it may still be looking.")
-    return True, "Taken off your list, and no longer being looked for."
+    return True, "Taken off your list. Anything already downloaded is kept."
 
 
 def _stop(medium: str, row) -> bool:
     """Call the acquisition off. Never removes anything already downloaded."""
     backend_id = row["backend_id"]
+    if not backend_id:
+        return True
     if medium == media.MOVIE:
         return radarr.cancel(backend_id)
     if medium == media.SERIES:

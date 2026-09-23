@@ -159,13 +159,24 @@ def credential_rejected(force: bool = True) -> bool:
     return verdict
 
 
+def _users() -> list[dict]:
+    """Resolve browser identities without turning a server outage into a 500."""
+    try:
+        with _client() as c:
+            users = c.get("/Users").raise_for_status().json()
+        if not isinstance(users, list):
+            raise ValueError("unreadable account list")
+        return users
+    except (httpx.HTTPError, ValueError) as exc:
+        raise JellyfinUnavailable("Jellyfin could not load its accounts. Try again later.") from exc
+
+
 def all_users() -> dict[str, str]:
     """Every Jellyfin account, as casefolded display name to account id.
 
     Only the ledger rekey needs this, and only once.
     """
-    with _client() as c:
-        users = c.get("/Users").raise_for_status().json()
+    users = _users()
     return {dto["Name"].casefold(): dto["Id"] for dto in users}
 
 
@@ -176,8 +187,7 @@ def accounts() -> list[User]:
     the half that decides who is capped -- so a page about allowances needs
     this one and not that one.
     """
-    with _client() as c:
-        users = c.get("/Users").raise_for_status().json()
+    users = _users()
     return [_to_user(dto) for dto in users]
 
 
@@ -186,8 +196,7 @@ def user(name: str | None = None) -> User:
     name = name or config.JELLYFIN_USER
     if not name:
         raise LookupError("no signed-in user and no JELLYFIN_USER configured")
-    with _client() as c:
-        users = c.get("/Users").raise_for_status().json()
+    users = _users()
     for dto in users:
         if dto["Name"].casefold() == name.casefold():
             return _to_user(dto)
@@ -206,8 +215,7 @@ def account(reference: str) -> User:
     wanted = (reference or "").strip()
     if not wanted:
         raise LookupError("no account named")
-    with _client() as c:
-        users = c.get("/Users").raise_for_status().json()
+    users = _users()
     for dto in users:
         if normalise_id(dto["Id"]) == normalise_id(wanted):
             return _to_user(dto)
@@ -222,7 +230,7 @@ def user_from_token(token: str) -> User:
 
     Deliberately without a fallback. `GET /Users/Me` answers 200 only for a
     real user token: a service API key carries no user context and is refused,
-    and an unknown token is refused. Anything that is not a 200 is a rejection.
+    and an unknown token is refused. Outages do not invalidate a token.
 
     The header resolver the browser pages use falls back to `JELLYFIN_USER`
     when no identity is present. That fallback must never be reachable from
@@ -241,6 +249,8 @@ def user_from_token(token: str) -> User:
         log.error("token introspection unreachable fingerprint=%s (%s)",
                   logs.fingerprint(token), exc)
         raise JellyfinUnavailable(str(exc)) from exc
+    if resp.status_code not in (200, 401, 403):
+        raise JellyfinUnavailable("Jellyfin is not answering. Try again later.")
     if resp.status_code != 200:
         log.warning("token rejected fingerprint=%s status=%d",
                     logs.fingerprint(token), resp.status_code)
@@ -250,7 +260,7 @@ def user_from_token(token: str) -> User:
     except (ValueError, KeyError) as exc:
         log.error("token introspection returned an unreadable user "
                   "fingerprint=%s", logs.fingerprint(token))
-        raise TokenRejected("Jellyfin returned an unreadable user") from exc
+        raise JellyfinUnavailable("Jellyfin returned an unreadable user") from exc
     log.info("token accepted fingerprint=%s user=%s keyholder=%s",
              logs.fingerprint(token), found.name, found.is_admin)
     return found

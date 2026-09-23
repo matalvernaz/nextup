@@ -643,6 +643,15 @@ def forget(user_key: str, medium: str, item_key: str) -> bool:
     return cur.rowcount > 0
 
 
+def backend_for(medium: str, item_key: str) -> str:
+    """A backend row created by this service, if another account still holds it."""
+    with db() as conn:
+        row = conn.execute(
+            "SELECT backend_id FROM requests WHERE medium=? AND item_key=? "
+            "AND backend_id != '' LIMIT 1", (medium, item_key)).fetchone()
+    return str(row["backend_id"]) if row else ""
+
+
 def release(user_key: str, medium: str,
             item_key: str) -> tuple[bool, set[str]]:
     """Drop this account's request and say who else is still waiting on it.

@@ -77,9 +77,9 @@ def add(tmdb_id: str, title: str = "", year: str = "",
         return arr.AddResult(False, "Films are not available on this server.")
 
     if (row := tool.existing(tmdb_id)) is not None:
-        return arr.AddResult(True, "Already in Radarr.", str(row.get("id") or ""),
+        return arr.AddResult(True, "Already in Radarr.", "",
                              row.get("title") or title,
-                             str(row.get("year") or year))
+                             str(row.get("year") or year), created=False)
 
     root = tool.root_folder_path()
     if not root:
@@ -124,7 +124,7 @@ def _lookup_one(tool: arr.Arr, tmdb_id: str) -> dict | None:
 
 def cancel(backend_id: str) -> bool:
     """Stop looking for a film. Files already downloaded are left alone."""
-    return backend().delete(backend_id)
+    return backend().delete(backend_id, preserve_downloaded=True)
 
 
 def arrived(item_keys: set[str], owned: frozenset[str]) -> set[str]:

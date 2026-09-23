@@ -17,6 +17,8 @@ from app import config, jellyfin, listenarr
 from app.books import store, wants
 
 store.init()
+from app.books import shelves
+shelves.owned_index = lambda user: (set(), {})
 
 matt = jellyfin.User(id="user-matt", name="matt", is_admin=True)
 kadija = jellyfin.User(id="user-kadija", name="kadija")

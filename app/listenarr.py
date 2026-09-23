@@ -49,7 +49,13 @@ def _csrf(client: httpx.Client) -> str:
     """
     resp = client.get(f"{_API}/antiforgery/token")
     resp.raise_for_status()
-    return resp.json()["token"]
+    try:
+        token = resp.json()["token"]
+        if not isinstance(token, str) or not token:
+            raise ValueError("missing request token")
+        return token
+    except (ValueError, KeyError, TypeError) as exc:
+        raise httpx.RequestError("Listenarr returned an unreadable request token") from exc
 
 
 def queued_asins() -> set[str]:

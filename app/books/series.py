@@ -291,6 +291,9 @@ def plan(user: jellyfin.User, name: str, anchor_item_id: str | None = None) -> d
     book on screen and a name that does not hold it is a mismatch worth
     refusing.
     """
+    name = name.strip()
+    if not name:
+        raise NotASeries("Enter the name of a series.")
     library = jellyfin.books(user.id)
     members = [book for book in library if _same_series(book, name)]
     if anchor_item_id and all(book.get("Id") != anchor_item_id for book in members):
@@ -395,14 +398,16 @@ def plan(user: jellyfin.User, name: str, anchor_item_id: str | None = None) -> d
     for candidate in candidates:
         key = candidate["key"]
         if candidate["owned"] or key in owned_keys:
-            have.append(candidate)
+            if not any(row["key"] == key for row in have):
+                have.append(candidate)
         elif candidate["notOut"]:
             # On the row's own date and no other row's. One marketplace can
             # list a book as out while the other still shows a placeholder for
             # it, and the edition that is out is a real gap.
             not_out.append(candidate)
         elif candidate["ordered"] or key in ordered_keys:
-            on_order.append(candidate)
+            if not any(row["key"] == key for row in on_order):
+                on_order.append(candidate)
         elif candidate["hidden"] or key in hidden_keys:
             left_out.append(candidate)
         elif key in missing_keys:

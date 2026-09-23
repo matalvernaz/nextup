@@ -226,7 +226,7 @@ check.raises(imports.Unreadable, lambda: imports.read("Artist,Album\n"),
              "so is a file that is nothing but a heading row")
 check.raises(
     imports.Unreadable,
-    lambda: imports.rows(imports.read("Column A,Column B\nfoo,bar\n"),
+    lambda: imports.rows(imports.read("Year,Artist\n2020,Someone\n"),
                          media.MUSIC, "album"),
     "and a file whose headings name no column this understands is refused "
     "rather than guessed at")
