@@ -193,8 +193,8 @@ def _stop(medium: str, backend_id: str) -> bool:
     """
     if not backend_id:
         return False
-    return (radarr.cancel(backend_id) if medium == media.MOVIE
-            else sonarr.cancel(backend_id))
+    tool = radarr.backend() if medium == media.MOVIE else sonarr.backend()
+    return tool.delete(backend_id)
 
 
 # --- Books -------------------------------------------------------------------

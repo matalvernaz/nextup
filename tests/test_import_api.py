@@ -136,7 +136,7 @@ check.equal(len(body["report"]["asked"]), 2, "the report names both")
 
 # --- a file that cannot be read ---------------------------------------------
 bad = client.post("/api/v1/import", headers=as_("matt-token"),
-                  json={"medium": "music", "text": "Column A,Column B\nx,y\n"})
+                  json={"medium": "music", "text": "Year,Date\n2020,2020-01-01\n"})
 check.equal(bad.status_code, 400,
             "a file with no title column is a bad request, not a list that "
             "matched nothing")

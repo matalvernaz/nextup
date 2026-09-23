@@ -201,6 +201,21 @@ def read(data: bytes | str) -> Sheet:
         raise Unreadable("That file has no rows in it.")
 
     first = parsed[0][1]
+    known = set().union(*_ROLES.values())
+    recognised = sum(_fold_heading(cell) in known for cell in first)
+    if len(first) == 1 or recognised < 2:
+        # Preserve complete physical titles, including commas and semicolons.
+        # A quoted CSV field is decoded only when it encloses the whole line.
+        parsed = []
+        for line, raw in enumerate(text.splitlines(), start=1):
+            value = raw.strip()
+            if value:
+                if value.startswith('"') and value.endswith('"'):
+                    decoded = next(csv.reader([value]))
+                    if len(decoded) == 1:
+                        value = decoded[0]
+                parsed.append((line, (value,)))
+        first = parsed[0][1]
     folded = [_fold_heading(cell) for cell in first]
     roles: dict[str, int] = {}
     for role, names in _ROLES.items():
@@ -301,7 +316,7 @@ def rows(sheet: Sheet, medium: str, unit: str) -> tuple[list[Row], int, int]:
         else:
             raise Unreadable(
                 "None of the column headings say which column holds the "
-                "title. Name one of them " + _understood(order) + ", or give "
+                "title. Name one of them " + _understood(order if medium == media.MUSIC else ("title",)) + ", or give "
                 "a file with a single column and nothing else in it.")
     # An artist column is not used for the artist unit: there the credit *is*
     # the title, and reading both would ask for "Bruce Springsteen by Bruce
@@ -460,11 +475,6 @@ def match(user: jellyfin.User, medium: str, unit: str, row: Row,
     chosen = exact[0] if exact else hits[0]
     found["hit"] = _keep(chosen)
     found["others"] = len(hits) - 1
-    if not exact:
-        found["state"] = UNCERTAIN
-        found["detail"] = "The closest thing in the catalogue, which is not " \
-                          "quite what the file says."
-        return found
     if chosen.get("owned"):
         found["state"] = HELD
         found["detail"] = "Already in the library."
@@ -472,6 +482,11 @@ def match(user: jellyfin.User, medium: str, unit: str, row: Row,
     if chosen.get("requested") or chosen.get("itemKey") in requested:
         found["state"] = HELD
         found["detail"] = "Already asked for."
+        return found
+    if not exact:
+        found["state"] = UNCERTAIN
+        found["detail"] = "The closest thing in the catalogue, which is not " \
+                          "quite what the file says."
         return found
     found["state"] = MATCHED
     found["detail"] = (f"{len(exact)} catalogue entries match this exactly; "
@@ -485,7 +500,7 @@ def match(user: jellyfin.User, medium: str, unit: str, row: Row,
 #: accept a file of any length, so dropping it here would turn a thirty-second
 #: track into a request that any two-second file satisfies.
 _KEPT = ("itemKey", "medium", "unit", "title", "year", "artist", "album",
-         "source", "ref", "durationSeconds", "overview", "authors")
+         "source", "ref", "durationSeconds", "overview", "authors", "owned", "requested")
 
 
 def _keep(hit: dict) -> dict:
@@ -695,7 +710,8 @@ def confirm(user: jellyfin.User, import_id: str, lines: set[int]) -> dict | None
             return batch
         chosen = [row for row in batch.get("rows", [])
                   if row["line"] in lines
-                  and row["state"] in (MATCHED, UNCERTAIN) and row.get("hit")]
+                  and row["state"] in (MATCHED, UNCERTAIN) and row.get("hit")
+                  and not row["hit"].get("owned") and not row["hit"].get("requested")]
         if not chosen:
             return batch
         _close(import_id, ASKING, {"chosen": len(chosen)})
@@ -730,7 +746,7 @@ def _ask_for(import_id: str, user: jellyfin.User, medium: str,
                             import_id, label, exc)
                 refused.append(f"{label}: something went wrong asking for it.")
             else:
-                (already if message == "Already asked for." else asked).append(
+                (already if state == wants.IN_LIBRARY or message.startswith("Already ") else asked).append(
                     label)
                 log.info("import %s asked for %r state=%s", import_id, label,
                          state)

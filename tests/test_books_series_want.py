@@ -184,7 +184,7 @@ check("series resolved through a member's id", planned["seriesAsin"], "SER-DF")
 check("marketplace follows the member", planned["region"], "ca")
 check("owned by id, by title and author, by id, and by title within the series",
       sorted(c["asin"] for c in planned["have"]),
-      ["B0DF01", "B0DF02X", "B0DF04", "B0DFSS", "B0DFSSUS"])
+      ["B0DF01", "B0DF02X", "B0DF04", "B0DFSS"])
 check("one request per position",
       [c["title"] for c in planned["missing"]],
       ["Grave Peril", "Death Masks", "Blood Rites"])

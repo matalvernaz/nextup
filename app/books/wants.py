@@ -110,6 +110,13 @@ def _admit(user, asin, title, recommendation_id, metadata):
         log.info("want reopened user=%s asin=%s: a book that arrived once is "
                  "being asked for again", user.key, asin)
 
+    # Recheck library ownership at admission, including requests made without
+    # a preceding search (imports and older native clients).
+    from . import shelves
+    asins, _ = shelves.owned_index(user)
+    if asin.upper() in {value.upper() for value in asins}:
+        return IN_LIBRARY, "Already in the library."
+
     remaining = allowance(user)
     if remaining is not None and remaining <= 0:
         cap = daily_cap(user)

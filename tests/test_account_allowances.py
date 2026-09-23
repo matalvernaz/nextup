@@ -22,6 +22,9 @@ from app.books import wants as book_wants  # noqa: E402
 
 check = harness.Check("account allowances")
 store.init()
+media.owned = lambda: jellyfin.Owned()
+from app.books import shelves
+shelves.owned_index = lambda user: (set(), {})
 
 KEYHOLDER = jellyfin.User(id="admin-1", name="matt", is_admin=True)
 MEMBER = jellyfin.User(id="member-1", name="alex", is_admin=False)

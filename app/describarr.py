@@ -91,7 +91,10 @@ def request(item: dict) -> str:
     if response.status_code != 202:
         log.warning("describe refused status=%s params=%s detail=%s",
                     response.status_code, params, body[:200])
-        raise DescribeRefused(response.status_code, body)
+        detail = ("This title is already queued or is being described."
+                  if response.status_code == 409 else
+                  "The description service could not accept this title. Try again later.")
+        raise DescribeRefused(response.status_code, detail)
     log.info("describe queued type=%s title=%s",
              item.get("Type"), params.get("title"))
     return body

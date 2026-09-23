@@ -36,7 +36,7 @@ TIMEOUT_SECONDS = 10.0
 #
 # Only the first pass retries. A later one is about a rule that has since
 # vanished, and there is nothing starting up to wait for.
-FIRST_PASS_ATTEMPTS = 3
+FIRST_PASS_ATTEMPTS = 8
 RETRY_GAP_SECONDS = 20
 
 

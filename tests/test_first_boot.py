@@ -45,7 +45,7 @@ check.raises(RuntimeError, main._rekey_ledger_once,
 # And the reason it refused is Jellyfin, not the store. `all_users` lets the
 # transport error out raw -- its one caller turns any failure into the refusal
 # above, and wrapping it would only restate that.
-check.raises(httpx.HTTPError, jellyfin.all_users,
+check.raises(jellyfin.JellyfinUnavailable, jellyfin.all_users,
              "because Jellyfin cannot be reached at all")
 
 # --- and the pages read like an outage, not like a bug ----------------------

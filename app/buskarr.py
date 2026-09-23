@@ -45,17 +45,18 @@ def _client() -> httpx.Client:
 
 
 def item_key(unit: str, source: str = "", ref: str = "",
-             artist: str = "", title: str = "") -> str:
+             artist: str = "", title: str = "", duration: float | None = None) -> str:
     """The ledger key for one piece of music.
 
     An artist and an album are identified by the catalogue that listed them.
     A track has no such id -- buskarr's whole model is that identity is the
-    credit and the title, not an MBID -- so it is keyed on a digest of those,
+    credit, title and five-second duration bucket, not an MBID -- so it is keyed on those,
     which makes a second request for the same song the same request however it
     was found. The readable title is kept in the ledger beside it.
     """
     if unit == "track":
-        seed = f"{artist.casefold().strip()}\n{title.casefold().strip()}"
+        bucket = int((duration or 0) // 5)
+        seed = f"{artist.casefold().strip()}\n{title.casefold().strip()}\n{bucket}"
         return f"bk:track:{hashlib.sha256(seed.encode()).hexdigest()[:16]}"
     return f"bk:{unit}:{source}:{ref}"
 
@@ -70,11 +71,11 @@ def search(query: str, unit: str, limit: int) -> list[dict]:
                                             "limit": limit})
     except httpx.HTTPError as exc:
         log.warning("search unreachable q=%r unit=%s (%s)", query, unit, exc)
-        return []
+        raise arr.Unavailable("Music search is not answering. Try again later.") from exc
     if resp.status_code >= 400:
         log.warning("search refused q=%r unit=%s status=%d",
                     query, unit, resp.status_code)
-        return []
+        raise arr.Unavailable("Music search could not answer. Try again later.")
     try:
         rows = resp.json().get("results", [])
     except ValueError:
@@ -110,7 +111,7 @@ def _result(row: dict, unit: str) -> dict:
         }
     return {
         "itemKey": item_key("track", artist=row.get("artist", ""),
-                            title=row.get("title", "")),
+                            title=row.get("title", ""), duration=row.get("duration")),
         "medium": MEDIUM, "unit": "track",
         "title": row.get("title") or "", "artist": row.get("artist") or "",
         "album": row.get("album") or "", "overview": "",
@@ -163,7 +164,7 @@ def add(unit: str, hit: dict, requested_by: str) -> arr.AddResult:
         log.error("add failed unit=%s: buskarr unreachable (%s)", unit, exc)
         return arr.AddResult(False, "buskarr could not be reached.")
     if resp.status_code >= 400:
-        detail = resp.text[:180]
+        detail = arr._detail(resp)[:180]
         log.error("add rejected unit=%s status=%d body=%s",
                   unit, resp.status_code, detail)
         return arr.AddResult(False, f"buskarr refused it: {detail}")

@@ -91,9 +91,9 @@ def add(tvdb_id: str, title: str = "", monitored: bool = True) -> arr.AddResult:
         return arr.AddResult(False, "Series are not available on this server.")
 
     if (row := tool.existing(tvdb_id)) is not None:
-        return arr.AddResult(True, "Already in Sonarr.", str(row.get("id") or ""),
+        return arr.AddResult(True, "Already in Sonarr.", "",
                              row.get("title") or title,
-                             str(row.get("year") or ""))
+                             str(row.get("year") or ""), created=False)
 
     root = tool.root_folder_path()
     if not root:
@@ -132,7 +132,7 @@ def _lookup_one(tool: arr.Arr, tvdb_id: str) -> dict | None:
 
 
 def cancel(backend_id: str) -> bool:
-    return backend().delete(backend_id)
+    return backend().delete(backend_id, preserve_downloaded=True)
 
 
 def acquisition_progress(

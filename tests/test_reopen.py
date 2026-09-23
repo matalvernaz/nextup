@@ -33,6 +33,8 @@ from app.books import store as book_store  # noqa: E402
 
 check = harness.Check("reopen")
 store.init()
+from app.books import shelves
+shelves.owned_index = lambda user: (set(), {})
 
 MATT = jellyfin.User(id="u-matt", name="matt", is_admin=True)
 

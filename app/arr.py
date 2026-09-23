@@ -29,6 +29,10 @@ _TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 _EMPTY = []
 
 
+class Unavailable(Exception):
+    """The catalogue could not be searched; this is not an empty result."""
+
+
 class AddResult(NamedTuple):
     """Outcome of handing one thing to an acquisition tool.
 
@@ -41,6 +45,7 @@ class AddResult(NamedTuple):
     backend_id: str = ""
     title: str = ""
     year: str = ""
+    created: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,16 +92,20 @@ class Arr:
                 resp = c.get(f"/{self.resource}/lookup", params={"term": term})
         except httpx.HTTPError as exc:
             log.warning("%s lookup unreachable term=%r (%s)", self.name, term, exc)
-            return _EMPTY
+            raise Unavailable(f"{self.name} is not answering. Try again later.") from exc
         if resp.status_code >= 400:
             log.warning("%s lookup refused term=%r status=%d",
                         self.name, term, resp.status_code)
-            return _EMPTY
+            if resp.status_code == 400:
+                return _EMPTY
+            raise Unavailable(f"{self.name} could not search its catalogue. Try again later.")
         try:
             rows = resp.json()
-        except ValueError:
-            return _EMPTY
-        return rows[:limit] if isinstance(rows, list) else _EMPTY
+        except ValueError as exc:
+            raise Unavailable(f"{self.name} returned an unreadable search result.") from exc
+        if not isinstance(rows, list):
+            raise Unavailable(f"{self.name} returned an unreadable search result.")
+        return rows[:limit]
 
     def existing(self, provider_id: str) -> dict | None:
         """This tool's own row for a provider id, or None.
@@ -138,7 +147,7 @@ class Arr:
             # way, which is what was asked.
             if _already_present(detail):
                 log.info("%s add: already present", self.name)
-                return AddResult(True, f"Already in {self.name}.")
+                return AddResult(True, f"Already in {self.name}.", created=False)
             log.error("%s add rejected status=%d body=%s",
                       self.name, resp.status_code, detail[:180])
             return AddResult(False, f"{self.name} refused it: {detail[:180]}")
@@ -150,7 +159,7 @@ class Arr:
                          str(row.get("id") or ""), row.get("title") or "",
                          str(row.get("year") or ""))
 
-    def delete(self, backend_id: str) -> bool:
+    def delete(self, backend_id: str, *, preserve_downloaded: bool = False) -> bool:
         """Remove a row without touching files.
 
         `deleteFiles` is false and stays false. Cancelling a request means
@@ -161,10 +170,20 @@ class Arr:
             return False
         try:
             with self.client() as c:
+                if preserve_downloaded:
+                    current = c.get(f"/{self.resource}/{backend_id}")
+                    if current.status_code == 404:
+                        return True
+                    current.raise_for_status()
+                    row = current.json()
+                    if (row.get("hasFile") or
+                            int((row.get("statistics") or {}).get("episodeFileCount") or 0) > 0):
+                        log.info("%s cancel kept id=%s: already has files", self.name, backend_id)
+                        return True
                 resp = c.delete(f"/{self.resource}/{backend_id}",
                                 params={"deleteFiles": "false",
                                         "addImportListExclusion": "false"})
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, ValueError, TypeError) as exc:
             log.warning("%s delete failed id=%s (%s)", self.name, backend_id, exc)
             return False
         return resp.status_code < 400
@@ -203,7 +222,7 @@ def _detail(resp: httpx.Response) -> str:
         return "; ".join(
             str(p.get("errorMessage") or p.get("message") or p) for p in payload)
     if isinstance(payload, dict):
-        return str(payload.get("message") or payload.get("errorMessage") or payload)
+        return str(payload.get("detail") or payload.get("message") or payload.get("errorMessage") or payload)
     return str(payload)
 
 

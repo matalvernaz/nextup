@@ -167,6 +167,8 @@ def get_search(q: str = "", kind: str = "book",
     Defaults to books, so a client that predates this sends no `kind` and gets
     exactly what it got before.
     """
+    if not q.strip():
+        return {"version": LEGACY_PROTOCOL, "query": "", "kind": kind, "results": []}
     if kind == series.SERIES_KIND:
         results = series.search_rows(user, q)
     else:
@@ -236,7 +238,8 @@ def post_dismiss(user: jellyfin.User = Depends(caller),
                      None, embed=True, alias="recommendationId")) -> dict:
     """Hide this book for the configured cooling-off period."""
     wants.dismiss(user, asin, recommendation_id)
-    shelves.invalidate(user.key)
+    shelves.forget_asin(asin, user_key=user.key)
+    shelves.expire(user.key)
     return {"asin": asin, "dismissed": True, "days": config.DISMISS_TTL_DAYS}
 
 
@@ -248,7 +251,7 @@ def post_restore(user: jellyfin.User = Depends(caller),
     """Undo a dismissal made by this account."""
     if not wants.restore(user, asin, recommendation_id):
         raise HTTPException(status_code=404, detail="That suggestion is not hidden.")
-    shelves.invalidate(user.key)
+    shelves.expire(user.key)
     return {"asin": asin, "restored": True}
 
 

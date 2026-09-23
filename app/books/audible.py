@@ -133,6 +133,7 @@ def sims(asin: str, axis: str = AXIS_RAW) -> list[dict]:
     # empty neighbour list rather than an error, so "no neighbours" and "wrong
     # store" look identical from one region alone.
     thinned: list[dict] = []
+    answered = False
     for region in config.AUDIBLE_REGIONS:
         try:
             with httpx.Client(timeout=_TIMEOUT) as c:
@@ -141,14 +142,15 @@ def sims(asin: str, axis: str = AXIS_RAW) -> list[dict]:
                 products = resp.json().get("similar_products") or []
         except (httpx.HTTPError, ValueError):
             continue
+        answered = True
         thinned = [_thin(p) for p in products if p.get("asin")]
         if thinned:
             break
 
-    # Cached even when empty: every store was asked and none had neighbours,
-    # which is an answer, and re-asking it per page load is what the cache
-    # exists to stop.
-    store.put_sims(asin, axis, thinned)
+    # An empty successful answer may be cached. An outage is not an answer
+    # and must be retried when the catalogue recovers.
+    if answered:
+        store.put_sims(asin, axis, thinned)
     return thinned
 
 

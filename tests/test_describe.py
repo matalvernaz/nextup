@@ -105,7 +105,7 @@ print("=== what cannot be asked for ===")
 book = {"Id": "b1", "Type": "AudioBook", "Name": "A Book", "Path": "/media/books/a"}
 response, _ = post(book)
 check.equal(response.status_code, 400, "an audiobook cannot be described")
-check.that("AudioBook" in response.json()["detail"],
+check.that("audiobook" in response.json()["detail"],
            "and the refusal names what was asked about")
 
 pathless = {"Id": "p1", "Type": "Movie", "Name": "Ghost", "Path": ""}
@@ -123,8 +123,8 @@ print("=== when describarr will not take it ===")
 # the ordinary answer here, not an outage.
 response, _ = post(MOVIE, answer=(400, "Could not infer title from path"))
 check.equal(response.status_code, 409, "a refusal is a refusal, not an outage")
-check.that("infer title" in response.json()["detail"],
-           "carrying describarr's own reason, which is better than ours")
+check.that("could not accept" in response.json()["detail"],
+           "giving a readable refusal without disclosing a server path")
 
 response, _ = post(MOVIE, raises=httpx.ConnectError("no route"))
 check.equal(response.status_code, 503, "unreachable is a different answer")

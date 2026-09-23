@@ -20,7 +20,7 @@ from threading import Lock
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query
 
-from . import (config, describarr, gone, imports, jellyfin, logs, media,
+from . import (arr, config, describarr, gone, imports, jellyfin, logs, media,
                recommendations, store, wants)
 
 log = logs.get("api")
@@ -238,6 +238,8 @@ def get_search(medium: str, q: str = "", unit: str = "",
             status_code=503,
             detail="Jellyfin could not be reached, so what the library "
                    "already holds is not known.") from exc
+    except arr.Unavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     log.info("search user=%s medium=%s unit=%s q=%r hits=%d",
              user.key, medium, unit or "-", query, len(results))
     return {"version": config.API_VERSION, "medium": medium,
@@ -331,6 +333,8 @@ def post_want(user: jellyfin.User = Depends(caller),
         state, message = wants.want(user, medium, item_key, unit, hit)
     except wants.Denied as denied:
         raise HTTPException(status_code=409, detail=str(denied)) from denied
+    except (arr.Unavailable, jellyfin.JellyfinUnavailable) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     return {"medium": medium, "itemKey": item_key, "state": state,
             "message": message,
             "remainingToday": wants.allowance(user, medium)}
@@ -361,7 +365,7 @@ def post_describe(user: jellyfin.User = Depends(caller),
     if kind not in describarr.DESCRIBABLE_TYPES:
         raise HTTPException(
             status_code=400,
-            detail=f"A {kind or 'thing'} cannot be described. "
+            detail=f"Audio description cannot be requested for {(kind or 'these').lower()} items. "
                    "Ask for a film, a series or a season.")
     if not (item.get("Path") or "").strip():
         # A title Jellyfin knows about but cannot place on disk -- a stale
@@ -543,6 +547,8 @@ def post_deleted(user: jellyfin.User = Depends(caller),
     `gone`, which re-reads Jellyfin for the provider id before it touches
     anything.
     """
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Only a server administrator can clear household acquisitions.")
     item = {"itemId": item_id, "type": kind, "name": name,
             "providerIds": provider_ids or {},
             "authors": [a for a in (authors or []) if isinstance(a, str)]}

@@ -159,7 +159,7 @@ check.that("See everything you have asked for" in report.text,
 
 # --- a file this cannot read ------------------------------------------------
 refused = client.post("/import", data={"medium": "music", "unit": "album"},
-                      files={"listing": ("odd.csv", b"Column A,Column B\nx,y\n",
+                      files={"listing": ("odd.csv", b"Year,Artist\n2020,Someone\n",
                                          "text/csv")})
 check.equal(refused.status_code, 303, "a file with no title column comes back")
 check.that("heading" in unquote(refused.headers["location"]),
