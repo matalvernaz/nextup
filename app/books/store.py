@@ -177,6 +177,15 @@ def ordered_asins() -> set:
     return store.outstanding_item_keys(MEDIUM)
 
 
+def ordered_titles() -> list[str]:
+    """The titles of every book still on order for the household.
+
+    The same set as `ordered_asins`, named instead of numbered, for a caller
+    comparing against another marketplace's listing.
+    """
+    return store.outstanding_titles(MEDIUM)
+
+
 def suppressed_asins(user_key: str) -> set:
     """Every acquisition, plus the books this account has hidden.
 

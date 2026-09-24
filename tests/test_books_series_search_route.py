@@ -103,11 +103,95 @@ check("the row carries the name that re-plans it", found["series"], FORGE)
 check("an unknown series puts no row on screen",
       series.search_rows(matt, "No Such Series Anywhere"), [])
 
+# --- a name several series answer to offers them (2026-09-24) ---------------
+# "disney" is a word in two of Audible's series. The planner refuses to guess
+# which, rightly, and the search used to answer with nothing at all -- the same
+# "No series found" as a name the catalogue has never heard of.
+ORIGINALS = "Disney: Audible Originals"
+BEDTIME = "Children's Favorites Disney Bedtime Favorites and Disney Storybook Collection"
+both = [{"asin": "SER-ORIG", "name": ORIGINALS, "region": "ca"},
+        {"asin": "SER-BED", "name": BEDTIME, "region": "ca"}]
+CANDIDATES.update({"disney": both, ORIGINALS: both, BEDTIME: both})
+SERIES_BOOKS.update({
+    "SER-ORIG": [row(f"B0OR0{n}", f"Original {n}", str(n), "SER-ORIG", ORIGINALS,
+                     author="Disney Press") for n in range(1, 4)],
+    "SER-BED": [row(f"B0BD0{n}", f"Bedtime {n}", str(n), "SER-BED", BEDTIME,
+                    author="Disney Books") for n in range(1, 3)],
+})
+listings = []
+jellyfin.books = lambda uid: listings.append(uid) or [dict(item) for item in LIBRARY]
+
+rows = series.search_rows(matt, "disney")
+check("an ambiguous name offers every series it could mean",
+      sorted(r["title"] for r in rows), sorted([ORIGINALS, BEDTIME]))
+check("each carrying the catalogue's own name, which re-plans only it",
+      sorted(r["series"] for r in rows), sorted([ORIGINALS, BEDTIME]))
+check("each saying what asking for it would do",
+      {r["title"]: r["detail"] for r in rows}[ORIGINALS],
+      "None of the 3 in your library, 3 to ask for.")
+check("the library is listed once for all of them", len(listings), 1)
+
+from app.books import adapter  # noqa: E402
+hits = adapter.search_hits(matt, "disney", unit="series")
+check("the nextup route offers the same choices",
+      sorted(h["itemKey"] for h in hits), sorted([ORIGINALS, BEDTIME]))
+
+check("the exact name still picks one series",
+      [r["series"] for r in series.search_rows(matt, ORIGINALS)], [ORIGINALS])
+
+many = [{"asin": f"SER-{n}", "name": f"Disney Collection {n}", "region": "ca"}
+        for n in range(12)]
+CANDIDATES["disney collection"] = many
+for entry in many:
+    CANDIDATES[entry["name"]] = many
+    SERIES_BOOKS[entry["asin"]] = [row(f"B0{entry['asin']}", entry["name"], "1",
+                                       entry["asin"], entry["name"])]
+check("the choices stop at a listenable number",
+      len(series.search_rows(matt, "disney collection")), series.MAX_CHOICES)
+
+
+# --- what the plan counts, against another marketplace's listing ----------
+# The live "Disney: Audible Originals" plan read "10 of 13 in your library, 3 to
+# ask for" with 8 in the library and 5 on order. The listing came from the other
+# store, whose ASINs are not the ones the books were asked for under, so books
+# on order read as gaps -- asking would have requested them again -- and a
+# prefix the shelf's Disney Princess books share made two unarrived ones held.
+LIBRARY.append({"Id": "belle", "Name": "Disney Princess: Belle and the Rose Riddle",
+                "SeriesName": ORIGINALS,
+                "People": [{"Name": "Disney Press", "Type": "Author"}]})
+SERIES_BOOKS["SER-ORIG"] = [
+    row("B0COM-BELLE", "Disney Princess: Belle and the Rose Riddle", None,
+        "SER-ORIG", ORIGINALS, author="Disney Press"),
+    row("B0COM-MOANA", "Disney Princess: Moana and Tales from Motunui", None,
+        "SER-ORIG", ORIGINALS, author="Disney Press"),
+    row("B0COM-FORKY", "Disney Pixar Toy Story: Forky's Kindergarten Adventure",
+        None, "SER-ORIG", ORIGINALS, author="Disney Press"),
+]
+with store.db() as conn:
+    conn.execute("INSERT INTO requests(user_key,medium,item_key,unit,title,"
+                 "requested_at) VALUES(?,?,?,?,?,?)",
+                 ("kid", "book", "B0CA-FORKY", "book",
+                  "Disney Pixar Toy Story: Forky's Kindergarten Adventure", 1.0))
+planned = series.plan(matt, ORIGINALS)
+check("the book on the shelf is held",
+      [c["title"] for c in planned["have"]],
+      ["Disney Princess: Belle and the Rose Riddle"])
+check("a book asked for under the other store's ASIN is on order, not a gap",
+      [c["title"] for c in planned["onOrder"]],
+      ["Disney Pixar Toy Story: Forky's Kindergarten Adventure"])
+check("and a book sharing only the Disney Princess prefix is still a gap",
+      [c["title"] for c in planned["missing"]],
+      ["Disney Princess: Moana and Tales from Motunui"])
+
+
 # --- the sentence at both ends --------------------------------------------
 check("owning none of it reads as English, not arithmetic",
       series.state_sentence(0, 0, 8), "None of the 8 in your library, 8 to ask for.")
 check("owning all of it says so",
       series.state_sentence(6, 0, 0), "You already have all 6 that Audible lists.")
+check("held and on order is not all held",
+      series.state_sentence(8, 5, 0),
+      "8 of 13 in your library, 5 already on order. Nothing left to ask for.")
 check("everything on order is not a claim to own it",
       series.state_sentence(0, 3, 0),
       "Nothing left to ask for out of the 3 Audible lists.")

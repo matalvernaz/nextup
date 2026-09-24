@@ -56,15 +56,18 @@ def _series_hits(user: jellyfin.User, query: str) -> list[dict]:
 
     A plan rather than a catalogue lookup: the question is not "does this
     series exist" but "what of it is missing here", and `series.plan` answers
-    that against the library.
+    that against the library. One row per series the name could mean, so an
+    ambiguous name offers its choices instead of nothing (`series.plans_for`).
     """
     try:
-        planned = book_series.plan(user, query.strip())
-    except book_series.NotASeries:
-        return []
-    except (book_series.Unresolvable, book_series.Unavailable) as exc:
+        plans = book_series.plans_for(user, query)
+    except book_series.Unavailable as exc:
         log.info("series search unresolved query=%r (%s)", query, exc)
         return []
+    return [_series_hit(planned, query) for planned in plans]
+
+
+def _series_hit(planned: dict, query: str) -> dict:
     name = planned.get("series") or query.strip()
     # `plan` answers with the rows themselves, not counts, on all three of
     # these. Reading one of them as a number was how this path came to raise
@@ -73,7 +76,7 @@ def _series_hits(user: jellyfin.User, query: str) -> list[dict]:
     missing = len(planned.get("missing") or ())
     have = len(planned.get("have") or ())
     on_order = len(planned.get("onOrder") or ())
-    return [{
+    return {
         "medium": "book",
         "unit": SERIES_UNIT,
         # The key is the name that planned this and will re-plan it when the
@@ -89,9 +92,7 @@ def _series_hits(user: jellyfin.User, query: str) -> list[dict]:
         # everything Audible lists.
         "owned": missing == 0,
         "overview": book_series.state_sentence(have, on_order, missing),
-    }]
-
-
+    }
 
 
 def _as_hit(row: dict) -> dict:
