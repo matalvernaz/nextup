@@ -179,6 +179,15 @@ CREATE TABLE IF NOT EXISTS products (
     payload     TEXT NOT NULL,
     fetched_at  REAL NOT NULL
 );
+-- What became of giving a requested book's library item the edition's own
+-- details (books/stamp.py): one row per ASIN asked for, whoever asked.
+CREATE TABLE IF NOT EXISTS book_stamps (
+    asin        TEXT PRIMARY KEY,
+    item_id     TEXT NOT NULL DEFAULT '',
+    outcome     TEXT NOT NULL,
+    attempts    INTEGER NOT NULL DEFAULT 1,
+    stamped_at  REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS doc_vectors (
     item_id     TEXT PRIMARY KEY,
     kind        TEXT NOT NULL,
@@ -816,6 +825,50 @@ def get_product(asin: str):
             "SELECT payload FROM products WHERE asin=? AND fetched_at>?",
             (asin, cutoff)).fetchone()
     return json.loads(row["payload"]) if row else None
+
+
+def get_stamp(asin: str) -> dict | None:
+    """The last stamping outcome for one requested ASIN, or None."""
+    with db() as conn:
+        row = conn.execute(
+            "SELECT asin, item_id, outcome, attempts, stamped_at "
+            "FROM book_stamps WHERE asin=?", (asin,)).fetchone()
+    return dict(row) if row else None
+
+
+def put_stamp(asin: str, item_id: str, outcome: str) -> None:
+    """Record a stamping outcome, counting the attempts at that ASIN."""
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO book_stamps(asin,item_id,outcome,attempts,stamped_at) "
+            "VALUES(?,?,?,1,?) ON CONFLICT(asin) DO UPDATE SET "
+            "item_id=excluded.item_id, outcome=excluded.outcome, "
+            "attempts=book_stamps.attempts+1, stamped_at=excluded.stamped_at",
+            (asin, item_id or "", outcome, time.time()))
+
+
+def fulfilled_book_requests() -> list[dict]:
+    """Every book request that has reached the library, one per ASIN.
+
+    Across accounts: two people asking for one book is one book to stamp. The
+    title and authors are the requester's own record of it, which is what the
+    library item is found by.
+    """
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT item_key, title, authors, MIN(fulfilled_at) AS fulfilled_at "
+            "FROM requests WHERE medium='book' AND fulfilled_at IS NOT NULL "
+            "GROUP BY item_key").fetchall()
+    return [dict(row) for row in rows]
+
+
+def users_awaiting_books() -> list[str]:
+    """Accounts with a book asked for that has not yet been seen to arrive."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT user_key FROM requests "
+            "WHERE medium='book' AND fulfilled_at IS NULL").fetchall()
+    return [row["user_key"] for row in rows]
 
 
 def put_product(asin: str, payload) -> None:

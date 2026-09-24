@@ -658,6 +658,45 @@ def books_named(title: str) -> list[dict]:
     return out
 
 
+def _admin_id() -> str:
+    """Some administrator's id, which the full item read needs to be given.
+
+    `GET /Items/{id}` answers 400 on this fork without a `userId`, even to this
+    service's own key. Whose id makes no difference to the metadata it returns.
+    """
+    for account in accounts():
+        if account.is_admin:
+            return account.id
+    raise JellyfinUnavailable("no administrator account to read items as")
+
+
+def item_record(item_id: str) -> dict | None:
+    """One item's whole metadata record, as the web editor reads it, or None.
+
+    The whole record because it is what an update has to send back: this
+    server assigns several fields unconditionally on update, so a partial body
+    would blank whatever it left out.
+    """
+    try:
+        with _client() as c:
+            resp = c.get(f"/Items/{item_id}", params={"userId": _admin_id()})
+            if resp.status_code == 404:
+                return None
+            resp.raise_for_status()
+            return resp.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise JellyfinUnavailable(str(exc)) from exc
+
+
+def update_item(record: dict) -> None:
+    """Write back a whole record fetched with `item_record` and then amended."""
+    try:
+        with _client() as c:
+            c.post(f"/Items/{record['Id']}", json=record).raise_for_status()
+    except (httpx.HTTPError, ValueError, KeyError) as exc:
+        raise JellyfinUnavailable(str(exc)) from exc
+
+
 def find_playlist(uid: str, name: str) -> str | None:
     """Id of this account's playlist with that name, or None."""
     with _client() as c:

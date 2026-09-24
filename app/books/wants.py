@@ -267,6 +267,10 @@ def states(user_key: str, owned: tuple[set, dict] | None) -> list[dict]:
             log.info("requests fulfilled user=%s asins=%s",
                      user_key, sorted(arrived))
             _stop_looking(arrived)
+            # The edition's own year and ASIN, onto the item that fulfilled
+            # it, behind this read. Imported here: stamp imports this module.
+            from . import stamp
+            stamp.soon([r for r in rows if r["asin"] in arrived])
         store.fulfil_requests(user_key, arrived)
     else:
         log.warning("reporting %d book request(s) unsettled user=%s: the "

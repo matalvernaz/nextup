@@ -29,6 +29,7 @@ from . import (api, arr, backends, compat_nextread, config, imports, jellyfin,
 from .books import hardcover_shelf
 from .books import shelves as book_shelves
 from .books import store as book_store
+from .books import stamp as book_stamp
 from .books import upkeep
 from .books import wants as book_wants
 
@@ -40,6 +41,7 @@ async def lifespan(_: FastAPI):
     _rekey_ledger_once()
     selfcheck.watch()
     upkeep.watch()
+    book_stamp.watch()
     yield
 
 
