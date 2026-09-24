@@ -21,7 +21,7 @@ DB_PATH = harness.use("books-series-search-route")
 harness.discard(DB_PATH)
 
 from app import config, jellyfin, listenarr
-from app.books import audible, series, store
+from app.books import audible, series, shelves, store
 
 store.init()
 
@@ -120,6 +120,10 @@ SERIES_BOOKS.update({
 })
 listings = []
 jellyfin.books = lambda uid: listings.append(uid) or [dict(item) for item in LIBRARY]
+# Cold, as after a restart: the search above has left a listing in memory.
+with shelves._cache_guard:
+    shelves._owned_cache.clear()
+    shelves._series_cache.clear()
 
 rows = series.search_rows(matt, "disney")
 check("an ambiguous name offers every series it could mean",
@@ -130,6 +134,10 @@ check("each saying what asking for it would do",
       {r["title"]: r["detail"] for r in rows}[ORIGINALS],
       "None of the 3 in your library, 3 to ask for.")
 check("the library is listed once for all of them", len(listings), 1)
+# Listing it was eleven of the twelve and a half seconds this search took live,
+# of the twenty the client gives a search (2026-09-24).
+series.search_rows(matt, "disney")
+check("and a second search reads it from memory", len(listings), 1)
 
 from app.books import adapter  # noqa: E402
 hits = adapter.search_hits(matt, "disney", unit="series")
@@ -172,7 +180,10 @@ with store.db() as conn:
                  "requested_at) VALUES(?,?,?,?,?,?)",
                  ("kid", "book", "B0CA-FORKY", "book",
                   "Disney Pixar Toy Story: Forky's Kindergarten Adventure", 1.0))
+listed_before = len(listings)
 planned = series.plan(matt, ORIGINALS)
+check("what asking plans against is listed afresh, not kept in memory",
+      len(listings), listed_before + 1)
 check("the book on the shelf is held",
       [c["title"] for c in planned["have"]],
       ["Disney Princess: Belle and the Rose Riddle"])
