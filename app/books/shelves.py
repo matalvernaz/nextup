@@ -33,6 +33,10 @@ _cache: dict[str, tuple[float, dict, bool]] = {}
 OWNED_TTL_SECONDS = 900
 _owned_cache: dict[str, tuple[float, tuple[set, dict]]] = {}
 
+# The same listing's books under each series name, published with the index so
+# the two are always one listing's worth. What a series search plans against.
+_series_cache: dict[str, dict[str, list[dict]]] = {}
+
 
 def owned_index(user: jellyfin.User) -> tuple[set, dict]:
     """ASINs owned, and normalised-title -> author-set, for one account.
@@ -54,9 +58,36 @@ def owned_index(user: jellyfin.User) -> tuple[set, dict]:
         if time.monotonic() - entry[0] > OWNED_TTL_SECONDS:
             _rebuild_owned_behind(user)
         return entry[1]
-    index = engine._owned_index(jellyfin.books(user.id))
-    _publish_owned(user.key, index)
-    return index
+    return _list_and_publish(user)[0]
+
+
+def series_index(user: jellyfin.User) -> tuple[tuple[set, dict], dict[str, list[dict]]]:
+    """`owned_index`, and the library's books under each series name beside it,
+    both from one listing.
+
+    What a series search plans against, served the way the index is: from
+    memory, an expired pair while a rebuild runs behind it. Listing the library
+    was eleven of the twelve and a half seconds a search for "disney" took, of
+    the twenty the client gives a search (2026-09-24). Asking for a series
+    still lists it afresh: see `series.want_series`.
+    """
+    with _cache_guard:
+        entry = _owned_cache.get(user.key)
+        by_series = _series_cache.get(user.key)
+    if entry and by_series is not None:
+        if time.monotonic() - entry[0] > OWNED_TTL_SECONDS:
+            _rebuild_owned_behind(user)
+        return entry[1], by_series
+    return _list_and_publish(user)
+
+
+def _list_and_publish(user: jellyfin.User) -> tuple[tuple[set, dict], dict[str, list[dict]]]:
+    """List one account's library, and publish what the caches keep of it."""
+    library = jellyfin.books(user.id)
+    index = engine._owned_index(library)
+    by_series = engine._books_by_series(library)
+    _publish_owned(user.key, index, by_series)
+    return index, by_series
 
 
 #: Being rebuilt, so a stale answer served to one reader is not rebuilt again
@@ -73,8 +104,7 @@ def _rebuild_owned_behind(user: jellyfin.User) -> None:
 
     def run() -> None:
         try:
-            _publish_owned(user.key,
-                           engine._owned_index(jellyfin.books(user.id)))
+            _list_and_publish(user)
         except Exception as exc:  # noqa: BLE001 - a rebuild with no caller
             # must never take the process down, and the previous index is
             # still being served. `_publish_owned` is not reached, so the
@@ -88,16 +118,25 @@ def _rebuild_owned_behind(user: jellyfin.User) -> None:
     Thread(target=run, name=f"owned-index-{user.key}", daemon=True).start()
 
 
-def _publish_owned(user_key: str, index: tuple[set, dict]) -> None:
+def _publish_owned(user_key: str, index: tuple[set, dict],
+                   by_series: dict[str, list[dict]] | None) -> None:
     """Make an index somebody has just built available to the next reader.
 
     A shelf build lists the library and derives this on the way past. Without
     this the next caller to want it -- a search, or the arrival check on this
     account's requests -- lists all 3,352 books again to derive the same thing,
     in front of whoever opened the screen.
+
+    The books by series go in under the same lock, so `series_index` never
+    pairs one listing's index with another's series. An index that comes
+    without them clears the old ones, and the next series search lists afresh.
     """
     with _cache_guard:
         _owned_cache[user_key] = (time.monotonic(), index)
+        if by_series is None:
+            _series_cache.pop(user_key, None)
+        else:
+            _series_cache[user_key] = by_series
 
 
 def _lock_for(user_key: str) -> Lock:
@@ -225,9 +264,11 @@ def result(user: jellyfin.User, force: bool = False,
                  user.key, force, update_playlist)
         started = time.monotonic()
         data = engine.run(user, update_playlist=update_playlist)
-        # Popped before the shelf is cached or persisted: it is larger than the
-        # shelf itself, and its sets do not survive a JSON round trip.
-        _publish_owned(user.key, data.pop("owned_index"))
+        # Popped before the shelf is cached or persisted: they are larger than
+        # the shelf itself, and the index's sets do not survive a JSON round
+        # trip.
+        _publish_owned(user.key, data.pop("owned_index"),
+                       data.pop("books_by_series", None))
         with _cache_guard:
             _cache[user.key] = (time.monotonic(), data, update_playlist)
         # Written after the memory cache, so a failure to persist costs the next

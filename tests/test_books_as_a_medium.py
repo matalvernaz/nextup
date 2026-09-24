@@ -67,8 +67,10 @@ check.equal(hits[0].get("requested"), True,
 
 # `plan` answers with the rows, not with counts. Reading `missing` as a number
 # raised TypeError for every series that had a gap, which is the only case this
-# search is for.
-adapter.book_series.plan = lambda user, name: {
+# search is for. The library a search plans against is the one kept in memory,
+# and this one is empty.
+adapter.book_series.shelves.series_index = lambda user: ((set(), {}), {})
+adapter.book_series.plan = lambda user, name, **_: {
     "series": "A Series", "have": [{}, {}, {}], "onOrder": [{}],
     "missing": [{"title": "Book Four"}, {"title": "Book Five"}],
 }

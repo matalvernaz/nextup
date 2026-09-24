@@ -536,6 +536,30 @@ def _owned_index(library: list[dict]) -> tuple[set[str], dict[str, set[str]]]:
     return asins, by_title
 
 
+#: What a series plan reads off a book, and nothing larger. A listing carries
+#: each book's overview and play state, and this is kept for every account.
+_SERIES_MEMBER_FIELDS = ("Id", "Name", "SeriesName", "IndexNumber",
+                         "ProviderIds", "People", "AlbumArtist")
+
+
+def _books_by_series(library: list[dict]) -> dict[str, list[dict]]:
+    """The library's books under each series name, by the rule a client groups
+    by: the name, ignoring case and punctuation.
+
+    Derived from the listing the owned index comes from and cached beside it,
+    so a series search reads the library from memory. Listing it was eleven of
+    the twelve and a half seconds a search for "disney" took, of the twenty
+    the client gives a search (2026-09-24).
+    """
+    grouped: dict[str, list[dict]] = defaultdict(list)
+    for item in library:
+        key = _norm(item.get("SeriesName") or "")
+        if key:
+            grouped[key].append({field: item[field]
+                                 for field in _SERIES_MEMBER_FIELDS if field in item})
+    return dict(grouped)
+
+
 def _already_owned(cand: dict, asins: set[str], by_title: dict[str, set[str]]) -> bool:
     """True when a candidate is a book already on disk under any edition.
 
@@ -1543,6 +1567,9 @@ def run(user: jellyfin.User, update_playlist: bool = True) -> dict:
         # the same thing; it is dropped before the shelf is cached, being far
         # larger than the shelf and derivable from one listing.
         "owned_index": (owned_asins, owned_titles),
+        # The same listing by series, for the series search, and dropped with
+        # the index for the same reason.
+        "books_by_series": _books_by_series(library),
         "seeds": len(seeds),
         "library": len(library),
         "ratings": rating_count,

@@ -15,6 +15,7 @@ import math
 import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
+from typing import NamedTuple
 
 from .. import config, jellyfin, listenarr, logs
 from . import audible, engine, shelves, store, wants
@@ -27,14 +28,7 @@ class NotASeries(LookupError):
 
 
 class Unresolvable(Exception):
-    """The series is real here but cannot be matched to one Audible series.
-
-    Carries the library listing it was decided against, where there was one,
-    so a caller offering choices after it does not list the library again: a
-    listing is ten seconds, and two of them overrun a client's patience.
-    """
-
-    library: list[dict] | None = None
+    """The series is real here but cannot be matched to one Audible series."""
 
 
 class Unavailable(Exception):
@@ -64,9 +58,25 @@ def _text(value) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
-def _same_series(item: dict, name: str) -> bool:
-    """The rule a client groups by: the name, ignoring case and punctuation."""
-    return engine._norm(item.get("SeriesName") or "") == engine._norm(name)
+class Library(NamedTuple):
+    """What a plan reads of the library: the owned index of every book, and
+    the books under each series name.
+
+    From a fresh listing, or from memory by way of `shelves.series_index`,
+    which keeps both beside the index it already serves.
+    """
+
+    owned: tuple[set, dict]
+    by_series: dict[str, list[dict]]
+
+    @classmethod
+    def listed(cls, books: list[dict]) -> "Library":
+        return cls(engine._owned_index(books), engine._books_by_series(books))
+
+    def members(self, name: str) -> list[dict]:
+        """The books filed under `name`, by the rule a client groups by: the
+        name, ignoring case and punctuation."""
+        return self.by_series.get(engine._norm(name), [])
 
 
 def _position(value) -> str | None:
@@ -302,18 +312,21 @@ def plans_for(user: jellyfin.User, query: str) -> list[dict]:
     series and no other, and asking for it re-plans under the same name.
 
     Empty when nothing answers. Raises `Unavailable` when Listenarr will not.
-    The library is listed once and shared, because a listing is twelve seconds
-    and every plan needs it.
+    Planned against the library as `shelves.series_index` keeps it in memory,
+    at most `OWNED_TTL_SECONDS` old, the age a book search already accepts:
+    listing it afresh is eleven seconds of the twenty the client gives a
+    search. What asking does is planned against a fresh listing.
     """
     query = query.strip()
     if not query:
         return []
+    library = Library(*shelves.series_index(user))
     try:
-        return [plan(user, query)]
+        return [plan(user, query, library=library)]
     except NotASeries:
         return []
-    except Unresolvable as refused:
-        library = refused.library
+    except Unresolvable:
+        pass
     matches, _ = _readings(query)
     names: list[str] = []
     seen: set[str] = set()
@@ -326,8 +339,6 @@ def plans_for(user: jellyfin.User, query: str) -> list[dict]:
     names = names[:MAX_CHOICES]
     if not names:
         return []
-    if library is None:
-        library = jellyfin.books(user.id)
 
     def choice(name: str) -> dict | None:
         try:
@@ -357,7 +368,7 @@ def _named_in(title: str, index) -> bool:
 
 
 def plan(user: jellyfin.User, name: str, anchor_item_id: str | None = None,
-         library: list[dict] | None = None) -> dict:
+         library: Library | None = None) -> dict:
     """What asking for the rest of a series would do, decided without doing it.
 
     Owned is judged three ways, and the third is the one that matters: by
@@ -384,13 +395,17 @@ def plan(user: jellyfin.User, name: str, anchor_item_id: str | None = None,
     as a gap. An *anchored* plan still requires its anchor: that caller names a
     book on screen and a name that does not hold it is a mismatch worth
     refusing.
+
+    The library is listed afresh unless `library` is given. Search gives the
+    one kept in memory; asking, from the series screen or from search, does
+    not, because what it decides is acted on.
     """
     name = name.strip()
     if not name:
         raise NotASeries("Enter the name of a series.")
     if library is None:
-        library = jellyfin.books(user.id)
-    members = [book for book in library if _same_series(book, name)]
+        library = Library.listed(jellyfin.books(user.id))
+    members = library.members(name)
     if anchor_item_id and all(book.get("Id") != anchor_item_id for book in members):
         raise NotASeries(f"That book is not filed under {name} in your library.")
 
@@ -406,25 +421,21 @@ def plan(user: jellyfin.User, name: str, anchor_item_id: str | None = None,
             # and the caller shows a row for the second and none for the first.
             raise NotASeries(
                 f"Neither your library nor Audible has a series called {name}.")
-        refused = Unresolvable(
+        raise Unresolvable(
             f"Could not tell which Audible series {name} is. "
             + ("The name alone is not enough to pick an edition."
                if not members else
                "None of these books carries an Audible id that names one, and "
                "the name alone is not enough to pick an edition."))
-        refused.library = library
-        raise refused
     series_asin, region = resolved
 
     rows = listenarr.series_books(series_asin, region)
     if rows is None:
         raise Unavailable("Listenarr did not answer.")
     if not rows:
-        refused = Unresolvable(f"Audible lists no books under {name}.")
-        refused.library = library
-        raise refused
+        raise Unresolvable(f"Audible lists no books under {name}.")
 
-    asins, by_title = engine._owned_index(library)
+    asins, by_title = library.owned
     # Folded to upper case, as the catalogue rows are below. Jellyfin and the
     # ledger keep whatever spelling they were handed.
     asins = {a.upper() for a in asins if isinstance(a, str)}
