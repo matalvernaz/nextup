@@ -13,6 +13,7 @@ applies to each book as if it had been asked for on its own.
 """
 import math
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
 
 from .. import config, jellyfin, listenarr, logs
@@ -26,7 +27,14 @@ class NotASeries(LookupError):
 
 
 class Unresolvable(Exception):
-    """The series is real here but cannot be matched to one Audible series."""
+    """The series is real here but cannot be matched to one Audible series.
+
+    Carries the library listing it was decided against, where there was one,
+    so a caller offering choices after it does not list the library again: a
+    listing is ten seconds, and two of them overrun a client's patience.
+    """
+
+    library: list[dict] | None = None
 
 
 class Unavailable(Exception):
@@ -226,6 +234,24 @@ def _series_by_name(name: str) -> tuple[tuple[str, str] | None, int]:
     edition of. They were the same `None` while the only caller had a library
     book behind the name to fall back on describing.
     """
+    matches, listed = _readings(name)
+    if len(matches) == 1:
+        asin, row = matches[0]
+        return (asin, _text(row.get("region")) or config.AUDIBLE_REGION), listed
+    if len(matches) > 1:
+        log.info("series name %r matches %d Audible series; refusing to guess",
+                 name.strip(), len(matches))
+    return None, listed
+
+
+def _readings(name: str) -> tuple[list[tuple[str, dict]], int]:
+    """The catalogue series a name answers to, at the first reading that finds
+    any, and how many series the searches returned at all.
+
+    The readings `_series_by_name` describes. Kept apart from it because two
+    callers want different things from the same answer: one series to plan,
+    or every series a listener could have meant, to choose between.
+    """
     full = name.strip()
     unqualified = _QUALIFIER.sub("", name).strip()
     rows_by_asin: dict[str, dict] = {}
@@ -240,7 +266,7 @@ def _series_by_name(name: str) -> tuple[tuple[str, str] | None, int]:
             if asin and asin not in rows_by_asin:
                 rows_by_asin[asin] = row
     if not rows_by_asin:
-        return None, 0
+        return [], 0
 
     wanted = engine._norm(full)
     wanted_tokens = _tokens(full)
@@ -252,18 +278,86 @@ def _series_by_name(name: str) -> tuple[tuple[str, str] | None, int]:
     for rule in rules:
         matches = [(asin, row) for asin, row in rows_by_asin.items()
                    if rule(engine._norm(_text(row.get("name"))))]
-        if len(matches) == 1:
-            asin, row = matches[0]
-            return (asin, _text(row.get("region")) or config.AUDIBLE_REGION), \
-                len(rows_by_asin)
-        if len(matches) > 1:
-            log.info("series name %r matches %d Audible series; refusing to guess",
-                     full, len(matches))
-            return None, len(rows_by_asin)
-    return None, len(rows_by_asin)
+        if matches:
+            return matches, len(rows_by_asin)
+    return [], len(rows_by_asin)
 
 
-def plan(user: jellyfin.User, name: str, anchor_item_id: str | None = None) -> dict:
+#: How many series one searched name may offer to choose between. Each is a
+#: plan, which is two catalogue requests, and a client gives the whole search
+#: twenty seconds, so the list stays short and is planned a few at a time.
+MAX_CHOICES = 6
+CHOICE_WORKERS = 4
+
+
+def plans_for(user: jellyfin.User, query: str) -> list[dict]:
+    """A plan for every series a searched name could mean.
+
+    One plan when the name picks out one series. When several answer to it,
+    one plan for each, up to `MAX_CHOICES`, so a listener chooses rather than
+    being told there is no such series: "disney" is a word in two of
+    Audible's, and searching for it said "No series found" (2026-09-24).
+    `plan` still refuses to guess for anybody who asks it for one series; each
+    choice is planned under the catalogue's own name for it, which picks that
+    series and no other, and asking for it re-plans under the same name.
+
+    Empty when nothing answers. Raises `Unavailable` when Listenarr will not.
+    The library is listed once and shared, because a listing is twelve seconds
+    and every plan needs it.
+    """
+    query = query.strip()
+    if not query:
+        return []
+    try:
+        return [plan(user, query)]
+    except NotASeries:
+        return []
+    except Unresolvable as refused:
+        library = refused.library
+    matches, _ = _readings(query)
+    names: list[str] = []
+    seen: set[str] = set()
+    for _asin, row in matches:
+        name = _text(row.get("name"))
+        key = engine._norm(name)
+        if key and key not in seen:
+            seen.add(key)
+            names.append(name)
+    names = names[:MAX_CHOICES]
+    if not names:
+        return []
+    if library is None:
+        library = jellyfin.books(user.id)
+
+    def choice(name: str) -> dict | None:
+        try:
+            return plan(user, name, library=library)
+        except (NotASeries, Unresolvable) as exc:
+            # Two catalogue series under one name cannot be told apart by it,
+            # and a choice that cannot be asked for is not one to offer.
+            log.info("series choice %r for %r not offered: %s", name, query, exc)
+            return None
+
+    # A few at a time: each plan waits on the catalogue, not on this process.
+    with ThreadPoolExecutor(max_workers=CHOICE_WORKERS) as pool:
+        planned = list(pool.map(choice, names))
+    return [found for found in planned if found is not None]
+
+
+def _named_in(title: str, index) -> bool:
+    """Whether a listing's title names a book in `index`, under any of the
+    forms `engine._title_keys` gives it, a shared prefix alone excepted.
+
+    Within one series a title is evidence enough without an author; the
+    library's copy can carry a shorter title than Audible's under an author
+    tag padded with the series name.
+    """
+    return any(key in index and not engine.shares_only_a_prefix(key, title, index)
+               for key in engine._title_keys(title))
+
+
+def plan(user: jellyfin.User, name: str, anchor_item_id: str | None = None,
+         library: list[dict] | None = None) -> dict:
     """What asking for the rest of a series would do, decided without doing it.
 
     Owned is judged three ways, and the third is the one that matters: by
@@ -294,7 +388,8 @@ def plan(user: jellyfin.User, name: str, anchor_item_id: str | None = None) -> d
     name = name.strip()
     if not name:
         raise NotASeries("Enter the name of a series.")
-    library = jellyfin.books(user.id)
+    if library is None:
+        library = jellyfin.books(user.id)
     members = [book for book in library if _same_series(book, name)]
     if anchor_item_id and all(book.get("Id") != anchor_item_id for book in members):
         raise NotASeries(f"That book is not filed under {name} in your library.")
@@ -311,19 +406,23 @@ def plan(user: jellyfin.User, name: str, anchor_item_id: str | None = None) -> d
             # and the caller shows a row for the second and none for the first.
             raise NotASeries(
                 f"Neither your library nor Audible has a series called {name}.")
-        raise Unresolvable(
+        refused = Unresolvable(
             f"Could not tell which Audible series {name} is. "
             + ("The name alone is not enough to pick an edition."
                if not members else
                "None of these books carries an Audible id that names one, and "
                "the name alone is not enough to pick an edition."))
+        refused.library = library
+        raise refused
     series_asin, region = resolved
 
     rows = listenarr.series_books(series_asin, region)
     if rows is None:
         raise Unavailable("Listenarr did not answer.")
     if not rows:
-        raise Unresolvable(f"Audible lists no books under {name}.")
+        refused = Unresolvable(f"Audible lists no books under {name}.")
+        refused.library = library
+        raise refused
 
     asins, by_title = engine._owned_index(library)
     # Folded to upper case, as the catalogue rows are below. Jellyfin and the
@@ -334,10 +433,17 @@ def plan(user: jellyfin.User, name: str, anchor_item_id: str | None = None) -> d
     # "Side Jobs: Stories from the Dresden Files" -- under an author tag padded
     # with the series name, which the household-wide check rightly refuses to
     # take for the same author. Measured on the live library, 2026-09-02.
-    member_titles = {
-        key for book in members for key in engine._title_keys(book.get("Name") or "")
-    }
+    # As an index rather than a bare set of keys, so a prefix several books
+    # share is not taken for one of them: "Disney Princess: Moana and Tales
+    # from Motunui" read as held because "Disney Princess: Belle..." is
+    # (2026-09-24). See `engine.shares_only_a_prefix`.
+    _, member_titles = engine._owned_index(members)
     ordered = {a.upper() for a in store.ordered_asins()}
+    # By title too. This listing can come from the other marketplace, whose
+    # ASINs differ from the ones the books were asked for under, and on ASIN
+    # alone three Disney books already on order read as gaps to ask for again.
+    _, ordered_titles = engine._owned_index(
+        [{"Name": title} for title in store.ordered_titles()])
     hidden = {a.upper() for a in store.dismissed_asins(user.key)}
     today = datetime.now(timezone.utc).date()
 
@@ -374,13 +480,13 @@ def plan(user: jellyfin.User, name: str, anchor_item_id: str | None = None) -> d
             "key": _identity(position, title),
         }
         candidate["owned"] = (engine._already_owned(candidate, asins, by_title)
-                              or bool(engine._title_keys(title) & member_titles))
+                              or _named_in(title, member_titles))
         # Ahead of "on order", because a placeholder asked for in an earlier
         # tap is not on its way and saying so would be a lie with a search
         # behind it.
         candidate["notOut"] = not candidate["owned"] and _not_out_yet(row, today)
         candidate["ordered"] = (not candidate["owned"] and not candidate["notOut"]
-                                and asin in ordered)
+                                and (asin in ordered or _named_in(title, ordered_titles)))
         candidate["hidden"] = (not candidate["owned"] and not candidate["notOut"]
                                and not candidate["ordered"] and asin in hidden)
         if candidate["owned"]:
@@ -455,6 +561,11 @@ def state_sentence(have: int, on_order: int, missing: int) -> str:
     """
     total = have + on_order + missing
     if not missing:
+        if have and on_order:
+            # Not "all 8": that read as the whole series with five of its
+            # thirteen still on their way (2026-09-24).
+            return (f"{have} of {total} in your library, {on_order} already on "
+                    "order. Nothing left to ask for.")
         if have:
             return f"You already have all {have} that Audible lists."
         # Nothing to ask for and nothing here: every book is on order, held
@@ -486,16 +597,19 @@ def search_rows(user: jellyfin.User, query: str) -> list[dict]:
     two fields, not one.
     """
     try:
-        planned = plan(user, query.strip())
-    except NotASeries:
-        return []
-    except (Unresolvable, Unavailable) as exc:
+        plans = plans_for(user, query)
+    except Unavailable as exc:
         log.info("series search unresolved query=%r (%s)", query, exc)
         return []
+    return [_search_row(planned) for planned in plans]
+
+
+def _search_row(planned: dict) -> dict:
+    """One planned series, in the recommendation screen's row shape."""
     have = len(planned.get("have") or ())
     on_order = len(planned.get("onOrder") or ())
     missing = len(planned.get("missing") or ())
-    return [{
+    return {
         "asin": planned["seriesAsin"],
         "title": planned.get("catalogueName") or planned["series"],
         # A series is not written by one person and the row has no room to
@@ -516,7 +630,7 @@ def search_rows(user: jellyfin.User, query: str) -> list[dict]:
         "onOrder": on_order,
         "missing": missing,
         "detail": state_sentence(have, on_order, missing),
-    }]
+    }
 
 
 def want_series(user: jellyfin.User, name: str,

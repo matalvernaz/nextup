@@ -480,6 +480,22 @@ def record(user_key: str, medium: str, item_key: str, unit: str,
     return cur.rowcount > 0
 
 
+def outstanding_titles(medium: str) -> list[str]:
+    """The titles of everything anybody is still waiting on, for one medium.
+
+    Beside `outstanding_item_keys` because an audiobook key is one
+    marketplace's ASIN, and a series listing from the other store names the
+    same book under another: matched on key alone, a book on order read as a
+    gap and was asked for again (2026-09-24).
+    """
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT title FROM requests "
+            "WHERE medium=? AND fulfilled_at IS NULL AND title != ''",
+            (medium,)).fetchall()
+    return [row["title"] for row in rows]
+
+
 def outstanding_item_keys(medium: str) -> set[str]:
     """Everything anybody is still waiting on, for one medium.
 
