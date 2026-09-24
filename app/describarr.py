@@ -60,6 +60,41 @@ def _request_params(item: dict) -> dict[str, str]:
     return {"dir": path, "title": title or item.get("Name", "")}
 
 
+#: The types whose outcome can be asked about: one file each. A series or a
+#: season is a folder of them, and would have an answer per episode.
+OUTCOME_TYPES = ("Movie", "Episode")
+
+#: What describarr's /outcome may say. Anything else is passed on as unknown
+#: rather than as a word a client was never written to read.
+OUTCOME_STATES = ("working", "queued", "described", "already_described",
+                  "no_match", "rejected", "error", "unknown")
+
+
+def outcome(item: dict) -> dict:
+    """What became of the last request for this file, in describarr's words.
+
+    Asked of describarr rather than kept here, for the reason the module says:
+    its queue and its record are the answer, and a second copy could disagree.
+    Raises `httpx.HTTPError` when describarr cannot be reached. A describarr
+    that predates /outcome answers 404, which is read as knowing nothing.
+    """
+    path = (item.get("Path") or "").strip()
+    url = config.DESCRIBARR_URL.rstrip("/") + "/outcome"
+    headers = {}
+    if config.DESCRIBARR_API_KEY:
+        headers["X-Api-Key"] = config.DESCRIBARR_API_KEY
+    with httpx.Client(timeout=_TIMEOUT) as client:
+        response = client.get(url, params={"path": path}, headers=headers)
+    if response.status_code == 404:
+        return {"state": "unknown", "detail": "", "at": ""}
+    response.raise_for_status()
+    data = response.json()
+    state = data.get("state")
+    return {"state": state if state in OUTCOME_STATES else "unknown",
+            "detail": str(data.get("detail") or ""),
+            "at": str(data.get("at") or "")}
+
+
 class DescribeRefused(Exception):
     """describarr took the request but would not queue it, with its reason."""
 

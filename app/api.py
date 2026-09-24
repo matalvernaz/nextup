@@ -193,7 +193,10 @@ def capabilities(protocol: int = 1,
         # nothing at all for it then -- the same rule `media` follows, and the
         # same reason it is reported from configuration rather than from a
         # probe. Additive, so a client that predates it goes on working.
-        "describe": {"supported": describarr.configured()},
+        "describe": {"supported": describarr.configured(),
+                     # Whether GET /describe/{itemId} can say what became of
+                     # a request. Additive, so an older client ignores it.
+                     "status": describarr.configured()},
         # Whether this server will clear an acquisition tool's row when
         # something is deleted from the library. Additive, and reported from
         # configuration for the same reason `describe` is: a deployment with
@@ -392,6 +395,44 @@ def post_describe(user: jellyfin.User = Depends(caller),
             status_code=503,
             detail=f"describarr could not be reached: {exc}")
     return {"queued": True, "detail": detail}
+
+
+@router.get("/describe/{item_id}")
+def get_describe(item_id: str,
+                 user: jellyfin.User = Depends(caller)) -> dict:
+    """What became of asking for this title's audio description.
+
+    A request used to end at "it will appear when it is ready", and when no
+    source had a description it never appeared and nothing said so: a listener
+    asked for Heat's described track twice, five days apart (EchoFin audit
+    2026-09-23, feature 5). describarr keeps the latest outcome per file; this
+    asks it, with the path a listener's client cannot see.
+
+    A film and an episode each have one answer. A series or a season is a
+    folder of episodes with an answer apiece, so it is answered "unknown"
+    rather than summed into one that would be wrong for most of them.
+    """
+    if not describarr.configured():
+        raise HTTPException(
+            status_code=503,
+            detail="This server has no describarr configured.")
+    item = jellyfin.item_with_path(item_id, user.id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="No such item.")
+    base = {"version": config.API_VERSION, "itemId": item_id}
+    if (item.get("Type") not in describarr.OUTCOME_TYPES
+            or not (item.get("Path") or "").strip()):
+        return {**base, "state": "unknown", "detail": "", "at": ""}
+    try:
+        found = describarr.outcome(item)
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="The description service could not be reached, so what "
+                   "became of this title is not known.") from exc
+    log.info("api describe status user=%s id=%s state=%s",
+             user.key, item_id, found["state"])
+    return {**base, **found}
 
 
 @router.post("/allowance/reset")
