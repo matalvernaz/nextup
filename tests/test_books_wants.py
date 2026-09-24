@@ -166,6 +166,58 @@ rows = {r["asin"]: r for r in wants.states(matt.key, (set(), {"book 1": set()}))
 assert rows["B0VOLONLY"]["state"] != wants.IN_LIBRARY, rows["B0VOLONLY"]
 
 
+# --- a prefix shared with other books is not the book (2026-09-24) ---------
+# Nine Disney Audible Originals were asked for at once. "Disney Princess: Moana
+# and Tales from Motunui" read as arrived because "Disney Princess" -- the head
+# of four different books already on the shelf -- was one of its title keys,
+# and "Disney Press" is an author of all of them. Arrival also tells Listenarr
+# to stop looking, so it would never have been downloaded.
+from app.books import engine
+
+def book(name, *authors):
+    return {"Name": name,
+            "People": [{"Name": a, "Type": "Author"} for a in authors]}
+
+shelf = engine._owned_index([
+    book("Disney Princess: Belle and the Rose Riddle", "Disney Press", "Juliana Schiavo"),
+    book("Disney Princess: Raya and the Ancient Dragon Spice", "Disney Press", "Cynthea Liu"),
+    book("Disney Princess: Mulan and the Secret Warriors", "Disney Press", "Cynthia Liu"),
+    book("Second Ascension: A Progression Fantasy", "Reece Brooks"),
+    book("Dark Lord of the Farmstead: A High Fantasy Slice-of-Life LitRPG", "Bruce Sentar"),
+    # The fork makes one Author person of a packed artist tag.
+    book("Death Has Joined the Party: A LitRPG Dungeon Crawl (Mana Runners, Book 1) (Unabridged)",
+         "Rachel Aaron, Travis Bach"),
+])
+
+def arrives(title, *authors):
+    row = {"asin": "B0TEST", "title": title, "authors": list(authors)}
+    return wants._arrived(row, *shelf)
+
+assert not arrives("Disney Princess: Moana and Tales from Motunui",
+                   "Disney Press", "Suzanne Francis"), \
+    "a sixth Disney Princess story is not one of the five on the shelf"
+assert arrives("Disney Princess: Belle and the Rose Riddle", "Disney Press"), \
+    "the Disney Princess book that IS on the shelf still arrives"
+assert arrives("Second Ascension: Book One", "Reece Brooks"), \
+    "a volume label and a genre subtitle can be one book"
+assert arrives("Dark Lord of the Farmstead: A Slice of Life LitRPG", "Bruce Sentar"), \
+    "the same subtitle worded differently is the same book"
+assert arrives("Dark Lord of the Farmstead", "Bruce Sentar"), \
+    "a title without its subtitle still finds the book"
+assert arrives("Death Has Joined the Party", "Rachel Aaron", "Travis Bach"), \
+    "two authors packed into one tag still agree with the two asked for"
+assert engine._authors({"People": [{"Name": "Rachel Aaron, Travis Bach",
+                                    "Type": "Author"}]}) == ["Rachel Aaron", "Travis Bach"]
+assert engine._authors({"AlbumArtist": "Dakota Krout; James Hunter"}) == \
+    ["Dakota Krout", "James Hunter"]
+
+# The owned check that keeps suggestions off the shelf had the same flaw.
+assert not engine._already_owned(
+    {"asin": "B0MOANA", "title": "Disney Princess: Moana and Tales from Motunui",
+     "authors": ["Disney Press"]}, *shelf), \
+    "a Disney Princess story not on the shelf can still be suggested"
+
+
 # --- suppression is global, dismissal is personal ---------------------------
 assert "ASIN0" in store.suppressed_asins("someone-else"), \
     "Listenarr is shared, so one person's request suppresses it for everyone"

@@ -17,6 +17,7 @@ completed books. Ratings are signed and ramped once enough exist to avoid lettin
 one early score reorder the whole shelf.
 """
 import math
+import re
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 
@@ -252,17 +253,29 @@ def _people(item: dict, kind: str) -> list[str]:
 
 
 def _authors(item: dict) -> list[str]:
-    """Authors from People, falling back to AlbumArtist.
+    """Authors from People, falling back to AlbumArtist, one name each.
 
     Not interchangeable: 84 of this library's books carry no Author person but do
     carry an AlbumArtist, and reading only People silently drops them from both
     the taste profile and the owned-check.
     """
     names = _people(item, "Author")
-    if names:
-        return names
-    artist = item.get("AlbumArtist")
-    return [artist] if artist else []
+    if not names:
+        artist = item.get("AlbumArtist")
+        names = [artist] if artist else []
+    # One string, several people, from either source. A book's artist tag
+    # packs every author into one -- "Rachel Aaron, Travis Bach" -- and the fork
+    # makes an Author person of that string as it stands, so the book read as
+    # one person nobody asked for and an arrival whose request names the two
+    # never agreed with it: Death Has Joined the Party sat at "still looking"
+    # with the book in the library (2026-09-24). A person's own name has no
+    # comma or semicolon in it.
+    return [part for name in names
+            for part in _ARTIST_SEPARATOR.split(name) if part.strip()]
+
+
+#: Between the authors packed into one AlbumArtist tag.
+_ARTIST_SEPARATOR = re.compile(r"\s*[;,]\s*|\s+&\s+")
 
 
 def _norm(text: str) -> str:
@@ -401,18 +414,125 @@ def _seed_sims(item: dict) -> list[dict]:
     return []
 
 
+class TitleIndex(defaultdict):
+    """Normalised title -> author set, plus what the colon split flattens.
+
+    A plain mapping to every reader that treats it as one. The two attributes
+    are for telling a book from a prefix it shares with others: `fulls` holds
+    each book's whole title, and `tails` the subtitles filed under each head.
+    Without them "Disney Princess" -- the head of five different books here --
+    reads as a book in its own right, and a request for a sixth Disney Princess
+    story was a match for all of them (2026-09-24). See `shares_only_a_prefix`.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(set)
+        self.fulls: set[str] = set()
+        self.tails: dict[str, set[str]] = defaultdict(set)
+
+
+def _head_and_tail(title: str) -> tuple[str, str] | None:
+    """A title's head and subtitle at the first separator `_title_keys` splits
+    on, both normalised, or None where it has no subtitle."""
+    for sep in (":", " - ", " \u2014 "):
+        if sep in title:
+            head, tail = title.split(sep, 1)
+            return _norm(head), _norm(tail)
+    return None
+
+
+#: Words that say nothing about which book a subtitle belongs to.
+_SUBTITLE_FILLER = frozenset({"a", "an", "the", "and", "of", "from", "to", "in",
+                              "on", "for", "with", "by"})
+
+#: Words a subtitle is made of when it describes a book rather than naming
+#: one: its genre, its format, its place in a series. "A Progression Fantasy"
+#: and "Book One" say what a book is; "The Rose Riddle" says which.
+_DESCRIPTIVE_WORDS = frozenset({
+    "litrpg", "gamelit", "progression", "fantasy", "adventure", "novel",
+    "novella", "series", "saga", "chronicle", "chronicles", "dungeon", "crawl",
+    "core", "cultivation", "isekai", "cozy", "slice", "life", "apocalypse",
+    "apocalyptic", "system", "epic", "urban", "sci", "fi", "scifi", "space",
+    "opera", "harem", "romance", "rom", "com", "romcom", "thriller", "mystery",
+    "military", "comedy", "high", "portal", "kingdom", "building", "base",
+    "survival", "reincarnation", "light", "story", "tale", "collection",
+    "unabridged", "abridged", "edition", "dramatized", "dramatised",
+    "adaptation", "audio", "drama", "original", "book", "bk", "volume", "vol",
+    "part", "no", "number", "one", "two", "three", "four", "five", "six",
+    "seven", "eight", "nine", "ten",
+})
+
+
+def _describes_rather_than_names(tail: str) -> bool:
+    """Whether a subtitle is a genre, a format or a volume label: most of its
+    words, once the filler is gone, are descriptive or a number."""
+    words = [w for w in tail.split() if w not in _SUBTITLE_FILLER]
+    if not words:
+        return True
+    described = sum(1 for w in words if w in _DESCRIPTIVE_WORDS or w.isdigit())
+    return described * 10 >= len(words) * 7
+
+
+def _could_be_one_book(one: str, other: str) -> bool:
+    """Whether two subtitles under one head can belong to the same book.
+
+    Yes when either only describes the book ("A Progression Fantasy", "Book
+    One"), since two stores subtitle one edition differently, and when they
+    share half the words of the shorter: "A High Fantasy Slice-of-Life LitRPG"
+    and "A Slice of Life LitRPG". No for two that each name a book:
+    "Moana and Tales from Motunui" and "Belle and the Rose Riddle".
+    """
+    if _describes_rather_than_names(one) or _describes_rather_than_names(other):
+        return True
+    first = set(one.split()) - _SUBTITLE_FILLER
+    second = set(other.split()) - _SUBTITLE_FILLER
+    return len(first & second) * 2 >= min(len(first), len(second))
+
+
+def shares_only_a_prefix(key: str, title: str, index) -> bool:
+    """Whether `title` met the index at `key` only through a prefix it shares.
+
+    True when `key` is `title`'s head, no book in the library is titled just
+    that, and every book filed under the head carries a different subtitle:
+    "Disney Princess: Moana and Tales from Motunui" against "Disney Princess:
+    Belle and the Rose Riddle". False for a match on the whole title, on the
+    subtitle, on a head that is itself somebody's whole title ("Death Has Joined
+    the Party" asked for, "Death Has Joined the Party: A LitRPG Dungeon Crawl"
+    on the shelf), and on a subtitle worded differently. An index built before
+    it carried the attributes cannot tell, and keeps the old answer.
+    """
+    split = _head_and_tail(title)
+    if split is None or split[0] != key:
+        return False
+    fulls = getattr(index, "fulls", None)
+    tails = getattr(index, "tails", None)
+    if fulls is None or tails is None:
+        return False
+    if key in fulls:
+        return False
+    return not any(_could_be_one_book(split[1], seen) for seen in tails.get(key, ()))
+
+
 def _owned_index(library: list[dict]) -> tuple[set[str], dict[str, set[str]]]:
     """ASINs owned, and normalised-title -> author-set for everything else.
 
     ASIN alone is not enough: 76% of this library carries no Audible ASIN at all,
     so an ASIN-only check would recommend three quarters of the collection back.
+    The mapping is a `TitleIndex`, which also remembers whole titles and the
+    subtitles under each head.
     """
     asins = {_asin(i) for i in library if _asin(i)}
-    by_title: dict[str, set[str]] = defaultdict(set)
+    by_title = TitleIndex()
     for item in library:
+        name = item.get("Name") or ""
         authors = {_norm_author(a) for a in _authors(item)}
-        for key in _title_keys(item.get("Name") or ""):
+        for key in _title_keys(name):
             by_title[key] |= authors
+        if _norm(name):
+            by_title.fulls.add(_norm(name))
+        split = _head_and_tail(name)
+        if split is not None and split[0]:
+            by_title.tails[split[0]].add(split[1])
     return asins, by_title
 
 
@@ -426,8 +546,9 @@ def _already_owned(cand: dict, asins: set[str], by_title: dict[str, set[str]]) -
     if cand["asin"] in asins:
         return True
     cand_authors = {_norm_author(a) for a in cand.get("authors") or []}
-    for key in _title_keys(cand.get("title") or ""):
-        if key not in by_title:
+    title = cand.get("title") or ""
+    for key in _title_keys(title):
+        if key not in by_title or shares_only_a_prefix(key, title, by_title):
             continue
         owners = by_title[key]
         if not owners or (cand_authors & owners):
