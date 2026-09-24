@@ -13,6 +13,7 @@ applies to each book as if it had been asked for on its own.
 """
 import math
 import re
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
 from typing import NamedTuple
@@ -171,6 +172,217 @@ def _identity(position: str | None, title: str) -> str:
 
 def _tokens(text: str) -> set[str]:
     return set(engine._norm(text).split())
+
+
+#: Words that say a recording is a dramatization -- a cast, music and effects
+#: in place of one reader -- as a title reads once `engine._norm` has taken the
+#: punctuation out of "(Dramatized Adaptation)", "[Dramatized Adaptation]" or
+#: "(Full-Cast Edition)".
+DRAMATIZATION_MARKERS = ("dramatized adaptation", "dramatised adaptation", "full cast")
+
+#: Publishers that make nothing but dramatizations, with the spaces taken out:
+#: one live listing names GraphicAudio both "Graphic Audio LLC" and
+#: "GraphicAudio".
+DRAMATIZATION_PUBLISHERS = ("graphicaudio",)
+
+#: Audible's content type for a performance rather than a reading. Not needed
+#: to recognise GraphicAudio -- one of its rows on the same listing is an
+#: ordinary "Product" -- but a dramatization from anybody else carries it.
+PERFORMANCE = "performance"
+
+#: What stands first in a cast list where a reader's name would be.
+FULL_CAST = "full cast"
+
+#: What a book left out for being in another recording is said to be, when the
+#: books left out are not all left out for the same reason.
+OTHER_VERSION_REASON = "only on Audible in another version"
+
+
+class Version(NamedTuple):
+    """One recording of a series, as far as the catalogue says.
+
+    Audible files every recording of a book at the same position in the
+    series: the other marketplace's copy of the same reading, a re-recording
+    by a new narrator, an abridgement, and GraphicAudio's dramatization. The
+    first is the same book and the rest are not, and taking whichever row was
+    listed first mixed them. Battle Mage Farmer came back with book 5 as the
+    dramatized adaptation, because the listing put it ahead of Michael
+    Kramer's reading there and nowhere else (2026-09-24); the Wheel of Time
+    listing puts Rosamund Pike first at books 1, 2 and 4 and Kramer and
+    Reading first at 3.
+
+    `None` is "the catalogue did not say", and agrees with anything.
+    """
+
+    dramatized: bool | None
+    abridged: bool | None
+    language: str | None
+    narrators: frozenset[str]
+
+
+def _names_a_dramatization(text: str) -> bool:
+    norm = f" {engine._norm(text)} "
+    return any(f" {marker} " in norm for marker in DRAMATIZATION_MARKERS)
+
+
+def _readers(names) -> frozenset[str]:
+    """Who reads a recording, folded the way authors are, with the cast-list
+    placeholder left out: it is on every dramatization and names nobody."""
+    folded = {engine._norm_author(name) for name in names if isinstance(name, str)}
+    return frozenset(name for name in folded if name and name != FULL_CAST)
+
+
+def _row_version(row: dict) -> Version:
+    """The recording one catalogue row is."""
+    names = [_text(n.get("name")) if isinstance(n, dict) else _text(n)
+             for n in (row.get("narrators") or [])]
+    publisher = engine._norm(_text(row.get("publisher"))).replace(" ", "")
+    dramatized = (
+        _names_a_dramatization(f"{_text(row.get('title'))} {_text(row.get('subtitle'))}")
+        or any(name in publisher for name in DRAMATIZATION_PUBLISHERS)
+        or _text(row.get("contentType")).casefold() == PERFORMANCE
+        or any(engine._norm(name) == FULL_CAST for name in names))
+    book_format = _text(row.get("bookFormat")).casefold()
+    abridged = {"abridged": True, "unabridged": False}.get(book_format)
+    return Version(dramatized, abridged, _text(row.get("language")).casefold() or None,
+                   _readers(names))
+
+
+def _member_version(book: dict, by_asin: dict[str, Version],
+                    at_key: dict[str, list[Version]]) -> Version | None:
+    """Which recording a book in the library is, or None when nothing says.
+
+    Its Audible id decides where the listing carries it. Failing that, its
+    reader: the recording at the same position that one of its narrators
+    reads. Failing both, what its own name and cast list say, which is enough
+    to tell a dramatization from a reading and no more.
+    """
+    asin = (engine._asin(book) or "").upper()
+    if asin in by_asin:
+        return by_asin[asin]
+    names = engine._people(book, "Narrator")
+    readers = _readers(names)
+    position = _position(book.get("IndexNumber"))
+    if readers and position is not None:
+        for version in at_key.get(_identity(position, ""), ()):
+            if version.narrators & readers:
+                return version
+    if (_names_a_dramatization(book.get("Name") or "")
+            or any(engine._norm(name) == FULL_CAST for name in names)):
+        return Version(True, None, None, readers)
+    return Version(None, None, None, readers) if readers else None
+
+
+def _prevailing(values, prefer=None):
+    """The value most of `values` share, ignoring None; `prefer` wins a tie."""
+    counted = Counter(value for value in values if value is not None)
+    if not counted:
+        return None
+    top = max(counted.values())
+    leaders = [value for value, count in counted.items() if count == top]
+    return prefer if prefer in leaders else leaders[0]
+
+
+def _compatible(version: Version, wanted: Version) -> bool:
+    """Whether a recording is the kind asked for: read or dramatized, abridged
+    or not, in the same language. A side the catalogue left blank agrees with
+    anything. A different reader is not a different kind -- a series recast
+    halfway through has only the one recording of its later books."""
+    pairs = ((version.dramatized, wanted.dramatized),
+             (version.abridged, wanted.abridged),
+             (version.language, wanted.language))
+    return all(mine is None or theirs is None or mine == theirs for mine, theirs in pairs)
+
+
+def _wanted_version(members: list[dict], candidates: list[dict]) -> Version:
+    """The recording a plan asks for.
+
+    What the library already holds of the series decides, by the majority of
+    the books it can place, and its readers are the ones to prefer. What that
+    leaves open is settled by the listing: a narrated reading over a
+    dramatization wherever Audible has one, unabridged over abridged, and
+    otherwise the kind that covers the most of the series. Narrated first
+    rather than most-covered first because what this asks for lands in the
+    ordinary book library, and dramatizations are a collection of their own
+    here, kept apart so the two recordings of one book never collide. Anybody
+    who does hold dramatizations of the series in that library is asked for
+    more of them, by the first rule.
+    """
+    by_asin = {c["asin"]: c["version"] for c in candidates}
+    at_key: dict[str, list[Version]] = {}
+    for candidate in candidates:
+        at_key.setdefault(candidate["key"], []).append(candidate["version"])
+    held = [version for version in (_member_version(book, by_asin, at_key)
+                                    for book in members) if version is not None]
+    wanted = Version(
+        _prevailing((v.dramatized for v in held), prefer=False),
+        _prevailing((v.abridged for v in held), prefer=False),
+        _prevailing(v.language for v in held),
+        frozenset().union(*(v.narrators for v in held)))
+    covered: dict[tuple, set[str]] = {}
+    for candidate in candidates:
+        version = candidate["version"]
+        if not candidate["notOut"] and _compatible(version, wanted):
+            kind = (version.dramatized, version.abridged, version.language)
+            covered.setdefault(kind, set()).add(candidate["key"])
+    if not covered:
+        return wanted
+    dramatized, abridged, language = max(
+        covered, key=lambda kind: (kind[0] is False, kind[1] is not True, len(covered[kind])))
+    return Version(
+        wanted.dramatized if wanted.dramatized is not None else dramatized,
+        wanted.abridged if wanted.abridged is not None else abridged,
+        wanted.language if wanted.language is not None else language,
+        wanted.narrators)
+
+
+def _reader_coverage(candidates: list[dict], wanted: Version) -> Counter:
+    """How many books of the series each reader of the wanted kind reads."""
+    read: dict[str, set[str]] = {}
+    for candidate in candidates:
+        if candidate["notOut"] or not _compatible(candidate["version"], wanted):
+            continue
+        for name in candidate["version"].narrators:
+            read.setdefault(name, set()).add(candidate["key"])
+    return Counter({name: len(keys) for name, keys in read.items()})
+
+
+def _choose(editions: list[dict], wanted: Version, coverage: Counter) -> dict | None:
+    """The row to ask for, out of every listing of one missing book.
+
+    Only a recording of the kind wanted, and of those the one with a reader
+    the library already has, then the one whose reader reads most of the
+    series -- so a series nobody holds any of stays in one voice where the
+    catalogue offers a choice. Then the first listed, as before: the two
+    marketplaces' copies of one reading are the same recording. None when the
+    book is only listed in another kind.
+    """
+    eligible = [c for c in editions if _compatible(c["version"], wanted)]
+    if not eligible:
+        return None
+
+    def preference(candidate: dict) -> tuple[int, int]:
+        readers = candidate["version"].narrators
+        return (len(readers & wanted.narrators),
+                max((coverage[name] for name in readers), default=0))
+
+    # `max` keeps the first of equals, which is the listing's order.
+    return max(eligible, key=preference)
+
+
+def _other_version_reason(version: Version, wanted: Version) -> str:
+    """Why a book listed only as `version` was not asked for, spoken."""
+    if version.dramatized and wanted.dramatized is False:
+        return "only on Audible as a dramatized adaptation"
+    if version.dramatized is False and wanted.dramatized:
+        return "not on Audible as a dramatized adaptation"
+    if version.abridged and wanted.abridged is False:
+        return "only on Audible abridged"
+    if version.abridged is False and wanted.abridged:
+        return "only on Audible unabridged"
+    if version.language and wanted.language and version.language != wanted.language:
+        return f"not on Audible in {wanted.language.capitalize()}"
+    return OTHER_VERSION_REASON
 
 
 def _series_from_members(members: list[dict], name: str) -> tuple[str, str] | None:
@@ -396,6 +608,11 @@ def plan(user: jellyfin.User, name: str, anchor_item_id: str | None = None,
     book on screen and a name that does not hold it is a mismatch worth
     refusing.
 
+    **Every gap is asked for in one recording** -- see `Version`. A book
+    Audible lists only as another recording is neither owned nor missing: it
+    is `otherVersion`, held back and said to be, as a book that is not out
+    is.
+
     The library is listed afresh unless `library` is given. Search gives the
     one kept in memory; asking, from the series screen or from search, does
     not, because what it decides is acted on.
@@ -489,6 +706,7 @@ def plan(user: jellyfin.User, name: str, anchor_item_id: str | None = None,
                         if isinstance(a, dict) and _text(a.get("name"))],
             "position": position,
             "key": _identity(position, title),
+            "version": _row_version(row),
         }
         candidate["owned"] = (engine._already_owned(candidate, asins, by_title)
                               or _named_in(title, member_titles))
@@ -505,13 +723,18 @@ def plan(user: jellyfin.User, name: str, anchor_item_id: str | None = None,
         candidates.append(candidate)
     ordered_keys = {c["key"] for c in candidates if c["ordered"]}
     hidden_keys = {c["key"] for c in candidates if c["hidden"]}
+    # One recording for the whole series. Decided before any gap is filled,
+    # because it is the library's copies that say which one this is.
+    wanted = _wanted_version(members, candidates)
+    coverage = _reader_coverage(candidates, wanted)
 
     have: list[dict] = []
     not_out: list[dict] = []
     on_order: list[dict] = []
     left_out: list[dict] = []
-    missing: list[dict] = []
-    missing_keys: set[str] = set()
+    # Every listing of each missing book, in the order Audible lists them,
+    # chosen between once they are all in hand.
+    gaps: dict[str, list[dict]] = {}
     for candidate in candidates:
         key = candidate["key"]
         if candidate["owned"] or key in owned_keys:
@@ -520,25 +743,47 @@ def plan(user: jellyfin.User, name: str, anchor_item_id: str | None = None,
         elif candidate["notOut"]:
             # On the row's own date and no other row's. One marketplace can
             # list a book as out while the other still shows a placeholder for
-            # it, and the edition that is out is a real gap.
-            not_out.append(candidate)
+            # it, and the edition that is out is a real gap. A placeholder for
+            # another recording says nothing about this one.
+            if _compatible(candidate["version"], wanted):
+                not_out.append(candidate)
         elif candidate["ordered"] or key in ordered_keys:
             if not any(row["key"] == key for row in on_order):
                 on_order.append(candidate)
         elif candidate["hidden"] or key in hidden_keys:
             left_out.append(candidate)
-        elif key in missing_keys:
-            # The other edition of a gap already planned for. One book, one
-            # request.
-            continue
         else:
-            missing.append(candidate)
-            missing_keys.add(key)
+            gaps.setdefault(key, []).append(candidate)
+
+    not_out_keys = {c["key"] for c in not_out}
+    missing: list[dict] = []
+    other_version: list[dict] = []
+    for key, editions in gaps.items():
+        chosen = _choose(editions, wanted, coverage)
+        if chosen is not None:
+            # One book, one request, in the recording the series is in.
+            missing.append(chosen)
+        elif key not in not_out_keys:
+            # Listed only as another recording -- the dramatization of a
+            # series read by one narrator, or the reading of one somebody
+            # holds as a dramatization. Not asked for, and said so. A book
+            # whose own recording is announced is not out yet instead.
+            other_version.append(editions[0])
+    # Nor is a book being asked for, or already on its way, also one that is
+    # not out yet because the other marketplace still shows a placeholder for
+    # it. One book, one answer.
+    settled_keys = {c["key"] for c in missing + on_order}
+    not_out = [c for c in not_out if c["key"] not in settled_keys]
+    reasons = {_other_version_reason(c["version"], wanted) for c in other_version}
+    other_reason = reasons.pop() if len(reasons) == 1 else OTHER_VERSION_REASON
 
     log.info("series plan user=%s series=%r asin=%s region=%s listed=%d have=%d "
-             "on_order=%d hidden=%d not_out=%d missing=%d", user.key, name,
+             "on_order=%d hidden=%d not_out=%d missing=%d other_version=%d "
+             "dramatized=%s abridged=%s language=%s readers=%s", user.key, name,
              series_asin, region, len(seen), len(have), len(on_order),
-             len(left_out), len(not_out), len(missing))
+             len(left_out), len(not_out), len(missing), len(other_version),
+             wanted.dramatized, wanted.abridged, wanted.language,
+             ",".join(sorted(wanted.narrators)) or "-")
     return {
         "series": name,
         # Identity stays `series` -- it is what re-plans to this same answer,
@@ -552,12 +797,15 @@ def plan(user: jellyfin.User, name: str, anchor_item_id: str | None = None,
         "leftOut": left_out,
         "notOut": not_out,
         "missing": missing,
+        "otherVersion": other_version,
+        "otherVersionReason": other_reason,
         "rows": {_text(row.get("asin")).upper(): row
                  for row in rows if isinstance(row, dict)},
     }
 
 
-def state_sentence(have: int, on_order: int, missing: int) -> str:
+def state_sentence(have: int, on_order: int, missing: int, other_version: int = 0,
+                   other_reason: str = OTHER_VERSION_REASON) -> str:
     """What a row says about a series, before anybody asks for it.
 
     Deliberately not `sentence`, which describes what one tap just did and
@@ -567,9 +815,23 @@ def state_sentence(have: int, on_order: int, missing: int) -> str:
     have to read as a sentence at zero too: "0 of 12 in your library" is
     arithmetic where "none of the 12" is English, and it is spoken aloud.
 
+    Books listed only as another recording count towards the total and are
+    named as such, so a series with nothing left to ask for is not claimed
+    to be all here.
+
     Lives here rather than in one adapter because both search routes put the
     same row on screen and a second copy is a second wording to drift.
     """
+    if other_version:
+        total = have + on_order + missing + other_version
+        parts = [f"{have} of {total} in your library" if have
+                 else f"None of the {total} in your library"]
+        if on_order:
+            parts.append(f"{on_order} already on order")
+        parts.append(f"{other_version} {other_reason}")
+        if missing:
+            parts.append(f"{missing} to ask for")
+        return ", ".join(parts) + ("." if missing else ". Nothing left to ask for.")
     total = have + on_order + missing
     if not missing:
         if have and on_order:
@@ -620,6 +882,7 @@ def _search_row(planned: dict) -> dict:
     have = len(planned.get("have") or ())
     on_order = len(planned.get("onOrder") or ())
     missing = len(planned.get("missing") or ())
+    other_version = len(planned.get("otherVersion") or ())
     return {
         "asin": planned["seriesAsin"],
         "title": planned.get("catalogueName") or planned["series"],
@@ -640,7 +903,9 @@ def _search_row(planned: dict) -> dict:
         "have": have,
         "onOrder": on_order,
         "missing": missing,
-        "detail": state_sentence(have, on_order, missing),
+        "otherVersion": other_version,
+        "detail": state_sentence(have, on_order, missing, other_version,
+                                 planned.get("otherVersionReason") or OTHER_VERSION_REASON),
     }
 
 
@@ -698,6 +963,7 @@ def want_series(user: jellyfin.User, name: str,
     on_order_count = _distinct_books(planned["onOrder"])
     left_out_count = _distinct_books(planned["leftOut"])
     not_out_count = _distinct_books(planned["notOut"])
+    other_version = [c["title"] for c in planned["otherVersion"]]
     return {
         "series": name,
         "seriesAsin": planned["seriesAsin"],
@@ -705,6 +971,7 @@ def want_series(user: jellyfin.User, name: str,
         "onOrderCount": on_order_count,
         "leftOutCount": left_out_count,
         "notOutCount": not_out_count,
+        "otherVersionCount": len(other_version),
         "requested": [{"asin": c["asin"], "title": c["title"]} for c in requested],
         "failed": [{"asin": c["asin"], "title": c["title"], "reason": c["reason"]}
                    for c in failed],
@@ -714,7 +981,8 @@ def want_series(user: jellyfin.User, name: str,
             left_out=left_out_count, not_out=not_out_count,
             requested=[c["title"] for c in requested],
             failed=[c["title"] for c in failed],
-            held_back=held_back, cap_hit=cap_hit, missing=len(missing)),
+            held_back=held_back, cap_hit=cap_hit, missing=len(missing),
+            other_version=other_version, other_reason=planned["otherVersionReason"]),
     }
 
 
@@ -737,19 +1005,30 @@ def _plural(count: int, noun: str) -> str:
     return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
 
 
+def _other_version_clause(titles: list[str], reason: str) -> str:
+    """Which books were held back for being another recording, by name, so
+    any of them can still be asked for on its own."""
+    one = len(titles) == 1
+    return (f"{_plural(len(titles), 'book')} {'is' if one else 'are'} {reason}, "
+            f"so {'it was' if one else 'they were'} not asked for: {_named(titles)}.")
+
+
 def sentence(name: str, *, owned_count: int, on_order: int, left_out: int,
              requested: list[str], failed: list[str], held_back: int,
-             cap_hit: bool, missing: int, not_out: int = 0) -> str:
+             cap_hit: bool, missing: int, not_out: int = 0,
+             other_version: list[str] | None = None,
+             other_reason: str = OTHER_VERSION_REASON) -> str:
     """What to say about the outcome, in full, because the row that would have
     carried it is on another screen and the tap has nothing else to show for
     itself."""
     parts: list[str] = []
+    other_version = other_version or []
     if not missing:
-        if not on_order and not left_out and not not_out:
+        if not on_order and not left_out and not not_out and not other_version:
             return (f"You already have every book Audible lists in {name}: "
                     f"{_plural(owned_count, 'book')}.")
         parts.append(f"You have {_plural(owned_count, 'book')} of {name}.")
-        if on_order and not left_out and not not_out:
+        if on_order and not left_out and not not_out and not other_version:
             parts.append(
                 f"The {_plural(on_order, 'book') if on_order != 1 else 'one'} you do not "
                 f"have {'are' if on_order != 1 else 'is'} already being looked for.")
@@ -762,6 +1041,8 @@ def sentence(name: str, *, owned_count: int, on_order: int, left_out: int,
         if not_out:
             parts.append(f"{_plural(not_out, 'book')} "
                          f"{'is' if not_out == 1 else 'are'} not out yet.")
+        if other_version:
+            parts.append(_other_version_clause(other_version, other_reason))
         return " ".join(parts)
 
     if requested:
@@ -789,4 +1070,6 @@ def sentence(name: str, *, owned_count: int, on_order: int, left_out: int,
     if not_out:
         parts.append(f"{_plural(not_out, 'book')} "
                      f"{'is' if not_out == 1 else 'are'} not out yet.")
+    if other_version:
+        parts.append(_other_version_clause(other_version, other_reason))
     return " ".join(parts)
