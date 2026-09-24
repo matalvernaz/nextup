@@ -337,8 +337,12 @@ def _arrived(row: dict, asins: set, by_title: dict) -> bool:
     if row["asin"] in asins:
         return True
     wanted = {engine._norm_author(a) for a in row.get("authors") or []}
-    for key in _requested_title_keys(row.get("title") or ""):
-        if key not in by_title:
+    title = row.get("title") or ""
+    for key in _requested_title_keys(title):
+        # A prefix shared with other books is not the book: "Disney Princess"
+        # heads five of them here, and a request for a sixth read as arrived,
+        # which also tells Listenarr to stop looking for it (2026-09-24).
+        if key not in by_title or engine.shares_only_a_prefix(key, title, by_title):
             continue
         owners = by_title[key]
         if not owners or not wanted or (wanted & owners):
