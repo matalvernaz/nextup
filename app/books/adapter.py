@@ -76,6 +76,7 @@ def _series_hit(planned: dict, query: str) -> dict:
     missing = len(planned.get("missing") or ())
     have = len(planned.get("have") or ())
     on_order = len(planned.get("onOrder") or ())
+    other_version = len(planned.get("otherVersion") or ())
     return {
         "medium": "book",
         "unit": SERIES_UNIT,
@@ -91,7 +92,9 @@ def _series_hit(planned: dict, query: str) -> dict:
         # book: what "owned" means for it is that the library already holds
         # everything Audible lists.
         "owned": missing == 0,
-        "overview": book_series.state_sentence(have, on_order, missing),
+        "overview": book_series.state_sentence(
+            have, on_order, missing, other_version,
+            planned.get("otherVersionReason") or book_series.OTHER_VERSION_REASON),
     }
 
 
