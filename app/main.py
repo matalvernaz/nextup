@@ -24,8 +24,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from . import (api, arr, backends, compat_nextread, config, imports, jellyfin,
-               logs, media, recommendations, selfcheck, sessions, settings,
-               setup, store, throttle, wants)
+               logs, media, recommendations, seasons, selfcheck, sessions,
+               settings, setup, store, throttle, wants)
 from .books import hardcover_shelf
 from .books import shelves as book_shelves
 from .books import store as book_store
@@ -622,15 +622,63 @@ def get_accounts(request: Request, msg: str = ""):
                      "Jellyfin administrator account."})
     served = sorted(media.available().items())
     overrides = store.cap_overrides()
+    series_served = media.SERIES in dict(served)
+    chosen = (store.setting_by_account(seasons.SETTING)
+              if series_served else {})
     accounts = [{"id": account.id, "name": account.name,
                  "keyholder": account.is_admin,
-                 "allowances": _allowance_rows(account, served, overrides)}
+                 "allowances": _allowance_rows(account, served, overrides),
+                 "seasons": _seasons_phrase(chosen.get(account.id))}
                 for account in sorted(jellyfin.accounts(),
                                       key=lambda a: a.name.casefold())]
     return templates.TemplateResponse(
         request=request, name="accounts.html",
         context={"user": user, "accounts": accounts, "message": msg,
-                 "readonly": False, "detail": ""})
+                 "readonly": False, "detail": "",
+                 "series_served": series_served,
+                 "season_counts": _season_counts(accounts, chosen),
+                 "season_default": _seasons_phrase(
+                     config.SERIES_SEASONS_DEFAULT)})
+
+
+#: How a choice of seasons reads on the accounts page, one per kind, so a
+#: stretch of seasons counts once whatever the stretch is.
+_SEASON_LABELS = {
+    seasons.ALL: "Every season",
+    seasons.LATEST: "The latest season",
+    seasons.RANGE: "A stretch of seasons",
+    seasons.NEW: "New episodes only",
+}
+
+
+def _seasons_phrase(value: str | None) -> str:
+    """One account's choice as the accounts page says it, or "" for none."""
+    picked = seasons.decode(value)
+    if picked is None:
+        return ""
+    if picked.choice == seasons.RANGE:
+        return f"Seasons {picked.first} to {picked.last}"
+    return _SEASON_LABELS[picked.choice]
+
+
+def _season_counts(accounts: list[dict],
+                   chosen: dict[str, str]) -> list[tuple[str, int]]:
+    """How many accounts chose each kind, most first, then those who have not.
+
+    What the beta asks everybody is exactly this: which one most people pick
+    becomes the default for whoever has not chosen.
+    """
+    tally: dict[str, int] = {}
+    unchosen = 0
+    for account in accounts:
+        picked = seasons.decode(chosen.get(account["id"]))
+        if picked is None:
+            unchosen += 1
+            continue
+        label = _SEASON_LABELS[picked.choice]
+        tally[label] = tally.get(label, 0) + 1
+    ranked = sorted(tally.items(), key=lambda item: (-item[1], item[0]))
+    return ranked + ([("Not chosen yet", unchosen)] if unchosen else [])
 
 
 @app.post("/accounts")

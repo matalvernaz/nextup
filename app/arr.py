@@ -46,6 +46,9 @@ class AddResult(NamedTuple):
     title: str = ""
     year: str = ""
     created: bool = True
+    #: Series only: which seasons were asked for, as `seasons.decode` reads
+    #: it. Empty when no choice applied.
+    seasons: str = ""
 
 
 @dataclass(frozen=True, slots=True)

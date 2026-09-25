@@ -21,7 +21,7 @@ from threading import Lock
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query
 
 from . import (arr, config, describarr, gone, imports, jellyfin, logs, media,
-               recommendations, store, wants)
+               recommendations, seasons, store, wants)
 
 log = logs.get("api")
 
@@ -162,6 +162,12 @@ def capabilities(protocol: int = 1,
             "backendReachable": found.backend_reachable,
             "backendDetail": found.backend_detail,
         })
+        if found.key == media.SERIES:
+            # Which seasons an ask gets. `choice` is null until this account
+            # has chosen, and `default` is null while the server gives nobody
+            # one -- both null is a client's cue to ask before the first
+            # series. Additive, so an older client ignores it.
+            blocks[-1]["seasons"] = _seasons_block(user)
     log.info("capabilities user=%s keyholder=%s media=%s",
              user.key, user.is_admin, [b["medium"] for b in blocks])
     recommendation_media = []
@@ -313,8 +319,15 @@ def post_want(user: jellyfin.User = Depends(caller),
               ref: str = Body("", embed=True),
               album: str = Body("", embed=True),
               duration_seconds: float | None = Body(
-                  None, embed=True, alias="durationSeconds")) -> dict:
+                  None, embed=True, alias="durationSeconds"),
+              seasons_asked: dict | None = Body(
+                  None, embed=True, alias="seasons"),
+              remember: bool = Body(False, embed=True)) -> dict:
     """Ask for one thing. Repeating it is free and spends no allowance.
+
+    `seasons` (series only) is which of them to ask for this once, as in
+    `/capabilities`; absent, the account's usual choice applies. `remember`
+    also keeps it as that usual choice.
 
     The extra fields are what the search hit said. Films and series need none
     of them -- their ledger key carries the provider id and the acquisition
@@ -329,11 +342,18 @@ def post_want(user: jellyfin.User = Depends(caller),
     a client that does not send them is no worse off than before.
     """
     log.info("api want user=%s medium=%s key=%s", user.key, medium, item_key)
+    choice = None
+    if seasons_asked is not None and medium == media.SERIES:
+        try:
+            choice = seasons.from_body(seasons_asked)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     hit = {"title": title, "year": year, "artist": artist,
            "source": source, "ref": ref, "album": album,
            "durationSeconds": duration_seconds}
     try:
-        state, message = wants.want(user, medium, item_key, unit, hit)
+        state, message = wants.want(user, medium, item_key, unit, hit,
+                                    choice=choice, remember=remember)
     except wants.Denied as denied:
         raise HTTPException(status_code=409, detail=str(denied)) from denied
     except (arr.Unavailable, jellyfin.JellyfinUnavailable) as exc:
@@ -609,6 +629,42 @@ def post_deleted(user: jellyfin.User = Depends(caller),
     log.info("deleted user=%s id=%s type=%s cleared=%s",
              user.key, item_id, kind, report["cleared"])
     return report
+
+
+@router.put("/seasons")
+def put_seasons(user: jellyfin.User = Depends(caller),
+                choice: str | None = Body(None, embed=True),
+                first: int | None = Body(None, embed=True, alias="from"),
+                last: int | None = Body(None, embed=True, alias="to")) -> dict:
+    """Set which seasons of a series this account usually asks for.
+
+    The same shape `/capabilities` publishes, and a null `choice` clears it
+    back to not chosen. Kept here rather than on the phone so the count of who
+    chose what is somewhere a keyholder can read it, and so a second device or
+    a reinstall does not ask again.
+    """
+    if media.get(media.SERIES) is None:
+        raise HTTPException(status_code=409,
+                            detail="Series are not available on this server.")
+    if choice is None:
+        store.put_user_setting(user.key, seasons.SETTING, "")
+        log.info("seasons cleared user=%s", user.key)
+        return _seasons_block(user)
+    try:
+        picked = seasons.from_body({"choice": choice, "from": first, "to": last})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    store.put_user_setting(user.key, seasons.SETTING, picked.encode())
+    log.info("seasons set user=%s choice=%s", user.key, picked.encode())
+    return _seasons_block(user)
+
+
+def _seasons_block(user: jellyfin.User) -> dict:
+    own = seasons.decode(store.user_setting(user.key, seasons.SETTING))
+    default = seasons.decode(config.SERIES_SEASONS_DEFAULT)
+    return {"choices": list(seasons.CHOICES),
+            "choice": own.as_json() if own else None,
+            "default": default.as_json() if default else None}
 
 
 @router.post("/cancel")

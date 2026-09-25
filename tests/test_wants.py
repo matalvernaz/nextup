@@ -60,7 +60,7 @@ set_owned()
 added: list[tuple] = []
 radarr.add = lambda tmdb, title="", year="", monitored=True: (
     added.append(("movie", tmdb)) or arr.AddResult(True, "Sent to Radarr.", "r1", title, year))
-sonarr.add = lambda tvdb, title="", monitored=True: (
+sonarr.add = lambda tvdb, title="", monitored=True, choice=None: (
     added.append(("series", tvdb)) or arr.AddResult(True, "Sent to Sonarr.", "s1", title))
 #: The real adapter, kept aside because the stub below replaces it for the
 #: allowance tests and one case further down is about the body it builds.
