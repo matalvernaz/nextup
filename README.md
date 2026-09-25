@@ -238,6 +238,7 @@ it placed it under.
 | `GET` | `/api/v1/requests?medium=` | This account's requests and their states |
 | `GET` | `/api/v1/recommendations?medium=&libraryId=` | Unstarted items from this account's library, ranked |
 | `POST` | `/api/v1/want` | Ask for one thing |
+| `PUT` | `/api/v1/seasons` | Which seasons of a series this account usually asks for |
 | `POST` | `/api/v1/cancel` | Take one back |
 | `POST` | `/api/v1/deleted` | Something was deleted from the library; clear what was still acquiring it |
 | `POST` | `/api/v1/import` | Hand over a whole list as text; it is matched, and nothing is asked for |
@@ -251,6 +252,16 @@ at all — is worked out here. It resolves **against the acquisition tool by
 provider id**, not against this service's ledger, because most of what Radarr
 and Sonarr hold was never asked for through Nextup and a ledger-first lookup
 would clear nothing for it.
+
+`seasons` is how much of a series an ask gets: every season, the latest one to
+have aired, a stretch such as seasons 2 to 4, or only new episodes as they air.
+The series block of `capabilities` lists the choices, this account's own and
+the server's `SERIES_SEASONS_DEFAULT`; both null is a client's cue to ask the
+person before their first series. `want` takes a `seasons` object for one ask
+and `remember` to keep it as the usual one. The latest season is decided once
+Sonarr has the episode list, because the catalogue lists announced seasons as
+readily as aired ones. A request is met when the seasons asked for have
+arrived, since Sonarr counts only monitored episodes in the total it reports.
 
 `import` takes the file as text rather than rows a client has already parsed.
 Comma quoting, byte-order marks and delimiter sniffing are done once, here, in
