@@ -7,6 +7,8 @@ on any particular acquisition tool being present.
 """
 import os
 
+from . import seasons
+
 
 def _text(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
@@ -123,6 +125,23 @@ JELLYFIN_USER = _text("JELLYFIN_USER")
 # means the series, and a first-season default silently half-fills the request.
 SONARR_MONITOR = _text("SONARR_MONITOR", "all")
 SONARR_SEASON_FOLDER = _text("SONARR_SEASON_FOLDER", "true").lower() != "false"
+
+# Which seasons of a series somebody gets when they have not chosen for
+# themselves: `all`, `latest`, `new` or `range:1-2`. Empty means nobody is
+# given one, so a client asks each person to choose before their first series;
+# a request that still arrives without a choice (an older client) monitors
+# `SONARR_MONITOR`, as before. Refused at start-up when it does not parse:
+# misread, it would quietly decide how much of every show is downloaded.
+SERIES_SEASONS_DEFAULT = _text("SERIES_SEASONS_DEFAULT", "")
+if SERIES_SEASONS_DEFAULT and seasons.decode(SERIES_SEASONS_DEFAULT) is None:
+    raise ValueError(
+        f"SERIES_SEASONS_DEFAULT={SERIES_SEASONS_DEFAULT!r} is not a choice of "
+        "seasons; use all, latest, new, or range:<first>-<last>")
+
+# How long asking for the latest season waits for Sonarr to list the episodes,
+# which is the only way to tell an aired season from one that is merely
+# announced. Usually a few seconds; Sonarr can queue it behind other work.
+SONARR_LATEST_WAIT_SECONDS = _int("SONARR_LATEST_WAIT_SECONDS", 45)
 
 
 # Buskarr's JSON API refuses every request unless this matches the key it was

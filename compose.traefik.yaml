@@ -66,7 +66,13 @@ services:
       SONARR_QUALITY_PROFILE_ID: "4"
       # SONARR_ROOT_FOLDER: "/tv"
       # Sonarr's own vocabulary: all, firstSeason, future, missing, existing.
+      # Used only for an ask that carries no choice of seasons (an older
+      # client, or nobody has chosen and there is no default below).
       SONARR_MONITOR: "all"
+      # Which seasons somebody gets when they have not chosen: all, latest,
+      # new, or range:1-2. Unset, a client asks each person before their
+      # first series, and the accounts page counts what people chose.
+      # SERIES_SEASONS_DEFAULT: "latest"
 
       # --- Music --------------------------------------------------------
       BUSKARR_URL: "http://buskarr:8000"

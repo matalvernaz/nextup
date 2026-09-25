@@ -7,7 +7,8 @@ quietly skips half of it.
 """
 import time
 
-from . import buskarr, config, jellyfin, logs, media, radarr, sonarr, store
+from . import (buskarr, config, jellyfin, logs, media, radarr, seasons,
+               sonarr, store)
 from .books import adapter as books
 
 log = logs.get("wants")
@@ -104,8 +105,14 @@ def search(query: str, medium: str, unit: str = "",
 
 
 def want(user: jellyfin.User, medium: str, item_key: str, unit: str = "",
-         hit: dict | None = None) -> tuple[str, str]:
+         hit: dict | None = None, choice: seasons.Seasons | None = None,
+         remember: bool = False) -> tuple[str, str]:
     """Ask for one thing. Returns (state, message). Raises Denied if refused.
+
+    `choice` is which seasons of a series to ask for this once, and `remember`
+    keeps it as this account's usual choice as well. That is the answer to the
+    question a client puts before somebody's first series, kept before the ask
+    is tried so a refused ask (a spent allowance) does not lose it.
 
     Ordered so nothing is charged against the allowance until the acquisition
     tool has accepted it, and so a repeated tap is free: the ledger is keyed on
@@ -132,6 +139,14 @@ def want(user: jellyfin.User, medium: str, item_key: str, unit: str = "",
     unit = unit or found.units[0]
     if unit not in found.units:
         raise Denied(f"{unit} is not something that can be asked for.")
+    if medium == media.SERIES:
+        if choice is not None and remember:
+            store.put_user_setting(user.key, seasons.SETTING, choice.encode())
+            log.info("seasons remembered user=%s choice=%s",
+                     user.key, choice.encode())
+        choice = choice or usual_seasons(user)
+    else:
+        choice = None
 
     # Everything from here to the ledger write is one decision. Read as four
     # separate steps it let two taps arriving together both find the allowance
@@ -149,11 +164,23 @@ def want(user: jellyfin.User, medium: str, item_key: str, unit: str = "",
     # hold in the opposite order and no cycle to deadlock on.
     with store.key_lock(user.key, medium):
         with store.key_lock("item", medium, item_key):
-            return _admit(user, found, medium, item_key, unit, hit or {})
+            return _admit(user, found, medium, item_key, unit, hit or {},
+                          choice)
+
+
+def usual_seasons(user: jellyfin.User) -> seasons.Seasons | None:
+    """Which seasons this account gets when an ask says nothing.
+
+    Their own choice, then the server's default, then None, which leaves the
+    add to `SONARR_MONITOR` as it was before anybody could choose.
+    """
+    own = seasons.decode(store.user_setting(user.key, seasons.SETTING))
+    return own or seasons.decode(config.SERIES_SEASONS_DEFAULT)
 
 
 def _admit(user: jellyfin.User, found: media.Medium, medium: str,
-           item_key: str, unit: str, hit: dict) -> tuple[str, str]:
+           item_key: str, unit: str, hit: dict,
+           choice: seasons.Seasons | None = None) -> tuple[str, str]:
     """The guarded half of `want`. Never called without its lock held."""
     if (existing := store.get(user.key, medium, item_key)) is not None:
         if existing["fulfilled_at"] is None or _still_held(existing, medium):
@@ -189,7 +216,7 @@ def _admit(user: jellyfin.User, found: media.Medium, medium: str,
     log.info("want user=%s medium=%s unit=%s key=%s cost=%d remaining=%s",
              user.key, medium, unit, item_key, price,
              "uncapped" if remaining is None else remaining)
-    result = _add(medium, unit, item_key, hit, user)
+    result = _add(medium, unit, item_key, hit, user, choice)
     if not result.ok:
         log.warning("want refused user=%s key=%s reason=%s",
                     user.key, item_key, result.message)
@@ -207,7 +234,7 @@ def _admit(user: jellyfin.User, found: media.Medium, medium: str,
         # sent: it is the spelling the library will carry when it lands.
         result.title or hit.get("title") or "",
         result.year or str(hit.get("year") or ""),
-        price, backend_id)
+        price, backend_id, seasons=result.seasons)
     log.info("want accepted user=%s key=%s backend_id=%s message=%r",
              user.key, item_key, result.backend_id, result.message)
     return ON_ITS_WAY, result.message
@@ -243,13 +270,14 @@ def _still_held(row, medium: str) -> bool:
 
 
 def _add(medium: str, unit: str, item_key: str, hit: dict,
-         user: jellyfin.User):
+         user: jellyfin.User, choice: seasons.Seasons | None = None):
     """Hand one thing to whichever tool acquires that medium."""
     if medium == media.MOVIE:
         return radarr.add(_provider_id(item_key), hit.get("title", ""),
                           str(hit.get("year") or ""))
     if medium == media.SERIES:
-        return sonarr.add(_provider_id(item_key), hit.get("title", ""))
+        return sonarr.add(_provider_id(item_key), hit.get("title", ""),
+                          choice=choice)
     # The name, not the ledger key: buskarr renders `requested_by` in its own
     # queue table for a person to read, and an account id says nothing there.
     return buskarr.add(unit, hit, user.name)
@@ -426,6 +454,11 @@ def _described(
         "requestedAt": row["requested_at"],
     }
     if row["medium"] == media.SERIES:
+        # Which seasons were asked for, so the list can say it. Absent on a
+        # row from before the choice existed, which was asked for whole.
+        asked = seasons.decode(row["seasons"] if "seasons" in row.keys() else "")
+        if asked is not None:
+            described["seasons"] = asked.as_json()
         # A series arrives in pieces, so how much of it is here is part of
         # what its state means. Absent rather than zero where Jellyfin could
         # not be asked: nothing is known, and a zero would say otherwise.

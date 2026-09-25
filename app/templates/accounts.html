@@ -17,6 +17,29 @@
   Keyholders are never capped, so they have no boxes here.
 </p>
 
+{% if series_served %}
+<section aria-labelledby="seasons-heading">
+  <h3 id="seasons-heading">Seasons of a show</h3>
+  <p>
+    Which seasons each account asks for when it asks for a series. People
+    choose for themselves; this is the count so far.
+  </p>
+  <ul>
+    {% for label, count in season_counts %}
+    <li>{{ label }}: {{ count }}</li>
+    {% endfor %}
+  </ul>
+  <p>
+    {% if season_default %}
+    Anybody who has not chosen gets {{ season_default|lower }}.
+    {% else %}
+    Nobody is given a default, so each person is asked before their first
+    series.
+    {% endif %}
+  </p>
+</section>
+{% endif %}
+
 {% for account in accounts %}
 <section aria-labelledby="who-{{ account.id }}">
   <h3 id="who-{{ account.id }}">
@@ -25,6 +48,10 @@
        punctuation level. #}
     {{ account.name }}, {{ "Keyholder" if account.keyholder else "Member" }}
   </h3>
+
+  {% if series_served %}
+  <p>Seasons of a show: {{ account.seasons or "not chosen yet" }}.</p>
+  {% endif %}
 
   {% if account.keyholder %}
   <p>Uncapped. Nothing here applies while this account is a keyholder.</p>

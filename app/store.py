@@ -55,6 +55,8 @@ CREATE TABLE IF NOT EXISTS requests (
     -- tagger's marketplace issue different ASINs for the same edition, so
     -- arrival is decided on the title with an author to agree with it.
     authors      TEXT NOT NULL DEFAULT '',
+    -- Series only: which seasons were asked for. See `seasons.decode`.
+    seasons      TEXT NOT NULL DEFAULT '',
     requested_at REAL NOT NULL,
     fulfilled_at REAL,
     PRIMARY KEY (user_key, medium, item_key)
@@ -357,7 +359,11 @@ def _drop_outdated_caches(conn: sqlite3.Connection) -> None:
 #: EXISTS` will not reshape a table that is already there, so a new column has
 #: to be added by name. Each carries its own default, so existing rows read as
 #: something rather than as null.
-_LATER_COLUMNS = (("authors", "TEXT NOT NULL DEFAULT ''"),)
+_LATER_COLUMNS = (("authors", "TEXT NOT NULL DEFAULT ''"),
+                  # Series only: which seasons were asked for, in the short
+                  # form `seasons.decode` reads. Empty on every row from before
+                  # the choice existed, which were all asked for whole.
+                  ("seasons", "TEXT NOT NULL DEFAULT ''"))
 
 
 def _add_missing_columns(conn: sqlite3.Connection) -> None:
@@ -461,7 +467,7 @@ def rekey_users(name_to_id: dict[str, str]) -> int:
 
 def record(user_key: str, medium: str, item_key: str, unit: str,
            title: str, year: str, cost: int, backend_id: str,
-           authors: str = "") -> bool:
+           authors: str = "", seasons: str = "") -> bool:
     """Write down that this account asked for this thing. True when it is new.
 
     An existing row is left alone rather than refreshed. Asking twice must not
@@ -472,11 +478,11 @@ def record(user_key: str, medium: str, item_key: str, unit: str,
     with db() as conn:
         cur = conn.execute(
             "INSERT INTO requests (user_key, medium, item_key, unit, title, "
-            "year, cost, backend_id, authors, requested_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?) "
+            "year, cost, backend_id, authors, seasons, requested_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT (user_key, medium, item_key) DO NOTHING",
             (user_key, medium, item_key, unit, title, year, cost, backend_id,
-             authors, time.time()))
+             authors, seasons, time.time()))
     return cur.rowcount > 0
 
 
@@ -1028,10 +1034,11 @@ def put_external(cache_key: str, payload) -> None:
 #: Only these may be written per account. The same allowlist reasoning as
 #: `settings.WRITABLE`: a table that can hold arbitrary names is one where a
 #: bug writes something load-bearing.
-USER_WRITABLE = frozenset({"HARDCOVER_TOKEN"})
+USER_WRITABLE = frozenset({"HARDCOVER_TOKEN", "SERIES_SEASONS"})
 
-#: Never logged, never rendered back into a form field. All of it, so far --
-#: the only thing an account can set is a credential.
+#: Never logged, never rendered back into a form field. The credential; which
+#: seasons somebody usually asks for is nobody's secret, and a keyholder page
+#: counts them.
 USER_SECRET = frozenset({"HARDCOVER_TOKEN"})
 
 
@@ -1071,6 +1078,22 @@ def put_user_setting(user_key: str, name: str, value: str) -> None:
             "VALUES (?,?,?,?) ON CONFLICT (user_key, name) DO UPDATE SET "
             "value=excluded.value, set_at=excluded.set_at",
             (user_key, name, value, time.time()))
+
+
+def setting_by_account(name: str) -> dict[str, str]:
+    """Every account's own value for one setting, keyed by account.
+
+    For settings that are not secret only: this is how a keyholder page shows
+    who chose what. Refused for a secret one, which must never leave the table
+    in bulk.
+    """
+    if name in USER_SECRET:
+        raise ValueError(f"{name} is secret and is never read in bulk")
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT user_key, value FROM user_settings WHERE name=?",
+            (name,)).fetchall()
+    return {row["user_key"]: row["value"] for row in rows}
 
 
 def accounts_with_setting(name: str) -> int:
