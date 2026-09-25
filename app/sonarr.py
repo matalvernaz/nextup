@@ -182,7 +182,7 @@ def add(tvdb_id: str, title: str = "", monitored: bool = True,
                        "season to fetch, so it was taken back out. Try again "
                        "in a minute.")
         asked = seasons.Seasons(seasons.LATEST, 0, latest)
-    return result._replace(message=_asked_message(asked),
+    return result._replace(message=_asked_message(asked, name),
                            seasons=asked.encode())
 
 
@@ -224,11 +224,17 @@ def _outside(name: str, listed: list[int], choice: seasons.Seasons) -> str:
             "Nothing was added.")
 
 
-def _asked_message(asked: seasons.Seasons) -> str:
-    sentence = f"Asked for {asked.phrase()}."
+def _asked_message(asked: seasons.Seasons, name: str) -> str:
+    """What asking said, naming the series. A client reads this out as it is,
+    so without the name it would not say which show it was about."""
+    if asked.choice == seasons.ALL:
+        return f"Asked for every season of {name}."
+    if asked.choice == seasons.NEW:
+        return f"Asked for new episodes of {name} as they air."
     if asked.choice == seasons.LATEST:
-        sentence += " New episodes will follow as they air."
-    return sentence
+        return (f"Asked for season {asked.last} of {name}, the latest. "
+                "New episodes will follow as they air.")
+    return f"Asked for {asked.phrase()} of {name}."
 
 
 def _monitor_latest(tool: arr.Arr, backend_id: str,

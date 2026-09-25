@@ -161,7 +161,7 @@ tool = Sonarr()
 result = add_with(tool, seasons.Seasons(seasons.ALL))
 check.equal(tool.bodies[0]["addOptions"]["monitor"], "all",
             "every season monitors everything whatever the server's setting")
-check.equal((result.message, result.seasons), ("Asked for every season.", "all"),
+check.equal((result.message, result.seasons), ("Asked for every season of Blackadder.", "all"),
             "and says so")
 
 tool = Sonarr()
@@ -175,7 +175,7 @@ check.that(body["addOptions"]["searchForMissingEpisodes"], "and searches for the
 check.equal(body["monitorNewItems"], "none",
             "a season that starts airing later was not in the stretch")
 check.equal((result.message, result.seasons),
-            ("Asked for seasons 2 to 3.", "range:2-3"), "and says which")
+            ("Asked for seasons 2 to 3 of Blackadder.", "range:2-3"), "and says which")
 
 tool = Sonarr()
 result = add_with(tool, seasons.Seasons(seasons.RANGE, 3, 9))
@@ -183,7 +183,7 @@ check.equal(flags(tool.bodies[0]["seasons"]),
             {0: False, 1: False, 2: False, 3: True, 4: True},
             "a stretch past the last season stops at the last season")
 check.equal((result.message, result.seasons),
-            ("Asked for seasons 3 to 4.", "range:3-4"),
+            ("Asked for seasons 3 to 4 of Blackadder.", "range:3-4"),
             "and names the seasons it could actually ask for")
 
 tool = Sonarr()
@@ -203,7 +203,7 @@ check.that(not body["addOptions"]["searchForMissingEpisodes"],
            "and searches for nothing, since nothing it wants exists yet")
 check.equal(body["monitorNewItems"], "all", "and follows new seasons")
 check.equal((result.message, result.seasons),
-            ("Asked for new episodes as they air.", "new"), "and says so")
+            ("Asked for new episodes of Abbott Elementary as they air.", "new"), "and says so")
 
 tool = Sonarr()
 result = add_with(tool, seasons.Seasons(seasons.NEW))
@@ -263,7 +263,8 @@ check.equal(tool.commands, [{"name": "SeriesSearch", "seriesId": 42}],
             "then searches")
 check.equal(result.seasons, "latest:3", "and records the season it was")
 check.equal(result.message,
-            "Asked for season 3, the latest. New episodes will follow as they air.",
+            "Asked for season 3 of The Simpsons, the latest. "
+            "New episodes will follow as they air.",
             "and names it")
 
 clock[0] = 0.0
