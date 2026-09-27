@@ -305,8 +305,8 @@ def build(shelf):
     }
     try:
         jellyfin.books = lambda uid: [dict(i) for i in LIBRARY]
-        engine._seed_sims = lambda seed: [WANTED_CANDIDATE]
-        engine._keyword_candidates = lambda queries, owned: {}
+        engine._seed_sims = lambda seed, **kwargs: [WANTED_CANDIDATE]
+        engine._keyword_candidates = lambda queries, owned, **kwargs: {}
         listenarr.queued_asins = lambda: set()
         jellyfin.set_playlist = lambda uid, name, ids: "playlist"
         hardcover_shelf.for_user = lambda key: shelf

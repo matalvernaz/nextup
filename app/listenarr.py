@@ -1,16 +1,14 @@
-"""Listenarr client -- a write-only sink, plus one read of queue *state*.
+"""Listenarr catalogue and acquisition client.
 
-Listenarr is an acquisition work queue here, not a catalogue: its library holds
-only what it has bought (85 rows against Jellyfin's 1028), so Nextread never
-uses it to answer "what do I have". It does ask "what is already on order", to
-avoid recommending a book that is mid-acquisition.
+Jellyfin answers which books the listener owns. Listenarr supplies external
+catalogue metadata and acquisition state, including books already on order.
 """
 from datetime import date, datetime, timezone
 from typing import NamedTuple
 
 import httpx
 
-from . import config, logs
+from . import arr, config, logs
 
 log = logs.get("listenarr")
 
@@ -63,6 +61,8 @@ def queued_asins() -> set[str]:
 
     Used purely as a suppression list for the recommendation surface.
     """
+    if not configured():
+        return set()
     try:
         with _client() as c:
             rows = c.get(f"{_API}/library").raise_for_status().json()
@@ -362,13 +362,20 @@ def series_books(series_asin: str, region: str | None = None) -> list[dict] | No
     return [r for r in payload if isinstance(r, dict) and r.get("asin")]
 
 
-def audible_search(query: str, limit: int = 25) -> list[dict]:
+def audible_search(query: str, limit: int = 25, *,
+                   require_complete: bool = False) -> list[dict]:
     """Free-text Audible catalogue search, via Listenarr.
 
     Audible's own `/catalog/products?keywords=` returns nothing unauthenticated;
     Listenarr's provider is authenticated, so this is the only route to keyword
     and genre discovery without standing up Audible credentials of our own.
+
+    An outage raises Unavailable rather than claiming that no books matched.
+    Edition resolution requires every marketplace to answer before it can
+    cache a missing edition; interactive search may use partial positive hits.
     """
+    if not configured():
+        return []
     # Every configured marketplace, merged, first store's ordering kept and
     # later ones appended. Not "first store with any hit": a title search that
     # stopped at the preferred region would never surface the half of this
@@ -380,36 +387,37 @@ def audible_search(query: str, limit: int = 25) -> list[dict]:
     results: list[dict] = []
     seen: set[str] = set()
     failures = 0
-    try:
-        for region in config.AUDIBLE_REGIONS:
-            try:
-                with _client() as c:
-                    resp = c.get(
-                        f"{_API}/search/audible",
-                        params={"query": query, "region": region})
-                    resp.raise_for_status()
-                    found = resp.json().get("results") or []
-            except (httpx.HTTPError, ValueError):
-                failures += 1
+    for region in config.AUDIBLE_REGIONS:
+        try:
+            with _client() as c:
+                resp = c.get(
+                    f"{_API}/search/audible",
+                    params={"query": query, "region": region})
+                resp.raise_for_status()
+                payload = resp.json()
+                if not isinstance(payload, dict):
+                    raise ValueError("catalogue response is not an object")
+                found = payload.get("results")
+                if not isinstance(found, list) or any(
+                        not isinstance(row, dict) for row in found):
+                    raise ValueError("catalogue results are not book records")
+        except (httpx.HTTPError, ValueError):
+            failures += 1
+            continue
+        for row in found:
+            asin = (row.get("asin") or "").upper()
+            # An ASIN sold in both stores is one book, listed once.
+            if asin and asin in seen:
                 continue
-            for row in found:
-                asin = (row.get("asin") or "").upper()
-                # An ASIN sold in both stores is one book, listed once.
-                if asin and asin in seen:
-                    continue
-                if asin:
-                    seen.add(asin)
-                results.append(row)
-        if failures == len(config.AUDIBLE_REGIONS):
-            raise httpx.HTTPError("every marketplace failed")
-        results = results[:limit]
-    except (httpx.HTTPError, ValueError) as exc:
-        # This is also the ASIN resolver for the three quarters of the library
-        # with no Audible id of its own, so losing it quietly thins the unowned
-        # shelf rather than emptying it -- which is why it is logged loudly.
-        log.warning("Audible search failed query=%r (%s); ASIN resolution and "
-                    "keyword discovery are blind this pass", query, exc)
-        return []
+            if asin:
+                seen.add(asin)
+            results.append(row)
+    if failures and (require_complete or not results):
+        log.warning("Audible search incomplete query=%r failed_marketplaces=%d",
+                    query, failures)
+        raise arr.Unavailable(
+            "Listenarr's book catalogue could not be reached. Try again shortly.")
+    results = results[:limit]
     log.debug("Audible search query=%r hits=%d", query, len(results))
     return results
 

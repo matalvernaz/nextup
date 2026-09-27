@@ -115,10 +115,8 @@ check.that('name="medium" value="book"' in body,
 
 # --- the nav is not drawn where there is nothing behind it -------------------
 #
-# "Not served here" means no Listenarr, not an empty library: a books library
-# that does not exist yet is the ordinary case for somebody setting this up
-# before they own anything, and the medium stays offered on purpose so the
-# controls are there when the library appears.
+# An owned shelf is a Jellyfin feature. Removing the acquisition tool must
+# leave the shelf available, without buttons that cannot acquire anything.
 # Through the environment, not by patching `listenarr.configured`: the
 # registry captured that function object at import, so replacing the module
 # attribute changes nothing the registry ever calls.
@@ -127,10 +125,11 @@ import os  # noqa: E402
 os.environ["LISTENARR_URL"] = ""
 media.forget()
 not_served = client.get("/discover?medium=book")
-check.equal(not_served.status_code, 404,
-            "the page says it has nothing to recommend, rather than "
-            "rendering empty shelves")
-check.that("Discover</a>" not in not_served.text, "and no nav offers it")
+check.equal(not_served.status_code, 200, "the owned shelf needs no Listenarr")
+check.that("A Book You Have" in not_served.text, "owned books remain visible")
+check.that('action="/books/want"' not in not_served.text,
+           "acquisition buttons disappear when acquisition is disabled")
+check.that("Discover</a>" in not_served.text, "the shelf remains discoverable")
 
 # The sign-in page must never draw it either, and not because of what it says:
 # `discover_media()` asks the registry, which probes backends on a cache miss,

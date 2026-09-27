@@ -20,7 +20,7 @@ phone.
 """
 from fastapi import APIRouter, Body, Depends, HTTPException
 
-from . import config, jellyfin, logs
+from . import arr, config, jellyfin, listenarr, logs
 from .api import caller
 from .books import search, series, shelves, wants
 
@@ -66,6 +66,7 @@ def capabilities(user: jellyfin.User = Depends(caller)) -> dict:
     succeed -- so the POST stays authoritative about its own outcome.
     """
     remaining = wants.allowance(user)
+    can_request = listenarr.configured()
     log.info("capabilities user=%s keyholder=%s remaining=%s",
              user.key, user.is_admin, remaining)
     return {
@@ -74,7 +75,7 @@ def capabilities(user: jellyfin.User = Depends(caller)) -> dict:
         "libraryIds": jellyfin.library_ids("book"),
         "playlistName": config.PLAYLIST_NAME,
         "want": {
-            "supported": True,
+            "supported": can_request,
             "dailyCap": wants.daily_cap(user),
             "remainingToday": remaining,
         },
@@ -82,15 +83,15 @@ def capabilities(user: jellyfin.User = Depends(caller)) -> dict:
         # Named blocks rather than a version bump: a client that predates either
         # route asks for neither, and one that postdates a server without them
         # hides its own control instead of failing a tap.
-        "search": {"supported": True, "limit": config.SEARCH_LIMIT},
+        "search": {"supported": can_request, "limit": config.SEARCH_LIMIT},
         "summary": {"supported": True},
-        "cancel": {"supported": True},
+        "cancel": {"supported": can_request},
         "dismiss": {
             "supported": True,
             "undo": True,
             "days": config.DISMISS_TTL_DAYS,
         },
-        "seriesWant": {"supported": True, "limit": config.SERIES_WANT_LIMIT},
+        "seriesWant": {"supported": can_request, "limit": config.SERIES_WANT_LIMIT},
     }
 
 
@@ -169,10 +170,13 @@ def get_search(q: str = "", kind: str = "book",
     """
     if not q.strip():
         return {"version": LEGACY_PROTOCOL, "query": "", "kind": kind, "results": []}
-    if kind == series.SERIES_KIND:
-        results = series.search_rows(user, q)
-    else:
-        results = search.search(user, q)
+    try:
+        if kind == series.SERIES_KIND:
+            results = series.search_rows(user, q)
+        else:
+            results = search.search(user, q)
+    except arr.Unavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     return {
         "version": LEGACY_PROTOCOL,
         "query": q.strip(),
