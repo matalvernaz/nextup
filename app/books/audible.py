@@ -133,23 +133,29 @@ def sims(asin: str, axis: str = AXIS_RAW) -> list[dict]:
     # empty neighbour list rather than an error, so "no neighbours" and "wrong
     # store" look identical from one region alone.
     thinned: list[dict] = []
-    answered = False
+    answered = 0
     for region in config.AUDIBLE_REGIONS:
         try:
             with httpx.Client(timeout=_TIMEOUT) as c:
                 resp = c.get(f"{_base(region)}/products/{asin}/sims", params=params)
                 resp.raise_for_status()
-                products = resp.json().get("similar_products") or []
+                payload = resp.json()
+                if not isinstance(payload, dict):
+                    raise ValueError("similarity response is not an object")
+                products = payload.get("similar_products")
+                if not isinstance(products, list) or any(
+                        not isinstance(row, dict) for row in products):
+                    raise ValueError("similarity results are not product records")
+                thinned = [_thin(p) for p in products if p.get("asin")]
         except (httpx.HTTPError, ValueError):
             continue
-        answered = True
-        thinned = [_thin(p) for p in products if p.get("asin")]
+        answered += 1
         if thinned:
             break
 
-    # An empty successful answer may be cached. An outage is not an answer
-    # and must be retried when the catalogue recovers.
-    if answered:
+    # A positive result is useful immediately. An empty result is definitive
+    # only after every store answers: one store can lack a book sold elsewhere.
+    if thinned or answered == len(config.AUDIBLE_REGIONS):
         store.put_sims(asin, axis, thinned)
     return thinned
 

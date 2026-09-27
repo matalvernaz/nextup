@@ -1,5 +1,10 @@
 # Merging nextread into nextup
 
+Historical implementation plan. The production cutover ran on 2026-09-05;
+some "left for later" entries below have since shipped. See
+[Service responsibilities](SERVICE_BOUNDARIES.md) and the README for the
+current arrangement, and [CUTOVER.md](CUTOVER.md) for the cutover record.
+
 One service, one image, one database, one web interface, four media.
 
 ## Why

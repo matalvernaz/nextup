@@ -8,6 +8,10 @@ tools a household already runs. It does not keep a second library, it is not a
 media server, and it has no accounts of its own: everybody signs in as
 themselves, with the Jellyfin username and password they already use.
 
+[Service responsibilities](docs/SERVICE_BOUNDARIES.md) explains how Nextup,
+Jellyfin, Listenarr and the other media tools fit together, including the
+Nextread compatibility routes.
+
 ## Getting it running
 
 You need Docker and a Jellyfin server. Nothing else is required to start.
@@ -44,7 +48,9 @@ Every row says why it is there.
   each, of what the library already holds and nobody has started, ranked from
   your own playback, favourites and ratings. No Radarr or Sonarr required —
   these are recommendations about what is already there.
-- **Books** need Listenarr connected and a books library. Two shelves: what to
+- **Books** need a books library. Listenarr enables catalogue search and
+  requests, and can resolve missing Audible identifiers for richer suggestions.
+  Two shelves: what to
   read next from what the library holds, and what to add that it does not. The
   first is also kept in Jellyfin as a reading list, so you can pick one up from
   any Jellyfin app rather than only from this one — refreshed on a schedule,

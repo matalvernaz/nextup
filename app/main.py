@@ -23,7 +23,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import (api, arr, backends, compat_nextread, config, imports, jellyfin,
+from . import (api, arr, backends, compat_nextread, config, imports, jellyfin, listenarr,
                logs, media, recommendations, seasons, selfcheck, sessions,
                settings, setup, store, throttle, wants)
 from .books import hardcover_shelf
@@ -964,7 +964,12 @@ DISCOVER_LABELS = {media.MOVIE: "Films", media.SERIES: "Series", BOOK: "Books"}
 def discover_media() -> list[str]:
     """Which media have a shelf on this installation, in page order."""
     rankable = set(recommendations.offered())
-    books = BOOK in media.available()
+    try:
+        books = bool(jellyfin.library_ids(BOOK))
+    except jellyfin.JellyfinUnavailable:
+        # This also draws navigation on the request page. A failed library
+        # listing must not take away the requests that page can still serve.
+        books = False
     return [key for key in DISCOVER_LABELS
             if key in rankable or (key == BOOK and books)]
 
@@ -1053,6 +1058,7 @@ def _book_shelves(user: jellyfin.User, undo_asin: str,
         "discover": data.get("discover") or [],
         "asked_for": asked_for,
         "allowance": wants.allowance(user, BOOK),
+        "can_request": listenarr.configured(),
         "playlist_name": data.get("playlist_name") or config.PLAYLIST_NAME,
         "computed_at": _when(book_store.last_run(user.key)),
         "undo_asin": undo_asin,

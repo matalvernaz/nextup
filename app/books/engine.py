@@ -21,7 +21,7 @@ import re
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 
-from .. import config, external_books, jellyfin, listenarr, logs
+from .. import arr, config, external_books, jellyfin, listenarr, logs
 from . import audible, hardcover_shelf, store, textmodel
 
 log = logs.get("engine")
@@ -390,6 +390,10 @@ def _seed_sims(item: dict) -> list[dict]:
         if products:
             return products
 
+    # An absent catalogue cannot establish that an edition does not exist.
+    # Leave the alias unresolved so connecting Listenarr later can resolve it.
+    if not listenarr.configured():
+        return []
     title = item.get("Name") or ""
     if not title:
         return []
@@ -397,20 +401,30 @@ def _seed_sims(item: dict) -> list[dict]:
     authors = _authors(item)
     if authors:
         queries.append(f"{title} {authors[0]}")
+    identified = bool(cached_alias)
     for query in queries:
-        resolved = _matching_audible_asin(
-            item, listenarr.audible_search(query))
+        try:
+            rows = listenarr.audible_search(query, require_complete=True)
+        except arr.Unavailable:
+            # A transient failure must not become a seven-day "no edition"
+            # answer. Local history can still rank the owned shelf this pass.
+            return []
+        resolved = _matching_audible_asin(item, rows)
+        identified |= bool(resolved)
         if not resolved or resolved in tried:
             continue
         tried.add(resolved)
+        # Identity does not depend on the neighbour service being available.
+        # Keep a real match even when Audible's similarity request fails.
+        store.put_audible_alias(source_key, resolved)
         products = audible.sims(resolved)
         if products:
-            store.put_audible_alias(source_key, resolved)
             return products
     # Negative resolution is cached for the same bounded TTL as a successful
     # alias. Otherwise every ASIN-less seed pays two catalogue searches on every
     # refresh even when Audible has no exact edition to connect it to.
-    store.put_audible_alias(source_key, "")
+    if not identified:
+        store.put_audible_alias(source_key, "")
     return []
 
 
@@ -1170,7 +1184,11 @@ def _keyword_candidates(queries: list[str], owned_check) -> dict[str, dict]:
         return {}
     found: dict[str, dict] = {}
     for query in queries:
-        for row in listenarr.audible_search(query):
+        try:
+            rows = listenarr.audible_search(query)
+        except arr.Unavailable:
+            break
+        for row in rows:
             asin = row.get("asin")
             if not asin:
                 continue
@@ -1226,6 +1244,10 @@ def _want_candidates(
             query = f"{title} {surnames[0]}"
         try:
             hits = listenarr.audible_search(query) or []
+        except arr.Unavailable:
+            # A failed catalogue is shared by every remaining shelf entry.
+            # Keep positive matches already found without repeating timeouts.
+            break
         except Exception as exc:  # noqa: BLE001 -- one bad search is not a run
             log.warning("could not resolve want-to-read %r (%s)", title, exc)
             continue

@@ -15,6 +15,7 @@ from tests import harness
 # reads JELLYFIN_TOKEN outright. This sets it, and a database nothing here
 # touches, rather than letting the surrounding environment supply either.
 harness.use("books-scoring")
+os.environ["LISTENARR_URL"] = "http://listenarr.invalid:4545"
 
 # The list is empty by default now, and deliberately: it used to name one
 # library's item id, which anywhere else would have discounted whichever
@@ -171,7 +172,7 @@ try:
     engine.audible.sims = lambda asin: (
         [{"asin": "NEIGHBOUR", "title": "A Neighbour"}]
         if asin == "RESOLVED" else [])
-    engine.listenarr.audible_search = lambda query: [{
+    engine.listenarr.audible_search = lambda query, **kwargs: [{
         "asin": "RESOLVED",
         "title": "Demon World Boba Shop",
         "authors": [{"name": "R. C. Joshua"}],

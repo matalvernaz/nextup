@@ -49,7 +49,8 @@
   {% if computed_at %}Worked out {{ computed_at }}.{% endif %}
   {# None is uncapped, not zero. An administrator reading "0 left" would think
      the feature was broken. Worded as the rest of the site words it. #}
-  {% if allowance is none %}You have no daily limit.
+  {% if not can_request %}Requests for books are not enabled on this server.
+  {% elif allowance is none %}You have no daily limit.
   {% else %}You can ask for {{ allowance }} more
     book{{ '' if allowance == 1 else 's' }} today.{% endif %}
 </p>
@@ -112,11 +113,13 @@
         button hears the label alone, and forty buttons all saying "Ask for
         this" is forty identical controls.
       #}
+      {% if can_request %}
       <form method="post" action="/books/want">
         <input type="hidden" name="asin" value="{{ row.asin }}">
         <input type="hidden" name="title" value="{{ row.title }}">
         <button type="submit">Ask for {{ row.title }}</button>
       </form>
+      {% endif %}
       <form method="post" action="/books/dismiss">
         <input type="hidden" name="asin" value="{{ row.asin }}">
         <input type="hidden" name="title" value="{{ row.title }}">
