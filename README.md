@@ -286,6 +286,12 @@ than being told it: `/api/v1` for an address typed in directly, `/nextup/api/v1`
 for one derived from a Jellyfin origin, and `/nextread/api/v1` for the
 audiobook protocol that shipped before these two services became one.
 
+On that audiobook protocol a book's `summary` also carries `sampleUrl`:
+Audible's free five-minute preview, played straight from Audible, or null
+where it has none, which is every volume not out yet. `capabilities` reports
+`sample`. The web pages link each book to `/sample`, which redirects to the
+same file so the browser's own player plays it.
+
 `capabilities` takes a `protocol`. Without one the answer is films, series and
 music — exactly what shipped. `?protocol=2` adds books. An unknown protocol is
 a 400 rather than the nearest shape, so a client newer than its server and a
