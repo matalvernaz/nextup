@@ -85,6 +85,9 @@ def capabilities(user: jellyfin.User = Depends(caller)) -> dict:
         # hides its own control instead of failing a tap.
         "search": {"supported": can_request, "limit": config.SEARCH_LIMIT},
         "summary": {"supported": True},
+        # `sampleUrl` on the summary. Its own block so a client knows an absent
+        # address means "none published", not "this server never sends one".
+        "sample": {"supported": True},
         "cancel": {"supported": can_request},
         "dismiss": {
             "supported": True,

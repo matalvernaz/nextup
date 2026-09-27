@@ -13,6 +13,7 @@ what makes the pages usable on an installation with no proxy at all -- see
 may: see `api.caller`.
 """
 import os
+import re
 import time
 from contextlib import asynccontextmanager
 from urllib.parse import quote, urlsplit
@@ -26,7 +27,9 @@ from fastapi.templating import Jinja2Templates
 from . import (api, arr, backends, compat_nextread, config, imports, jellyfin, listenarr,
                logs, media, recommendations, seasons, selfcheck, sessions,
                settings, setup, store, throttle, wants)
+from .books import audible as book_audible
 from .books import hardcover_shelf
+from .books import search as book_search
 from .books import shelves as book_shelves
 from .books import store as book_store
 from .books import stamp as book_stamp
@@ -1053,10 +1056,14 @@ def _book_shelves(user: jellyfin.User, undo_asin: str,
     data = book_shelves.result(user)
     asked_for = {row["asin"] for row in book_store.requests_for(user.key)
                  if not row["fulfilled_at"]}
+    discover = data.get("discover") or []
     return {
         "own": data.get("own") or [],
-        "discover": data.get("discover") or [],
+        "discover": discover,
         "asked_for": asked_for,
+        # A book not out yet has no sample, and a link to one is a dead end.
+        "not_out": {row.get("asin") for row in discover
+                    if listenarr.not_yet_published(row.get("release_date"))},
         "allowance": wants.allowance(user, BOOK),
         "can_request": listenarr.configured(),
         "playlist_name": data.get("playlist_name") or config.PLAYLIST_NAME,
@@ -1136,6 +1143,39 @@ def post_book_restore(request: Request, asin: str = Form(...)):
     book_shelves.expire(user.key)
     return _back_to_books("Put back." if restored
                           else "That book was not hidden.")
+
+
+# An Audible ASIN. Checked before it goes into a catalogue URL's path, where a
+# slash or a question mark would change which address is asked.
+_ASIN = re.compile(r"[A-Z0-9]{10}")
+
+
+@app.get("/sample", response_class=HTMLResponse)
+def get_sample(request: Request, asin: str = ""):
+    """Audible's free preview of one book, played by the browser itself.
+
+    A redirect rather than a player on the page: the browser's own player is
+    already accessible, and a player per row would put forty Play buttons on
+    Discover, none of them saying which book it is for.
+    """
+    if setup.needs_setup():
+        return RedirectResponse(url="/setup", status_code=303)
+    try:
+        user = viewer(request)
+    except LookupError as exc:
+        return _signin_page(request, detail=str(exc), status=401)
+    asin = asin.strip().upper()
+    product = book_audible.product(asin) if _ASIN.fullmatch(asin) else None
+    url = book_search.sample_url(product or {})
+    if url:
+        return RedirectResponse(url=url, status_code=302)
+    # Two different answers. A product with no sample is Audible saying so; no
+    # product at all is Audible unreachable, or not selling it where this
+    # server looks, and "no sample" would claim more than is known.
+    return templates.TemplateResponse(
+        request=request, name="no_sample.html", status_code=404,
+        context={"user": user, "found": product is not None,
+                 "title": ((product or {}).get("title") or "").strip()})
 
 
 @app.post("/discover/refresh")
