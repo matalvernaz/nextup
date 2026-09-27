@@ -96,6 +96,10 @@ check.that("Ask for One You Do Not" in body,
            "the request button names the book, because a reader moving by "
            "button hears the label and nothing around it")
 check.that("Not One You Do Not" in body, "and so does the dismiss button")
+check.that('<a href="/sample?asin=B0NEW">Hear a sample of One You Do Not</a>' in body,
+           "each suggestion links to its sample, named for the book")
+check.that('href="/sample?asin=B0ASKED"' in body,
+           "including one already asked for, which can still be listened to")
 check.that("Ask for Already On The Way" not in body,
            "a book already on the way has no button")
 check.that("Already asked for" in body, "and says why instead")

@@ -74,6 +74,9 @@ asked for yet.</p>
     {% if r.seasonCount %}<p>{{ r.seasonCount }} season{{ '' if r.seasonCount == 1 else 's' }}{% if r.network %}, {{ r.network }}{% endif %}.</p>{% endif %}
     {% if r.trackCount %}<p>{{ r.trackCount }} tracks.</p>{% endif %}
     {% if r.overview %}<p>{{ r.overview }}</p>{% endif %}
+    {% if r.medium == 'book' and r.unit == 'book' and r.itemKey %}
+    <p><a href="/sample?asin={{ r.itemKey | urlencode }}">Hear a sample of {{ r.title }}</a></p>
+    {% endif %}
     {% if r.owned %}
     <p class="owned">Already in the library.</p>
     {# Asking again is free and harmless, but a button offering it says the

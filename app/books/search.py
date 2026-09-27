@@ -85,7 +85,21 @@ def summary(asin: str) -> dict:
         "authors": [a.get("name", "") for a in (product.get("authors") or []) if a.get("name")],
         "runtimeMinutes": product.get("runtime_length_min"),
         "summary": text,
+        # On the summary because it comes off the same product lookup, so a
+        # client that wants to play it pays no second request for the address.
+        "sampleUrl": sample_url(product),
     }
+
+
+def sample_url(product: dict) -> str | None:
+    """Audible's free preview of a book, or None where it has not published one.
+
+    A five-minute MP3 on Audible's own CDN, played straight from there by the
+    phone or the browser. Only an https address is passed on, because whatever
+    this returns is what a client will fetch.
+    """
+    url = (product.get("sample_url") or "").strip()
+    return url if url.startswith("https://") else None
 
 
 def _plain(markup: str) -> str:

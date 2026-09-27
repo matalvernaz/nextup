@@ -59,8 +59,12 @@ _RESPONSE_GROUPS = "product_desc,contributors,product_attrs,media,series"
 # Deliberately NOT added to `_RESPONSE_GROUPS`: that is the sims call, which
 # fetches ten neighbours per seed across twenty seeds, and the long blurb is
 # several times the payload for text no shelf row displays.
+#
+# `sample` brings `sample_url`, Audible's free five-minute preview, on the same
+# call a summary already pays for. Absent for a volume that is not out yet.
 _PRODUCT_RESPONSE_GROUPS = (
-    "contributors,product_attrs,product_desc,product_extended_attrs,media,series")
+    "contributors,product_attrs,product_desc,product_extended_attrs,media,series,"
+    "sample")
 _TIMEOUT = httpx.Timeout(20.0, connect=10.0)
 
 # Audible honours `similarity_type` and each value returns a genuinely different
@@ -169,7 +173,10 @@ def product(asin: str) -> dict | None:
     for a month would outlive the mistake.
     """
     cached = store.get_product(asin)
-    if cached is not None:
+    # A row stored under other response groups is missing fields rather than
+    # saying so, and would answer "no sample" for the rest of its month. The
+    # teaser-for-a-month bug was this same shape.
+    if cached is not None and cached.get("_groups") == _PRODUCT_RESPONSE_GROUPS:
         return cached
     params = {"response_groups": _PRODUCT_RESPONSE_GROUPS}
     # Every configured marketplace, in order, until one actually carries it.
@@ -186,10 +193,12 @@ def product(asin: str) -> dict | None:
         if _has_product(found):
             # The region it was actually found in, so a caller handing this on
             # names the store that has it rather than the one we prefer.
-            found = {**found, "_region": region}
+            found = {**found, "_region": region,
+                     "_groups": _PRODUCT_RESPONSE_GROUPS}
             store.put_product(asin, found)
             return found
     # Deliberately not cached. An absence here is "no configured store sells
     # it", which a new region in the list would change, and remembering it for
-    # a month would outlive that.
-    return None
+    # a month would outlive that. An older row still inside its month beats
+    # nothing: it lacks only what the newer groups add.
+    return cached

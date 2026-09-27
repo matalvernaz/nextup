@@ -104,6 +104,8 @@
       {% for reason in row.why %}<li>{{ reason }}</li>{% endfor %}
     </ul>
     {% endif %}
+    {# The title is in the link for the same reason it is in the buttons. #}
+    <p><a href="/sample?asin={{ row.asin | urlencode }}">Hear a sample of {{ row.title }}</a></p>
     {% if row.asin in asked_for %}
     <p class="asked">Already asked for.</p>
     {% else %}
