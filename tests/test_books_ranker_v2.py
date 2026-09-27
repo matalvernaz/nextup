@@ -87,7 +87,7 @@ saved = {
 playlist_writes = []
 try:
     jellyfin.books = lambda uid: library
-    engine._seed_sims = lambda seed: similar
+    engine._seed_sims = lambda seed, **kwargs: similar
     listenarr.queued_asins = lambda: set()
     jellyfin.set_playlist = (
         lambda uid, name, ids: playlist_writes.append((uid, name, ids)) or "playlist")

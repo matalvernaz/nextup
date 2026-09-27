@@ -1,9 +1,7 @@
-"""Listenarr client -- a write-only sink, plus one read of queue *state*.
+"""Listenarr catalogue and acquisition client.
 
-Listenarr is an acquisition work queue here, not a catalogue: its library holds
-only what it has bought (85 rows against Jellyfin's 1028), so Nextread never
-uses it to answer "what do I have". It does ask "what is already on order", to
-avoid recommending a book that is mid-acquisition.
+Jellyfin answers which books the listener owns. Listenarr supplies external
+catalogue metadata and acquisition state, including books already on order.
 """
 from datetime import date, datetime, timezone
 from typing import NamedTuple

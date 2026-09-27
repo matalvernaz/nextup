@@ -370,7 +370,27 @@ def _matching_audible_asin(item: dict, rows: list[dict]) -> str | None:
     return min(matches)[2] if matches else None
 
 
-def _seed_sims(item: dict) -> list[dict]:
+class _CatalogueLookups:
+    """A failed catalogue gets one attempt per shelf build, not per seed.
+
+    This state belongs to a single build. A later build or interactive search
+    can try immediately, and no other user inherits this build's failure.
+    """
+
+    def __init__(self):
+        self.error: str | None = None
+
+    def search(self, query: str, **kwargs) -> list[dict]:
+        if self.error is not None:
+            raise arr.Unavailable(self.error)
+        try:
+            return listenarr.audible_search(query, **kwargs)
+        except arr.Unavailable as exc:
+            self.error = str(exc)
+            raise
+
+
+def _seed_sims(item: dict, *, catalogue: _CatalogueLookups | None = None) -> list[dict]:
     """Audible neighbours, resolving missing or dead library identifiers."""
     source_asin = _asin(item)
     source_key = source_asin or f"item:{item.get('Id') or _norm(item.get('Name') or '')}"
@@ -398,13 +418,14 @@ def _seed_sims(item: dict) -> list[dict]:
     if not title:
         return []
     queries = [title]
+    catalogue = catalogue or _CatalogueLookups()
     authors = _authors(item)
     if authors:
         queries.append(f"{title} {authors[0]}")
     identified = bool(cached_alias)
     for query in queries:
         try:
-            rows = listenarr.audible_search(query, require_complete=True)
+            rows = catalogue.search(query, require_complete=True)
         except arr.Unavailable:
             # A transient failure must not become a seven-day "no edition"
             # answer. Local history can still rank the owned shelf this pass.
@@ -1173,7 +1194,8 @@ def keyword_queries(profile: dict[str, float]) -> list[str]:
         : config.KEYWORD_QUERIES_MAX]
 
 
-def _keyword_candidates(queries: list[str], owned_check) -> dict[str, dict]:
+def _keyword_candidates(queries: list[str], owned_check, *,
+                        catalogue: _CatalogueLookups | None = None) -> dict[str, dict]:
     """Books found by free-text search rather than by similarity to one book.
 
     The only channel that can surface something with no link at all to a finished
@@ -1183,9 +1205,10 @@ def _keyword_candidates(queries: list[str], owned_check) -> dict[str, dict]:
     if not config.KEYWORD_PULL_ENABLED:
         return {}
     found: dict[str, dict] = {}
+    catalogue = catalogue or _CatalogueLookups()
     for query in queries:
         try:
-            rows = listenarr.audible_search(query)
+            rows = catalogue.search(query)
         except arr.Unavailable:
             break
         for row in rows:
@@ -1213,7 +1236,8 @@ def _keyword_candidates(queries: list[str], owned_check) -> dict[str, dict]:
 
 
 def _want_candidates(
-    wanted: list[dict], owned_check, suppressed: set
+    wanted: list[dict], owned_check, suppressed: set, *,
+    catalogue: _CatalogueLookups | None = None,
 ) -> dict[str, dict]:
     """Books from a Hardcover want-to-read shelf, as things that can be asked for.
 
@@ -1233,6 +1257,7 @@ def _want_candidates(
     main title, no part or omnibus marker, author surname agreeing.
     """
     found: dict[str, dict] = {}
+    catalogue = catalogue or _CatalogueLookups()
     for entry in wanted:
         title = (entry.get("title") or "").strip()
         if not title:
@@ -1243,7 +1268,7 @@ def _want_candidates(
         if surnames:
             query = f"{title} {surnames[0]}"
         try:
-            hits = listenarr.audible_search(query) or []
+            hits = catalogue.search(query) or []
         except arr.Unavailable:
             # A failed catalogue is shared by every remaining shelf entry.
             # Keep positive matches already found without repeating timeouts.
@@ -1331,6 +1356,7 @@ def run(user: jellyfin.User, update_playlist: bool = True) -> dict:
     seed_of: dict[str, list[str]] = defaultdict(list)
     unowned: dict[str, dict] = {}
     similarity_seeds = 0
+    catalogue = _CatalogueLookups()
 
     for seed in seeds:
         # A seed with no positive weight must not promote its neighbours: a book
@@ -1338,7 +1364,7 @@ def run(user: jellyfin.User, update_playlist: bool = True) -> dict:
         weight = weights[seed["Id"]]
         if weight <= 0:
             continue
-        similar = _seed_sims(seed)
+        similar = _seed_sims(seed, catalogue=catalogue)
         if similar:
             similarity_seeds += 1
         for position, sim in enumerate(similar, start=1):
@@ -1376,7 +1402,7 @@ def run(user: jellyfin.User, update_playlist: bool = True) -> dict:
     # what supplies the queries. Its candidates are vectorised against the same
     # idf by re-tokenising just the new rows.
     queries = keyword_queries(profile)
-    keyword_found = _keyword_candidates(queries, owned_check)
+    keyword_found = _keyword_candidates(queries, owned_check, catalogue=catalogue)
     for asin, cand in keyword_found.items():
         key = f"asin:{asin}"
         if key not in vectors:
@@ -1524,7 +1550,7 @@ def run(user: jellyfin.User, update_playlist: bool = True) -> dict:
     # `_want_candidates`. Resolved after `suppressed` exists so a want already
     # on order costs no search at all.
     want_found = _want_candidates(
-        hardcover_shelf.wanted(shelf), owned_check, suppressed)
+        hardcover_shelf.wanted(shelf), owned_check, suppressed, catalogue=catalogue)
     for asin, cand in want_found.items():
         unowned.setdefault(asin, cand)
         key = f"asin:{asin}"

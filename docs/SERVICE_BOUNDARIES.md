@@ -49,6 +49,9 @@ outage, while recommendation building keeps the locally ranked shelf. A missing
 edition or an empty similarity list may only be cached after every configured
 marketplace has answered; a failure is not evidence of absence. Confirmed
 edition identity survives a separate failure to fetch similar books.
+After a catalogue failure, the rest of that shelf build skips further catalogue
+calls. The next build can retry immediately; one user's failure does not disable
+catalogue access for other users or interactive searches.
 
 Book-specific ranking stays in `app/books/`; movie and television ranking stays
 in `app/recommendations.py`. There is no need to force their different series
