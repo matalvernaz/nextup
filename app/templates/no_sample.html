@@ -2,8 +2,15 @@
 {% block title %}No sample — Nextup{% endblock %}
 {% block main %}
 <h2>No sample</h2>
+{% if found %}
 <p>
   Audible has no sample of {{ title or "that book" }}. A book that is not out
   yet never has one.
 </p>
+{% else %}
+<p>
+  Nextup could not find that book on Audible just now, so there is no sample
+  to play. Try again in a while.
+</p>
+{% endif %}
 {% endblock %}

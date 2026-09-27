@@ -4,10 +4,16 @@
 and needs no key or account. Responses are cached in SQLite; repeated page loads
 reuse the engine's in-memory result.
 """
+import re
+
 import httpx
 
 from .. import config
 from . import store
+
+# An ASIN is ten letters and digits. Anything else would change which catalogue
+# address is asked, not just which book, so it is refused before any request.
+_ASIN_SHAPE = re.compile(r"[A-Za-z0-9]{10}")
 
 # Audible runs one catalogue per marketplace on its own host, and an ASIN sold
 # in one is not necessarily present in another: a US lookup of a Canadian
@@ -172,6 +178,8 @@ def product(asin: str) -> dict | None:
     product is what a wrong-marketplace lookup returns, and remembering that
     for a month would outlive the mistake.
     """
+    if not _ASIN_SHAPE.fullmatch(asin or ""):
+        return None
     cached = store.get_product(asin)
     # A row stored under other response groups is missing fields rather than
     # saying so, and would answer "no sample" for the rest of its month. The

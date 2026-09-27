@@ -89,7 +89,15 @@ catalogue["api.audible.ca"] = httpx.ConnectError("unreachable")
 catalogue["api.audible.com"] = httpx.ConnectError("unreachable")
 check.equal((audible.product("B0OLDROW02") or {}).get("title"), "Still Useful",
             "an unreachable catalogue falls back to the older row, not to nothing")
+check.equal((store.get_product("B0OLDROW02") or {}).get("_groups"), None,
+            "and that row is not stamped as current, which would hide its "
+            "sample for the rest of the month")
 catalogue.clear()
+
+asked.clear()
+check.equal(audible.product("../B0FQ65NC2F"), None,
+            "something that is not an ASIN is not a product")
+check.equal(asked, [], "and is never put into a catalogue address")
 
 # --- the summary ---------------------------------------------------------------
 
@@ -147,6 +155,12 @@ none = client.get("/sample", params={"asin": "B0PLACEHLD"})
 check.equal(none.status_code, 404, "a book with no sample is not a redirect")
 check.that("Audible has no sample of Not Out Yet" in none.text,
            "and the page names the book it has no sample of")
+
+unknown = client.get("/sample", params={"asin": "B0NOTSOLD1"})
+check.equal(unknown.status_code, 404, "a book Audible did not answer for is not a redirect")
+check.that("could not find that book on Audible" in unknown.text
+           and "Audible has no sample" not in unknown.text,
+           "and says it could not tell, rather than that there is no sample")
 
 looked_up.clear()
 odd = client.get("/sample", params={"asin": "../B0FQ65NC2F?x"})

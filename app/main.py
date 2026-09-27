@@ -1056,10 +1056,14 @@ def _book_shelves(user: jellyfin.User, undo_asin: str,
     data = book_shelves.result(user)
     asked_for = {row["asin"] for row in book_store.requests_for(user.key)
                  if not row["fulfilled_at"]}
+    discover = data.get("discover") or []
     return {
         "own": data.get("own") or [],
-        "discover": data.get("discover") or [],
+        "discover": discover,
         "asked_for": asked_for,
+        # A book not out yet has no sample, and a link to one is a dead end.
+        "not_out": {row.get("asin") for row in discover
+                    if listenarr.not_yet_published(row.get("release_date"))},
         "allowance": wants.allowance(user, BOOK),
         "can_request": listenarr.configured(),
         "playlist_name": data.get("playlist_name") or config.PLAYLIST_NAME,
@@ -1161,14 +1165,17 @@ def get_sample(request: Request, asin: str = ""):
     except LookupError as exc:
         return _signin_page(request, detail=str(exc), status=401)
     asin = asin.strip().upper()
-    product = (book_audible.product(asin) if _ASIN.fullmatch(asin) else None) or {}
-    url = book_search.sample_url(product)
+    product = book_audible.product(asin) if _ASIN.fullmatch(asin) else None
+    url = book_search.sample_url(product or {})
     if url:
         return RedirectResponse(url=url, status_code=302)
+    # Two different answers. A product with no sample is Audible saying so; no
+    # product at all is Audible unreachable, or not selling it where this
+    # server looks, and "no sample" would claim more than is known.
     return templates.TemplateResponse(
         request=request, name="no_sample.html", status_code=404,
-        context={"user": user,
-                 "title": (product.get("title") or "").strip()})
+        context={"user": user, "found": product is not None,
+                 "title": ((product or {}).get("title") or "").strip()})
 
 
 @app.post("/discover/refresh")

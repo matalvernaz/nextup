@@ -45,6 +45,10 @@ SHELF = {
          "why": ["Audible lists it alongside one you own"]},
         {"asin": "B0ASKED", "title": "Already On The Way",
          "authors": ["Third"], "narrators": [], "why": []},
+        # The next volume of a series, announced and not out.
+        {"asin": "B0LATER", "title": "Not Out Until Later",
+         "authors": ["Another"], "narrators": [], "why": [],
+         "release_date": "2200-01-01"},
     ],
     "owned_index": ({"B0OWNED"}, {"a book you have": {"someone"}}),
     "playlist_name": "Next Read",
@@ -100,6 +104,9 @@ check.that('<a href="/sample?asin=B0NEW">Hear a sample of One You Do Not</a>' in
            "each suggestion links to its sample, named for the book")
 check.that('href="/sample?asin=B0ASKED"' in body,
            "including one already asked for, which can still be listened to")
+check.that('href="/sample?asin=B0LATER"' not in body
+           and "Ask for Not Out Until Later" in body,
+           "a book not out yet has no sample link, and can still be asked for")
 check.that("Ask for Already On The Way" not in body,
            "a book already on the way has no button")
 check.that("Already asked for" in body, "and says why instead")
