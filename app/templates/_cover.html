@@ -1,0 +1,10 @@
+{#
+  A row's picture, where the catalogue has one. Empty alt text on purpose: the
+  heading beside it already names the thing, so a screen reader passing over
+  the list hears nothing extra and a sighted reader gets the cover. No referrer,
+  so the catalogue's image server is not told which page asked.
+
+  Reads `r`, the row being drawn -- the name both lists on the search page
+  loop with.
+#}
+{% if r.thumbnailUrl %}<img class="cover" src="{{ r.thumbnailUrl }}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer">{% endif %}

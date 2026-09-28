@@ -292,6 +292,17 @@ where it has none, which is every volume not out yet. `capabilities` reports
 `sample`. The web pages link each book to `/sample`, which redirects to the
 same file so the browser's own player plays it.
 
+Search hits, book suggestions and requests carry the catalogue's picture as
+`imageUrl` and `thumbnailUrl` where it has one: a poster from TMDb or TheTVDB,
+a cover from Audible, Deezer or Apple. They are the catalogue's own addresses,
+https only, and the thumbnail is the same picture at a row's size (a TMDb
+`original` poster is a megabyte; its `w154` is twelve kilobytes). Both are
+absent where there is no picture. Film and series hits also carry `genres` and
+`certification`, films `studio`, so a client can summarise one without asking
+again, and a request keeps its tool's own poster and `overview`. A book's
+`summary` carries its cover the same way, and the web pages give each book a
+`/summary` page of its own.
+
 `capabilities` takes a `protocol`. Without one the answer is films, series and
 music — exactly what shipped. `?protocol=2` adds books. An unknown protocol is
 a 400 rather than the nearest shape, so a client newer than its server and a

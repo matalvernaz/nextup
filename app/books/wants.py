@@ -8,7 +8,7 @@ later that quietly skips half of it.
 import re
 import time
 
-from .. import config, jellyfin, listenarr, logs
+from .. import artwork, config, jellyfin, listenarr, logs
 from . import engine, store
 
 log = logs.get("wants")
@@ -285,8 +285,19 @@ def states(user_key: str, owned: tuple[set, dict] | None) -> list[dict]:
             "title": row["title"] or "",
             "requested_at": row["requested_at"],
             "state": _state(row),
+            **_cover(row["asin"]),
         })
     return out
+
+
+def _cover(asin: str) -> dict:
+    """A requested book's cover, from the product lookup asking already cached.
+
+    Read from the cache and never fetched: asking for a book looks its product
+    up to hand it to Listenarr, so the picture is usually already here, and a
+    list of requests must not cost an Audible request per row to draw.
+    """
+    return artwork.art(artwork.audible_cover(store.get_product(asin)))
 
 
 def _stop_looking(asins: set[str]) -> None:

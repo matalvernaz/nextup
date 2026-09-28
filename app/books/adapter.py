@@ -125,6 +125,7 @@ def _as_hit(row: dict) -> dict:
         # askable.
         "requested": bool(row.get("requested")),
         "overview": row.get("description") or "",
+        **{key: row[key] for key in ("imageUrl", "thumbnailUrl") if row.get(key)},
     }
 
 
@@ -189,4 +190,5 @@ def states(user: jellyfin.User) -> list[dict]:
         "year": "",
         "state": row["state"],
         "requestedAt": row["requested_at"],
+        **{key: row[key] for key in ("imageUrl", "thumbnailUrl") if row.get(key)},
     } for row in wants.states(user.key, owned)]

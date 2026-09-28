@@ -4,7 +4,7 @@ Nothing here treats Radarr as a catalogue of what is owned. On the library
 this was built against Radarr held 27 films against Jellyfin's 431 -- it knows
 what it fetched, not what is on the disk. Ownership questions go to Jellyfin.
 """
-from . import arr, config, logs
+from . import arr, artwork, config, logs
 
 log = logs.get("radarr")
 
@@ -61,7 +61,28 @@ def _result(row: dict, owned: frozenset[str]) -> dict:
         "overview": (row.get("overview") or "").strip(),
         "runtimeMinutes": row.get("runtime") or None,
         "owned": tmdb in owned,
+        # What a summary says beside the blurb. All three are on the lookup row
+        # already, so a summary costs nothing more than the search did.
+        **facts(row),
+        **artwork.art(artwork.arr_poster(row)),
     }
+
+
+def facts(row: dict) -> dict:
+    """Genres, age rating and studio, from a Radarr row, as a summary shows them.
+
+    Blank values are left out rather than sent empty, so a client that shows
+    whatever is present never draws a label with nothing after it.
+    """
+    out = {}
+    genres = [g for g in (row.get("genres") or []) if isinstance(g, str) and g.strip()]
+    if genres:
+        out["genres"] = genres
+    for key in ("certification", "studio"):
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            out[key] = value.strip()
+    return out
 
 
 def add(tmdb_id: str, title: str = "", year: str = "",
@@ -79,7 +100,8 @@ def add(tmdb_id: str, title: str = "", year: str = "",
     if (row := tool.existing(tmdb_id)) is not None:
         return arr.AddResult(True, "Already in Radarr.", "",
                              row.get("title") or title,
-                             str(row.get("year") or year), created=False)
+                             str(row.get("year") or year), created=False,
+                             **_described(row))
 
     root = tool.root_folder_path()
     if not root:
@@ -106,7 +128,13 @@ def add(tmdb_id: str, title: str = "", year: str = "",
     result = tool.add(body)
     log.info("add tmdb=%s monitored=%s ok=%s message=%s",
              tmdb_id, monitored, result.ok, result.message)
-    return result
+    return result._replace(**_described(found)) if result.ok else result
+
+
+def _described(row: dict) -> dict:
+    """The poster and blurb an `AddResult` carries into the ledger."""
+    return {"image_url": artwork.arr_poster(row) or "",
+            "overview": (row.get("overview") or "").strip()}
 
 
 def _lookup_one(tool: arr.Arr, tmdb_id: str) -> dict | None:

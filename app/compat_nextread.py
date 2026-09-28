@@ -20,7 +20,7 @@ phone.
 """
 from fastapi import APIRouter, Body, Depends, HTTPException
 
-from . import arr, config, jellyfin, listenarr, logs
+from . import arr, artwork, config, jellyfin, listenarr, logs
 from .api import caller
 from .books import search, series, shelves, wants
 
@@ -304,4 +304,6 @@ def _suggestion(row: dict) -> dict:
         "recommendationId": row.get("recommendation_id"),
         "source": row.get("source"),
         "state": "available",
+        # Additive: a build that predates covers ignores both names.
+        **artwork.art(row.get("image")),
     }

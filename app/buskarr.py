@@ -15,7 +15,7 @@ import hashlib
 
 import httpx
 
-from . import arr, config, logs
+from . import arr, artwork, config, logs
 
 log = logs.get("buskarr")
 
@@ -90,7 +90,16 @@ def _result(row: dict, unit: str) -> dict:
     this" only for a track it has already been asked about, and a search hit
     has not been; claiming false would say the library lacks something it may
     well hold.
+
+    The picture is whatever the catalogue buskarr found it in published: an
+    album's cover, an artist's photograph, a track's album. A buskarr too old
+    to send one sends nothing, and the row simply has no picture.
     """
+    return {**_described(row, unit), **artwork.art(row.get("imageUrl"))}
+
+
+def _described(row: dict, unit: str) -> dict:
+    """Everything about one buskarr hit except its picture."""
     if unit == "artist":
         name = row.get("name") or ""
         return {
