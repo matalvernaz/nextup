@@ -500,7 +500,8 @@ def match(user: jellyfin.User, medium: str, unit: str, row: Row,
 #: accept a file of any length, so dropping it here would turn a thirty-second
 #: track into a request that any two-second file satisfies.
 _KEPT = ("itemKey", "medium", "unit", "title", "year", "artist", "album",
-         "source", "ref", "durationSeconds", "overview", "authors", "owned", "requested")
+         "source", "ref", "durationSeconds", "overview", "authors", "owned", "requested",
+         "imageUrl", "thumbnailUrl")
 
 
 def _keep(hit: dict) -> dict:

@@ -62,3 +62,13 @@ input[type="text"], select { font-size: 1rem; padding: 0.3rem; min-width: 18rem;
 .undo { margin: 0 0 1rem; }
 
 nav ul { list-style: none; display: flex; gap: 1rem; padding: 0; margin: 0.5rem 0; }
+
+/* A row with a picture: the picture first, the words beside it. Sized in rem
+   with the rest of the page, and never wider than the text needs it to be. */
+.with-cover { display: flex; gap: 0.75rem; align-items: flex-start; }
+.with-cover > div { flex: 1; min-width: 0; }
+.cover { flex: none; width: 4rem; height: auto; border-radius: 4px; }
+
+/* One book's own page: the cover a little larger, still beside the words. */
+.summary-cover { float: right; width: 9rem; height: auto; margin: 0 0 1rem 1rem;
+                 border-radius: 4px; }

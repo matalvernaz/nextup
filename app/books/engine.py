@@ -1227,6 +1227,9 @@ def _keyword_candidates(queries: list[str], owned_check, *,
                 # narrator overlap -- which made the channel look worse than its
                 # queries actually were.
                 "description": _candidate_description(asin),
+                # Listenarr's search carries the cover, as the similarity
+                # lookup's rows do; see `audible._thin`.
+                "image": row.get("imageUrl"),
                 "found_by": query,
                 "source": "keyword",
             }
@@ -1293,6 +1296,7 @@ def _want_candidates(
                               for n in (row.get("narrators") or []) if n.get("name")],
                 "runtime_min": row.get("lengthMinutes"),
                 "description": _candidate_description(asin),
+                "image": row.get("imageUrl"),
                 "source": "hardcover_want",
             }
             # A book they want that this library already holds is not a thing

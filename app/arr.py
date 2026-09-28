@@ -49,6 +49,11 @@ class AddResult(NamedTuple):
     #: Series only: which seasons were asked for, as `seasons.decode` reads
     #: it. Empty when no choice applied.
     seasons: str = ""
+    #: The tool's own poster address and blurb for what was asked for, kept on
+    #: the request so the list of what somebody asked for can show them. Empty
+    #: where the tool had none.
+    image_url: str = ""
+    overview: str = ""
 
 
 @dataclass(frozen=True, slots=True)

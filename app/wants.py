@@ -7,8 +7,8 @@ quietly skips half of it.
 """
 import time
 
-from . import (buskarr, config, jellyfin, logs, media, radarr, seasons,
-               sonarr, store)
+from . import (artwork, buskarr, config, jellyfin, logs, media, radarr,
+               seasons, sonarr, store)
 from .books import adapter as books
 
 log = logs.get("wants")
@@ -234,7 +234,13 @@ def _admit(user: jellyfin.User, found: media.Medium, medium: str,
         # sent: it is the spelling the library will carry when it lands.
         result.title or hit.get("title") or "",
         result.year or str(hit.get("year") or ""),
-        price, backend_id, seasons=result.seasons)
+        price, backend_id, seasons=result.seasons,
+        # The same preference. Radarr and Sonarr answer with their own poster
+        # and blurb; music has only what the search hit carried, which came
+        # from this server in the first place.
+        image_url=(artwork.https_url(result.image_url)
+                   or artwork.https_url(hit.get("imageUrl")) or ""),
+        overview=(result.overview or str(hit.get("overview") or "")).strip())
     log.info("want accepted user=%s key=%s backend_id=%s message=%r",
              user.key, item_key, result.backend_id, result.message)
     return ON_ITS_WAY, result.message
@@ -453,6 +459,13 @@ def _described(
         "state": state,
         "requestedAt": row["requested_at"],
     }
+    # Absent on a row from before either was kept, and wherever the catalogue
+    # had none. Sized the way a search hit's picture is.
+    keys = row.keys()
+    if "image_url" in keys:
+        described.update(artwork.art(row["image_url"]))
+    if "overview" in keys and row["overview"]:
+        described["overview"] = row["overview"]
     if row["medium"] == media.SERIES:
         # Which seasons were asked for, so the list can say it. Absent on a
         # row from before the choice existed, which was asked for whole.

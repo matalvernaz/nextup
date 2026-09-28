@@ -16,7 +16,7 @@ wants to know it is already here, and silence would read as "we cannot get it".
 import html
 import re
 
-from .. import config, jellyfin, listenarr, logs
+from .. import artwork, config, jellyfin, listenarr, logs
 from . import engine, shelves, wants
 
 log = logs.get(__name__)
@@ -57,6 +57,9 @@ def search(user: jellyfin.User, query: str, limit: int | None = None) -> list[di
             "authors": [a.get("name", "") for a in (row.get("authors") or []) if a.get("name")],
             "narrators": [n.get("name", "") for n in (row.get("narrators") or []) if n.get("name")],
             "runtimeMinutes": row.get("lengthMinutes"),
+            # The cover Listenarr's own search returned, so a row can show one
+            # without an Audible request per hit.
+            **artwork.art(row.get("imageUrl")),
         }
         hit["owned"] = engine._already_owned(
             {"asin": asin, "title": hit["title"], "authors": hit["authors"]},
@@ -88,6 +91,8 @@ def summary(asin: str) -> dict:
         # On the summary because it comes off the same product lookup, so a
         # client that wants to play it pays no second request for the address.
         "sampleUrl": sample_url(product),
+        # The cover, off the same lookup for the same reason.
+        **artwork.art(artwork.audible_cover(product)),
     }
 
 

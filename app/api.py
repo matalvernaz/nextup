@@ -322,7 +322,9 @@ def post_want(user: jellyfin.User = Depends(caller),
                   None, embed=True, alias="durationSeconds"),
               seasons_asked: dict | None = Body(
                   None, embed=True, alias="seasons"),
-              remember: bool = Body(False, embed=True)) -> dict:
+              remember: bool = Body(False, embed=True),
+              image_url: str | None = Body(None, embed=True, alias="imageUrl"),
+              overview: str | None = Body(None, embed=True)) -> dict:
     """Ask for one thing. Repeating it is free and spends no allowance.
 
     `seasons` (series only) is which of them to ask for this once, as in
@@ -340,6 +342,10 @@ def post_want(user: jellyfin.User = Depends(caller),
     through, so a request that forgets a thirty-second track is thirty seconds
     long will accept a two-second file of the same name. Both are optional --
     a client that does not send them is no worse off than before.
+
+    `imageUrl` and `overview` are the hit's picture and blurb, kept on the
+    request so the list of requests can show them. Radarr's and Sonarr's own
+    answers are preferred where there are any; music has nothing else.
     """
     log.info("api want user=%s medium=%s key=%s", user.key, medium, item_key)
     choice = None
@@ -350,7 +356,8 @@ def post_want(user: jellyfin.User = Depends(caller),
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     hit = {"title": title, "year": year, "artist": artist,
            "source": source, "ref": ref, "album": album,
-           "durationSeconds": duration_seconds}
+           "durationSeconds": duration_seconds,
+           "imageUrl": image_url or "", "overview": overview or ""}
     try:
         state, message = wants.want(user, medium, item_key, unit, hit,
                                     choice=choice, remember=remember)

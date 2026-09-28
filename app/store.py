@@ -57,6 +57,10 @@ CREATE TABLE IF NOT EXISTS requests (
     authors      TEXT NOT NULL DEFAULT '',
     -- Series only: which seasons were asked for. See `seasons.decode`.
     seasons      TEXT NOT NULL DEFAULT '',
+    -- The catalogue's picture and blurb for what was asked for, so the list
+    -- of requests can show and summarise it. Empty where there was none.
+    image_url    TEXT NOT NULL DEFAULT '',
+    overview     TEXT NOT NULL DEFAULT '',
     requested_at REAL NOT NULL,
     fulfilled_at REAL,
     PRIMARY KEY (user_key, medium, item_key)
@@ -363,7 +367,15 @@ _LATER_COLUMNS = (("authors", "TEXT NOT NULL DEFAULT ''"),
                   # Series only: which seasons were asked for, in the short
                   # form `seasons.decode` reads. Empty on every row from before
                   # the choice existed, which were all asked for whole.
-                  ("seasons", "TEXT NOT NULL DEFAULT ''"))
+                  ("seasons", "TEXT NOT NULL DEFAULT ''"),
+                  # The picture and blurb a request is shown with. Empty on
+                  # every row from before they were kept.
+                  ("image_url", "TEXT NOT NULL DEFAULT ''"),
+                  ("overview", "TEXT NOT NULL DEFAULT ''"))
+
+#: Longest blurb kept on a request. A catalogue blurb runs to a paragraph or
+#: two; this bounds what a client-supplied one can cost the ledger.
+MAX_OVERVIEW_LENGTH = 4000
 
 
 def _add_missing_columns(conn: sqlite3.Connection) -> None:
@@ -467,7 +479,8 @@ def rekey_users(name_to_id: dict[str, str]) -> int:
 
 def record(user_key: str, medium: str, item_key: str, unit: str,
            title: str, year: str, cost: int, backend_id: str,
-           authors: str = "", seasons: str = "") -> bool:
+           authors: str = "", seasons: str = "", image_url: str = "",
+           overview: str = "") -> bool:
     """Write down that this account asked for this thing. True when it is new.
 
     An existing row is left alone rather than refreshed. Asking twice must not
@@ -478,11 +491,13 @@ def record(user_key: str, medium: str, item_key: str, unit: str,
     with db() as conn:
         cur = conn.execute(
             "INSERT INTO requests (user_key, medium, item_key, unit, title, "
-            "year, cost, backend_id, authors, seasons, requested_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?) "
+            "year, cost, backend_id, authors, seasons, image_url, overview, "
+            "requested_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT (user_key, medium, item_key) DO NOTHING",
             (user_key, medium, item_key, unit, title, year, cost, backend_id,
-             authors, seasons, time.time()))
+             authors, seasons, image_url, overview[:MAX_OVERVIEW_LENGTH],
+             time.time()))
     return cur.rowcount > 0
 
 

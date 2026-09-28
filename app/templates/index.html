@@ -65,7 +65,9 @@ asked for yet.</p>
 {% else %}
 <ul class="results">
   {% for r in results %}
-  <li>
+  <li{% if r.thumbnailUrl %} class="with-cover"{% endif %}>
+    {% include "_cover.html" %}
+    <div>
     <h4>{{ r.title }}{% if r.year %} ({{ r.year }}){% endif %}</h4>
     {% if r.artist and r.unit != 'artist' %}<p>By {{ r.artist }}.</p>{% endif %}
     {% if r.album %}<p>From {{ r.album }}.</p>{% endif %}
@@ -73,8 +75,13 @@ asked for yet.</p>
     {% if r.narrators %}<p>Read by {{ r.narrators | join(', ') }}.</p>{% endif %}
     {% if r.seasonCount %}<p>{{ r.seasonCount }} season{{ '' if r.seasonCount == 1 else 's' }}{% if r.network %}, {{ r.network }}{% endif %}.</p>{% endif %}
     {% if r.trackCount %}<p>{{ r.trackCount }} tracks.</p>{% endif %}
+    {% if r.genres or r.certification %}<p>{% if r.genres %}{{ r.genres | join(', ') }}.{% endif %}{% if r.certification %} Rated {{ r.certification }}.{% endif %}</p>{% endif %}
     {% if r.overview %}<p>{{ r.overview }}</p>{% endif %}
     {% if r.medium == 'book' and r.unit == 'book' and r.itemKey %}
+    {# A search hit carries no blurb: it is one Audible request a book, and a
+       page of results would pay for twenty-five nobody opened. So a link, the
+       way the sample is one, named for the book it opens. #}
+    <p><a href="/summary?asin={{ r.itemKey | urlencode }}">Read the summary of {{ r.title }}</a></p>
     <p><a href="/sample?asin={{ r.itemKey | urlencode }}">Hear a sample of {{ r.title }}</a></p>
     {% endif %}
     {% if r.owned %}
@@ -100,9 +107,14 @@ asked for yet.</p>
         is otherwise a column of identical "Ask for it" buttons, and which one
         is which is only knowable by reading backwards.
       #}
+      {# The picture and blurb go with the request, so the list of what was
+         asked for can show them. Films and series take their tool's own. #}
+      <input type="hidden" name="imageUrl" value="{{ r.imageUrl | default('') }}">
+      <input type="hidden" name="overview" value="{{ r.overview | default('') }}">
       <button type="submit">Ask for {{ r.title }}{% if r.artist and r.unit != 'artist' %} by {{ r.artist }}{% endif %}</button>
     </form>
     {% endif %}
+    </div>
   </li>
   {% endfor %}
 </ul>
@@ -132,7 +144,9 @@ asked for yet.</p>
 {% else %}
 <ul class="requests">
   {% for r in requests %}
-  <li>
+  <li{% if r.thumbnailUrl %} class="with-cover"{% endif %}>
+    {% include "_cover.html" %}
+    <div>
     <h4>{{ r.title or r.itemKey }}{% if r.year %} ({{ r.year }}){% endif %}</h4>
     <p>
       {% if r.state == 'in_library' %}In the library.
@@ -155,6 +169,7 @@ asked for yet.</p>
       <button type="submit">Stop looking for {{ r.title or r.itemKey }}</button>
     </form>
     {% endif %}
+    </div>
   </li>
   {% endfor %}
 </ul>

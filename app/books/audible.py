@@ -8,7 +8,7 @@ import re
 
 import httpx
 
-from .. import config
+from .. import artwork, config
 from . import store
 
 # An ASIN is ten letters and digits. Anything else would change which catalogue
@@ -122,7 +122,24 @@ def _thin(product: dict) -> dict:
         "series_position": series_position,
         "description": (product.get("publisher_summary")
                         or product.get("merchandising_summary") or "").strip(),
+        # The cover, from the `media` group this lookup already asks for. A
+        # suggestion is a book the library does not hold, so nothing else can
+        # show what it looks like. Always present, None where there is none:
+        # the key's absence is how `_predates_covers` tells an older row.
+        "image": artwork.audible_cover(product),
     }
+
+
+def _predates_covers(rows: list[dict]) -> bool:
+    """Whether a cached neighbour list was written before covers were kept.
+
+    Such a list is right about everything else and has no pictures, so it is
+    fetched again rather than dropped outright. The schema version would drop
+    the whole similarity graph, every product and every alias with it -- far
+    too much to throw away for a picture -- and an older list still beats
+    nothing when the catalogue cannot be reached.
+    """
+    return any(isinstance(row, dict) and "image" not in row for row in rows)
 
 
 def sims(asin: str, axis: str = AXIS_RAW) -> list[dict]:
@@ -131,7 +148,7 @@ def sims(asin: str, axis: str = AXIS_RAW) -> list[dict]:
     Returns an empty list on any failure -- a dead seed must not fail a whole run.
     """
     cached = store.get_sims(asin, axis)
-    if cached is not None:
+    if cached is not None and not _predates_covers(cached):
         return cached
 
     params = {
@@ -167,7 +184,10 @@ def sims(asin: str, axis: str = AXIS_RAW) -> list[dict]:
     # only after every store answers: one store can lack a book sold elsewhere.
     if thinned or answered == len(config.AUDIBLE_REGIONS):
         store.put_sims(asin, axis, thinned)
-    return thinned
+        return thinned
+    # Not answered. An older list, without its pictures, is still the right
+    # neighbours; an empty one would drop this seed from the shelf entirely.
+    return cached if cached is not None else thinned
 
 
 def product(asin: str) -> dict | None:

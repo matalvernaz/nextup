@@ -90,7 +90,10 @@
 <p>{{ discover | length }} book{{ '' if discover | length == 1 else 's' }}, best first.</p>
 <ol class="shelf">
   {% for row in discover %}
-  <li>
+  {% set art = cover(row.image) %}
+  <li{% if art %} class="with-cover"{% endif %}>
+    {% if art %}<img class="cover" src="{{ art.thumbnailUrl }}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer">{% endif %}
+    <div>
     <h4>{{ row.title }}</h4>
     <p class="by">
       {% if row.authors %}by {{ row.authors | join(', ') }}{% endif %}
@@ -105,6 +108,7 @@
     </ul>
     {% endif %}
     {# The title is in the link for the same reason it is in the buttons. #}
+    <p><a href="/summary?asin={{ row.asin | urlencode }}">Read the summary of {{ row.title }}</a></p>
     {% if row.asin not in not_out %}
     <p><a href="/sample?asin={{ row.asin | urlencode }}">Hear a sample of {{ row.title }}</a></p>
     {% endif %}
@@ -131,6 +135,7 @@
       </form>
     </div>
     {% endif %}
+    </div>
   </li>
   {% endfor %}
 </ol>

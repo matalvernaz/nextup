@@ -11,7 +11,7 @@ from typing import NamedTuple
 
 import httpx
 
-from . import arr, config, logs, seasons
+from . import arr, artwork, config, logs, seasons
 
 log = logs.get("sonarr")
 
@@ -72,7 +72,36 @@ def _result(row: dict, owned: frozenset[str]) -> dict:
         "status": row.get("status") or "",
         "seasonCount": _season_count(row),
         "owned": tvdb in owned,
+        # What a summary says beside the blurb, off the same lookup row.
+        **facts(row),
+        **artwork.art(artwork.arr_poster(row)),
     }
+
+
+def facts(row: dict) -> dict:
+    """Genres and age rating from a Sonarr row, where it has them.
+
+    Blank values are left out rather than sent empty, so a client that shows
+    whatever is present never draws a label with nothing after it.
+    """
+    out = {}
+    genres = [g for g in (row.get("genres") or []) if isinstance(g, str) and g.strip()]
+    if genres:
+        out["genres"] = genres
+    certification = row.get("certification")
+    if isinstance(certification, str) and certification.strip():
+        out["certification"] = certification.strip()
+    return out
+
+
+def _described(row: dict) -> dict:
+    """The poster and blurb an `AddResult` carries into the ledger."""
+    return {"image_url": artwork.arr_poster(row) or "",
+            "overview": (row.get("overview") or "").strip()}
+
+
+def _with_description(result: arr.AddResult, row: dict) -> arr.AddResult:
+    return result._replace(**_described(row)) if result.ok else result
 
 
 def _season_count(row: dict) -> int:
@@ -99,7 +128,8 @@ def add(tvdb_id: str, title: str = "", monitored: bool = True,
     if (row := tool.existing(tvdb_id)) is not None:
         return arr.AddResult(True, "Already in Sonarr.", "",
                              row.get("title") or title,
-                             str(row.get("year") or ""), created=False)
+                             str(row.get("year") or ""), created=False,
+                             **_described(row))
 
     root = tool.root_folder_path()
     if not root:
@@ -129,7 +159,7 @@ def add(tvdb_id: str, title: str = "", monitored: bool = True,
         log.info("add tvdb=%s monitored=%s monitor=%s ok=%s message=%s",
                  tvdb_id, monitored, body["addOptions"]["monitor"],
                  result.ok, result.message)
-        return result
+        return _with_description(result, found)
 
     name = found.get("title") or title or "That series"
     listed = _listed_seasons(found)
@@ -170,7 +200,7 @@ def add(tvdb_id: str, title: str = "", monitored: bool = True,
              tvdb_id, asked.encode(), body["addOptions"]["monitor"],
              result.ok, result.message)
     if not result.ok or not result.created:
-        return result
+        return _with_description(result, found)
     if asked.choice == seasons.LATEST:
         latest = _monitor_latest(tool, result.backend_id, listed)
         if latest is None:
@@ -182,8 +212,9 @@ def add(tvdb_id: str, title: str = "", monitored: bool = True,
                        "season to fetch, so it was taken back out. Try again "
                        "in a minute.")
         asked = seasons.Seasons(seasons.LATEST, 0, latest)
-    return result._replace(message=_asked_message(asked, name),
-                           seasons=asked.encode())
+    return _with_description(
+        result._replace(message=_asked_message(asked, name),
+                        seasons=asked.encode()), found)
 
 
 #: Injected by the tests, so waiting for Sonarr takes no real time there.

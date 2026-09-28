@@ -24,9 +24,9 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import (api, arr, backends, compat_nextread, config, imports, jellyfin, listenarr,
-               logs, media, recommendations, seasons, selfcheck, sessions,
-               settings, setup, store, throttle, wants)
+from . import (api, arr, artwork, backends, compat_nextread, config, imports,
+               jellyfin, listenarr, logs, media, recommendations, seasons,
+               selfcheck, sessions, settings, setup, store, throttle, wants)
 from .books import audible as book_audible
 from .books import hardcover_shelf
 from .books import search as book_search
@@ -143,6 +143,10 @@ templates.env.globals["can_import"] = lambda: bool(media.available())
 # Whether to draw the link to Discover at all. An installation with no
 # rankable library should not be offered a page that has nothing on it.
 templates.env.globals["discover_media"] = lambda: discover_media()
+
+# A row's picture in its two sizes, for a template holding a bare address --
+# a stored shelf keeps the catalogue's own. See `artwork.art`.
+templates.env.globals["cover"] = lambda url: artwork.art(url)
 
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
@@ -807,7 +811,9 @@ def post_want(request: Request, medium: str = Form(...),
               title: str = Form(""), year: str = Form(""),
               artist: str = Form(""), source: str = Form(""),
               ref: str = Form(""), album: str = Form(""),
-              duration_seconds: float | None = Form(None, alias="durationSeconds")):
+              duration_seconds: float | None = Form(None, alias="durationSeconds"),
+              image_url: str = Form("", alias="imageUrl"),
+              overview: str = Form("")):
     """Ask for one thing, then send the browser back to the list.
 
     A redirect rather than a rendered response so that a reload does not
@@ -820,7 +826,8 @@ def post_want(request: Request, medium: str = Form(...),
         return _back(medium, f"Nextup could not work out who you are. {exc}")
     hit = {"title": title, "year": year, "artist": artist,
            "source": source, "ref": ref, "album": album,
-           "durationSeconds": duration_seconds}
+           "durationSeconds": duration_seconds,
+           "imageUrl": image_url, "overview": overview}
     try:
         _, message = wants.want(user, medium, item_key, unit, hit)
     except wants.Denied as denied:
@@ -1176,6 +1183,36 @@ def get_sample(request: Request, asin: str = ""):
         request=request, name="no_sample.html", status_code=404,
         context={"user": user, "found": product is not None,
                  "title": ((product or {}).get("title") or "").strip()})
+
+
+@app.get("/summary", response_class=HTMLResponse)
+def get_summary(request: Request, asin: str = ""):
+    """One book's own page: its cover, its blurb, and its sample.
+
+    Its own page because a search or a shelf carries no blurb -- each is an
+    Audible request, and a list of forty would pay forty for text nobody
+    opened. The same lookup `/sample` makes, so reading the summary first
+    makes hearing the sample free.
+    """
+    if setup.needs_setup():
+        return RedirectResponse(url="/setup", status_code=303)
+    try:
+        user = viewer(request)
+    except LookupError as exc:
+        return _signin_page(request, detail=str(exc), status=401)
+    asin = asin.strip().upper()
+    found = book_search.summary(asin) if _ASIN.fullmatch(asin) else None
+    # A summary with no title is Audible unreachable or not selling the book
+    # where this server looks: nothing is known, so nothing is claimed.
+    known = bool(found and found["title"])
+    return templates.TemplateResponse(
+        request=request, name="summary.html",
+        status_code=200 if known else 404,
+        context={"user": user, "asin": asin, "known": known,
+                 "book": found or {},
+                 "paragraphs": [part for part in
+                                ((found or {}).get("summary") or "").split("\n\n")
+                                if part.strip()]})
 
 
 @app.post("/discover/refresh")

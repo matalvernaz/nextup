@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}{{ book.title or "A book" }} — Nextup{% endblock %}
+{% block main %}
+{% if not known %}
+<h2>No summary</h2>
+<p>
+  Nextup could not find that book on Audible just now, so there is nothing to
+  show. Try again in a while.
+</p>
+{% else %}
+<h2>{{ book.title }}</h2>
+{# Decorative, like the covers in the lists: the heading names the book. #}
+{% if book.imageUrl %}<img class="summary-cover" src="{{ book.imageUrl }}" alt="" decoding="async" referrerpolicy="no-referrer">{% endif %}
+{% if book.authors %}<p class="by">by {{ book.authors | join(', ') }}</p>{% endif %}
+{% if book.runtimeMinutes %}
+{% set hours = (book.runtimeMinutes // 60) %}{% set minutes = (book.runtimeMinutes % 60) %}
+<p>{% if hours %}{{ hours }} hour{{ '' if hours == 1 else 's' }}{% endif %}{% if hours and minutes %} {% endif %}{% if minutes %}{{ minutes }} minute{{ '' if minutes == 1 else 's' }}{% endif %}.</p>
+{% endif %}
+{# Before the blurb, which can run to pages: a sample is how somebody decides. #}
+{% if book.sampleUrl %}
+<p><a href="/sample?asin={{ asin | urlencode }}">Hear a sample of {{ book.title }}</a></p>
+{% else %}
+<p>Audible has no sample of {{ book.title }}. A book that is not out yet never has one.</p>
+{% endif %}
+{% if paragraphs %}
+{% for paragraph in paragraphs %}<p>{{ paragraph }}</p>
+{% endfor %}
+{% else %}
+<p>No summary has been published for this one.</p>
+{% endif %}
+{% endif %}
+{% endblock %}
