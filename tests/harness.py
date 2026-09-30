@@ -122,6 +122,9 @@ FORBIDDEN_HOSTS = (
     "openlibrary.org",
     "api.hardcover.app",
     "googleapis.com",
+    # Apple's podcast catalogue and its image server.
+    "itunes.apple.com",
+    "mzstatic.com",
 )
 
 _network_guarded = False

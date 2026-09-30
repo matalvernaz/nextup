@@ -22,7 +22,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from . import buskarr, config, listenarr, logs, radarr, sonarr
+from . import buskarr, config, listenarr, logs, podgrab, radarr, sonarr
 
 log = logs.get("backends")
 
@@ -135,7 +135,19 @@ def _listenarr() -> Status:
     return Status("book", "listenarr", True, ok, detail)
 
 
-_PROBES = (_radarr, _sonarr, _buskarr, _listenarr)
+def _podgrab() -> Status:
+    if not podgrab.configured():
+        return Status("podcast", "podgrab", False, None,
+                      "not configured: PODGRAB_URL unset")
+    # Its list of podcasts, which is the read used to find a feed it already
+    # follows. No key: podgrab has none, and is reached over the Docker
+    # network only.
+    ok, detail = _probe("podgrab", config.PODGRAB_URL, "/podcasts",
+                        {"Accept": "application/json"})
+    return Status("podcast", "podgrab", True, ok, detail)
+
+
+_PROBES = (_radarr, _sonarr, _buskarr, _listenarr, _podgrab)
 
 _cache: tuple[Status, ...] | None = None
 _cached_at = 0.0

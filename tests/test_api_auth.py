@@ -176,7 +176,7 @@ body = found.json()
 check.equal(body["service"], "nextup", "/info names the service")
 check.equal(body["protocol"], 1,
             "and the protocol a client that knows nothing else will read")
-check.equal(body["protocols"], [1, 2],
+check.equal(body["protocols"], [1, 2, 3],
             "with every shape it can answer in, which is additive")
 
 # --- three prefixes, one app -------------------------------------------------

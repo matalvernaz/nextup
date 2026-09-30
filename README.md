@@ -175,6 +175,7 @@ arriving.
 | Series | series | Sonarr | the same |
 | Music | artist, album, track | buskarr | — |
 | Books | book, series | Listenarr | an Audible similarity graph and a local text model |
+| Podcasts | podcast | podgrab | your listening, and Apple's catalogue for what to add |
 
 One search box with one picker for what kind of thing you want, not four
 screens. Asking for a whole book series is the same control as asking for a

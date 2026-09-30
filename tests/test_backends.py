@@ -19,7 +19,7 @@ from app import backends, doctor  # noqa: E402
 check = harness.Check("backends")
 
 found = {status.medium: status for status in backends.statuses(force=True)}
-check.equal(sorted(found), ["book", "movie", "music", "series"],
+check.equal(sorted(found), ["book", "movie", "music", "podcast", "series"],
             "every backend is reported, configured or not")
 
 # Configured and silent. The host does not resolve, which is what a wrong

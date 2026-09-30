@@ -16,7 +16,15 @@ log = logs.get("recommendations")
 
 SERIES_RANKER_VERSION = "series-owned-v3"
 MOVIE_RANKER_VERSION = "movie-owned-v2"
-SUPPORTED_MEDIA = ("series", "movie")
+PODCAST_RANKER_VERSION = "podcast-owned-v1"
+SUPPORTED_MEDIA = ("series", "movie", "podcast")
+
+#: What one of each medium is called in a reason, and how having had it is put.
+_KIND_NOUN = {"movie": "film", "series": "show", "podcast": "podcast"}
+_HAD_LABEL = {"movie": "films you've watched", "series": "shows you've watched",
+              "podcast": "podcasts you've listened to"}
+_HAD_ONE = {"movie": "a film you've seen", "series": "a show you've seen",
+            "podcast": "a podcast you've listened to"}
 
 # What one TMDb neighbour vote is worth against the metadata evidence beside
 # it.
@@ -209,8 +217,7 @@ def _joined(values: list[str]) -> str:
 
 
 def _watched_label(medium: str) -> str:
-    return ("films you've watched" if medium == "movie"
-            else "shows you've watched")
+    return _HAD_LABEL.get(medium, "things you've watched")
 
 
 def _genre_reason(values: list[str], medium: str) -> str:
@@ -240,7 +247,8 @@ def _tmdb_votes(
     """
     votes: Counter = Counter()
     because: dict[str, list[str]] = {}
-    if not tmdb.configured():
+    # TMDb knows films and television; a podcast has no TMDb id to ask about.
+    if not tmdb.configured() or medium not in ("movie", "series"):
         return votes, because
 
     ranked = sorted(
@@ -303,16 +311,13 @@ def _score_candidates(
         # said about a candidate -- a named title somebody actually watched --
         # and the two metadata reasons below are true of dozens of rows each.
         if neighbour and (watched := vote_because.get(_tmdb_id(item))):
-            source_kind = "film" if medium == "movie" else "show"
             reasons.append(
                 f"watched by people who liked {watched[0]}, "
-                f"a {source_kind} you've seen")
+                f"{_HAD_ONE.get(medium, 'one you have seen')}")
         if people_matches:
-            source_kind = "film" if medium == "movie" else "show"
             name = people_matches[0][0]
             reasons.append(
-                f"{_credit(item, name)} {name}, from a {source_kind} "
-                f"you've watched")
+                f"{_credit(item, name)} {name}, from {_HAD_ONE.get(medium, 'one you have seen')}")
         if genre_matches:
             names = [name for name, _ in genre_matches[:2]]
             reasons.append(_genre_reason(names, medium))
@@ -389,17 +394,33 @@ def _recent(
 
 
 def limit(medium: str) -> int:
-    return (config.MOVIE_RECOMMENDATION_LIMIT if medium == "movie"
-            else config.SERIES_RECOMMENDATION_LIMIT)
+    if medium == "movie":
+        return config.MOVIE_RECOMMENDATION_LIMIT
+    if medium == "podcast":
+        return config.PODCAST_RECOMMENDATION_LIMIT
+    return config.SERIES_RECOMMENDATION_LIMIT
 
 
 def _cache_seconds(medium: str) -> int:
-    return (config.MOVIE_RECOMMENDATION_CACHE_SECONDS if medium == "movie"
-            else config.SERIES_RECOMMENDATION_CACHE_SECONDS)
+    if medium == "movie":
+        return config.MOVIE_RECOMMENDATION_CACHE_SECONDS
+    if medium == "podcast":
+        return config.PODCAST_RECOMMENDATION_CACHE_SECONDS
+    return config.SERIES_RECOMMENDATION_CACHE_SECONDS
 
 
 def ranker_version(medium: str) -> str:
-    return MOVIE_RANKER_VERSION if medium == "movie" else SERIES_RANKER_VERSION
+    if medium == "movie":
+        return MOVIE_RANKER_VERSION
+    if medium == "podcast":
+        return PODCAST_RANKER_VERSION
+    return SERIES_RANKER_VERSION
+
+
+#: The seed weighting, for the podcast catalogue shelf, which builds its taste
+#: profile the same way this module builds its own.
+def seed_weight(item: dict) -> float:
+    return _seed_weight(item)
 
 
 def build(library: list[dict], medium: str = "series") -> dict:

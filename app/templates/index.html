@@ -54,6 +54,10 @@ asked for yet.</p>
       <label for="q">Title</label><br>
       <input type="text" id="q" name="q" value="{{ query }}" autocomplete="off">
     </p>
+    {% if medium == 'podcast' %}
+    <p class="help">Words from the title search Apple's podcast catalogue.
+      Paste a feed address instead to add a podcast that is not in it.</p>
+    {% endif %}
     <p><button type="submit">Search</button></p>
   </fieldset>
 </form>
@@ -75,6 +79,7 @@ asked for yet.</p>
     {% if r.narrators %}<p>Read by {{ r.narrators | join(', ') }}.</p>{% endif %}
     {% if r.seasonCount %}<p>{{ r.seasonCount }} season{{ '' if r.seasonCount == 1 else 's' }}{% if r.network %}, {{ r.network }}{% endif %}.</p>{% endif %}
     {% if r.trackCount %}<p>{{ r.trackCount }} tracks.</p>{% endif %}
+    {% if r.episodeCount %}<p>{{ r.episodeCount }} episode{{ '' if r.episodeCount == 1 else 's' }}{% if r.latestEpisodeAt %}, the newest from {{ r.latestEpisodeAt[:10] }}{% endif %}.</p>{% endif %}
     {% if r.genres or r.certification %}<p>{% if r.genres %}{{ r.genres | join(', ') }}.{% endif %}{% if r.certification %} Rated {{ r.certification }}.{% endif %}</p>{% endif %}
     {% if r.overview %}<p>{{ r.overview }}</p>{% endif %}
     {% if r.medium == 'book' and r.unit == 'book' and r.itemKey %}
@@ -111,6 +116,11 @@ asked for yet.</p>
          asked for can show them. Films and series take their tool's own. #}
       <input type="hidden" name="imageUrl" value="{{ r.imageUrl | default('') }}">
       <input type="hidden" name="overview" value="{{ r.overview | default('') }}">
+      {% if r.medium == 'podcast' %}
+      <input type="hidden" name="feedUrl" value="{{ r.feedUrl | default('') }}">
+      <input type="hidden" name="itunesId" value="{{ r.itunesId | default('') }}">
+      {% include "_episodes_choice.html" %}
+      {% endif %}
       <button type="submit">Ask for {{ r.title }}{% if r.artist and r.unit != 'artist' %} by {{ r.artist }}{% endif %}</button>
     </form>
     {% endif %}

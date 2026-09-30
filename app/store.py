@@ -371,7 +371,10 @@ _LATER_COLUMNS = (("authors", "TEXT NOT NULL DEFAULT ''"),
                   # The picture and blurb a request is shown with. Empty on
                   # every row from before they were kept.
                   ("image_url", "TEXT NOT NULL DEFAULT ''"),
-                  ("overview", "TEXT NOT NULL DEFAULT ''"))
+                  ("overview", "TEXT NOT NULL DEFAULT ''"),
+                  # Podcasts only: how much of it was asked for, in the short
+                  # form `episodes.decode` reads.
+                  ("episodes", "TEXT NOT NULL DEFAULT ''"))
 
 #: Longest blurb kept on a request. A catalogue blurb runs to a paragraph or
 #: two; this bounds what a client-supplied one can cost the ledger.
@@ -480,7 +483,7 @@ def rekey_users(name_to_id: dict[str, str]) -> int:
 def record(user_key: str, medium: str, item_key: str, unit: str,
            title: str, year: str, cost: int, backend_id: str,
            authors: str = "", seasons: str = "", image_url: str = "",
-           overview: str = "") -> bool:
+           overview: str = "", episodes: str = "") -> bool:
     """Write down that this account asked for this thing. True when it is new.
 
     An existing row is left alone rather than refreshed. Asking twice must not
@@ -492,12 +495,12 @@ def record(user_key: str, medium: str, item_key: str, unit: str,
         cur = conn.execute(
             "INSERT INTO requests (user_key, medium, item_key, unit, title, "
             "year, cost, backend_id, authors, seasons, image_url, overview, "
-            "requested_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) "
+            "episodes, requested_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT (user_key, medium, item_key) DO NOTHING",
             (user_key, medium, item_key, unit, title, year, cost, backend_id,
              authors, seasons, image_url, overview[:MAX_OVERVIEW_LENGTH],
-             time.time()))
+             episodes, time.time()))
     return cur.rowcount > 0
 
 
@@ -1049,7 +1052,8 @@ def put_external(cache_key: str, payload) -> None:
 #: Only these may be written per account. The same allowlist reasoning as
 #: `settings.WRITABLE`: a table that can hold arbitrary names is one where a
 #: bug writes something load-bearing.
-USER_WRITABLE = frozenset({"HARDCOVER_TOKEN", "SERIES_SEASONS"})
+USER_WRITABLE = frozenset({"HARDCOVER_TOKEN", "SERIES_SEASONS",
+                           "PODCAST_EPISODES"})
 
 #: Never logged, never rendered back into a form field. The credential; which
 #: seasons somebody usually asks for is nobody's secret, and a keyholder page

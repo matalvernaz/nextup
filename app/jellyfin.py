@@ -48,7 +48,11 @@ _CREDENTIAL_TIMEOUT = httpx.Timeout(5.0, connect=3.0)
 
 #: Collection type of a Jellyfin view, per medium this service serves.
 COLLECTION_TYPES = {"movie": "movies", "series": "tvshows",
-                    "music": "music", "book": "books"}
+                    "music": "music", "book": "books",
+                    # The audiobook fork's own library kind. A stock Jellyfin
+                    # has no such view, so podcasts are simply never offered
+                    # against one.
+                    "podcast": "podcasts"}
 
 
 def normalise_id(value: str) -> str:
@@ -294,6 +298,7 @@ def library_ids(medium: str) -> list[str]:
         "series": config.SERIES_LIBRARY_IDS,
         "music": config.MUSIC_LIBRARY_IDS,
         "book": config.BOOK_LIBRARY_IDS,
+        "podcast": config.PODCAST_LIBRARY_IDS,
     }.get(medium, [])
     if configured:
         return configured
@@ -442,7 +447,8 @@ def recommendation_items_for_user(
     metadata and, critically, ``userId`` so one account's watching does not
     become another account's taste profile.
     """
-    item_type = {"movie": "Movie", "series": "Series"}.get(medium)
+    item_type = {"movie": "Movie", "series": "Series",
+                 "podcast": "Podcast"}.get(medium)
     if not item_type:
         return []
     # ProviderIds rides along so the ranker can ask TMDb what else people who
@@ -469,6 +475,51 @@ def recommendation_items_for_user(
                   medium, uid, exc)
         raise JellyfinUnavailable(str(exc)) from exc
     return list(found.values())
+
+
+def podcasts_owned() -> list[dict]:
+    """Every podcast in the podcast libraries, with the ids the fork wrote on it.
+
+    Raises `JellyfinUnavailable` rather than answering empty, for the reason
+    `_items` does: an empty index reads every podcast as askable and every
+    request as not yet arrived.
+    """
+    return _items("podcast", "Podcast", fields="ProviderIds")
+
+
+def podcast_episode_count(item_id: str) -> int | None:
+    """How many episodes one podcast holds, or None when Jellyfin could not say.
+
+    Asked per podcast, as episodes are per series: the fork answers no child
+    count on a folder, and the whole podcast library is thousands of rows to
+    answer a question about one.
+    """
+    try:
+        with _client() as c:
+            resp = c.get("/Items", params={
+                "parentId": item_id, "includeItemTypes": "PodcastEpisode",
+                "recursive": "true", "limit": 0})
+            resp.raise_for_status()
+            total = resp.json().get("TotalRecordCount")
+    except (httpx.HTTPError, ValueError) as exc:
+        log.warning("podcast episode count failed id=%s (%s)", item_id, exc)
+        return None
+    return int(total) if isinstance(total, int) else None
+
+
+def media_updated(paths: list[str]) -> None:
+    """Tell Jellyfin these folders changed, so it re-reads them now.
+
+    `/media/podcasts` is NFS on the deployment this was built for, where
+    Jellyfin's own watcher sees nothing, and its scheduled scan is twelve
+    hours apart. Paths are as the Jellyfin container sees them.
+    """
+    body = {"Updates": [{"Path": path, "UpdateType": "Modified"} for path in paths]}
+    try:
+        with _client() as c:
+            c.post("/Library/Media/Updated", json=body).raise_for_status()
+    except httpx.HTTPError as exc:
+        raise JellyfinUnavailable(str(exc)) from exc
 
 
 def item_with_path(item_id: str, user_id: str) -> dict | None:

@@ -25,7 +25,8 @@ library carries a wrong TMDB id, which this one does in places. Nothing is
 cleared while anybody is still waiting, and files are never touched on either
 side.
 """
-from . import jellyfin, listenarr, logs, media, radarr, sonarr, store
+from . import (itunes, jellyfin, listenarr, logs, media, podcasts, podgrab,
+               radarr, sonarr, store)
 from .books import engine as book_engine
 from .books import store as book_store
 from .books import wants as book_wants
@@ -61,6 +62,7 @@ MEDIUM_OF_TYPE = {
     "Series": media.SERIES,
     "AudioBook": media.BOOK,
     "Book": media.BOOK,
+    "Podcast": media.PODCAST,
 }
 
 
@@ -83,7 +85,56 @@ def clear(item: dict) -> dict:
 
     if medium == media.BOOK:
         return _clear_book(item)
+    if medium == media.PODCAST:
+        return _clear_podcast(item)
     return _clear_by_provider_id(medium, item)
+
+
+# --- Podcasts ------------------------------------------------------------------
+
+
+def _clear_podcast(item: dict) -> dict:
+    """A deleted podcast: stop podgrab following it, or it comes straight back.
+
+    podgrab fetches new episodes into the folder Jellyfin just removed, so a
+    podcast deleted from the library reappears at the next episode unless the
+    subscription goes too. Files are podgrab's to delete here because Jellyfin
+    already deleted them; what is left is the row and its future.
+    """
+    provider_ids = item.get("providerIds") or {}
+    feed = str(provider_ids.get("PodcastFeed") or "").strip()
+    name = str(item.get("name") or "").strip()
+    try:
+        candidates = podcasts.owned(force=True)
+    except jellyfin.JellyfinUnavailable as exc:
+        raise Unsettled(str(exc)) from exc
+    feed_key = itunes.item_key(feed) if feed else ""
+    if podcasts.match(candidates, feed_key=feed_key,
+                      itunes_id=str(provider_ids.get("iTunes") or ""),
+                      title=name) is not None:
+        raise StillHere(f"{name or 'That podcast'} is still in the library, "
+                        "so nothing was changed.")
+    row = None
+    if feed:
+        row = podgrab.find(feed)
+    if row is None and name:
+        wanted = itunes.normalise_title(name)
+        row = next((r for r in podgrab.podcasts() or []
+                    if itunes.normalise_title(podgrab.row_title(r)) == wanted), None)
+    dropped = 0
+    if feed_key:
+        _require_nobody_waiting(media.PODCAST, feed_key)
+        dropped = store.drop_settled(media.PODCAST, feed_key)
+    if row is None:
+        log.info("deleted podcast name=%r: podgrab does not follow it, ledger rows=%d",
+                 name, dropped)
+        return _report(medium=media.PODCAST, cleared=None, item_key=feed_key,
+                       ledger_rows=dropped)
+    stopped = podgrab.remove(podgrab.row_id(row))
+    log.info("deleted podcast name=%r podgrab_id=%s stopped=%s ledger_rows=%d",
+             name, podgrab.row_id(row), stopped, dropped)
+    return _report(medium=media.PODCAST, cleared=podgrab.row_title(row) or name,
+                   item_key=feed_key, stopped=stopped, ledger_rows=dropped)
 
 
 # --- Films and series --------------------------------------------------------

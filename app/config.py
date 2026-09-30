@@ -7,7 +7,7 @@ on any particular acquisition tool being present.
 """
 import os
 
-from . import seasons
+from . import episodes, seasons
 
 
 def _text(name: str, default: str = "") -> str:
@@ -331,6 +331,46 @@ SEARCH_LIMIT = _int("SEARCH_LIMIT", 25)
 MOVIE_DAILY_CAP = _int("MOVIE_DAILY_CAP", 3)
 SERIES_DAILY_CAP = _int("SERIES_DAILY_CAP", 1)
 MUSIC_DAILY_CAP = _int("MUSIC_DAILY_CAP", 3)
+PODCAST_DAILY_CAP = _int("PODCAST_DAILY_CAP", 3)
+
+# --- Podcasts ---------------------------------------------------------------
+#
+# podgrab subscribes and downloads; Apple's podcast catalogue, which needs no
+# key, answers searches and suggestions; Jellyfin's audiobook fork holds the
+# podcasts library. As with every backend, an unset URL means this deployment
+# does not offer podcasts.
+
+# How much of a podcast somebody gets when they have not chosen for
+# themselves: `all`, `new`, or `latest:<n>`. Empty means nobody is given one,
+# so each person is asked before their first podcast and the answers are
+# counted on the accounts page. Refused at start-up when it does not parse:
+# misread, it would quietly fetch a whole back catalogue or nothing.
+PODCAST_EPISODES_DEFAULT = _text("PODCAST_EPISODES_DEFAULT", "")
+if PODCAST_EPISODES_DEFAULT and episodes.decode(PODCAST_EPISODES_DEFAULT) is None:
+    raise ValueError(
+        f"PODCAST_EPISODES_DEFAULT={PODCAST_EPISODES_DEFAULT!r} is not a choice of "
+        "episodes; use all, new, or latest:<count>")
+
+# How often podgrab is asked what it downloaded so Jellyfin can be told. Zero
+# turns it off and leaves new episodes to Jellyfin's scheduled scan.
+PODCAST_UPKEEP_MINUTES = _int("PODCAST_UPKEEP_MINUTES", 60)
+
+# Where podgrab's download folder is inside its container, and where that same
+# folder is inside Jellyfin's. A path podgrab reports is rewritten from the
+# first to the second before Jellyfin is told about it.
+PODGRAB_ASSETS_PATH = _text("PODGRAB_ASSETS_PATH", "/assets")
+PODCAST_LIBRARY_PATH = _text("PODCAST_LIBRARY_PATH", "/media/podcasts")
+
+# Which of Apple's storefronts answers searches. Podcasts are the same in all
+# of them but availability is per store; `us` is the largest.
+ITUNES_COUNTRY = _text("ITUNES_COUNTRY", "us").lower()
+
+PODCAST_RECOMMENDATION_LIMIT = _int("PODCAST_RECOMMENDATION_LIMIT", 20)
+PODCAST_RECOMMENDATION_CACHE_SECONDS = _int(
+    "PODCAST_RECOMMENDATION_CACHE_SECONDS", 3600)
+# How long a shelf of catalogue suggestions is kept per account. It costs a
+# few catalogue searches to build and the catalogue moves slowly.
+PODCAST_SUGGESTIONS_TTL_HOURS = _int("PODCAST_SUGGESTIONS_TTL_HOURS", 6)
 
 # What each kind of music request spends out of MUSIC_DAILY_CAP. An artist is
 # a whole discography, so at the default cap it is the day's music allowance in
@@ -450,6 +490,10 @@ _SETTABLE = {
     "BUSKARR_URL": ("text", ""),
     "BUSKARR_API_KEY": ("text", ""),
 
+    # podgrab has no key: it is reached over the Docker network and nowhere
+    # else, which is also why it is never published to a phone.
+    "PODGRAB_URL": ("text", ""),
+
     # Recommendation sources outside the library, all optional and all dormant
     # without their credential. Each is off by default because each needs an
     # account somebody has to create, and a shelf built without any of them is
@@ -487,6 +531,7 @@ _SETTABLE = {
     "SERIES_LIBRARY_IDS": ("ids", ()),
     "MUSIC_LIBRARY_IDS": ("ids", ()),
     "BOOK_LIBRARY_IDS": ("ids", ()),
+    "PODCAST_LIBRARY_IDS": ("ids", ()),
 }
 
 

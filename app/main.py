@@ -24,9 +24,10 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import (api, arr, artwork, backends, compat_nextread, config, imports,
-               jellyfin, listenarr, logs, media, recommendations, seasons,
-               selfcheck, sessions, settings, setup, store, throttle, wants)
+from . import (api, arr, artwork, backends, compat_nextread, config,
+               episodes, imports, jellyfin, listenarr, logs, media, podcasts,
+               podgrab, recommendations, seasons, selfcheck, sessions,
+               settings, setup, store, throttle, wants)
 from .books import audible as book_audible
 from .books import hardcover_shelf
 from .books import search as book_search
@@ -45,6 +46,7 @@ async def lifespan(_: FastAPI):
     selfcheck.watch()
     upkeep.watch()
     book_stamp.watch()
+    podcasts.watch()
     yield
 
 
@@ -630,12 +632,16 @@ def get_accounts(request: Request, msg: str = ""):
     served = sorted(media.available().items())
     overrides = store.cap_overrides()
     series_served = media.SERIES in dict(served)
+    podcasts_served = media.PODCAST in dict(served)
     chosen = (store.setting_by_account(seasons.SETTING)
               if series_served else {})
+    chosen_episodes = (store.setting_by_account(episodes.SETTING)
+                       if podcasts_served else {})
     accounts = [{"id": account.id, "name": account.name,
                  "keyholder": account.is_admin,
                  "allowances": _allowance_rows(account, served, overrides),
-                 "seasons": _seasons_phrase(chosen.get(account.id))}
+                 "seasons": _seasons_phrase(chosen.get(account.id)),
+                 "episodes": _episodes_phrase(chosen_episodes.get(account.id))}
                 for account in sorted(jellyfin.accounts(),
                                       key=lambda a: a.name.casefold())]
     return templates.TemplateResponse(
@@ -645,7 +651,11 @@ def get_accounts(request: Request, msg: str = ""):
                  "series_served": series_served,
                  "season_counts": _season_counts(accounts, chosen),
                  "season_default": _seasons_phrase(
-                     config.SERIES_SEASONS_DEFAULT)})
+                     config.SERIES_SEASONS_DEFAULT),
+                 "podcasts_served": podcasts_served,
+                 "episode_counts": _episode_counts(accounts, chosen_episodes),
+                 "episode_default": _episodes_phrase(
+                     config.PODCAST_EPISODES_DEFAULT)})
 
 
 #: How a choice of seasons reads on the accounts page, one per kind, so a
@@ -683,6 +693,41 @@ def _season_counts(accounts: list[dict],
             unchosen += 1
             continue
         label = _SEASON_LABELS[picked.choice]
+        tally[label] = tally.get(label, 0) + 1
+    ranked = sorted(tally.items(), key=lambda item: (-item[1], item[0]))
+    return ranked + ([("Not chosen yet", unchosen)] if unchosen else [])
+
+
+#: How a choice of episodes reads on the accounts page, one per kind, so the
+#: newest few counts once whatever the number is.
+_EPISODE_LABELS = {
+    episodes.ALL: "Every episode",
+    episodes.LATEST: "The newest few",
+    episodes.NEW: "New episodes only",
+}
+
+
+def _episodes_phrase(value: str | None) -> str:
+    """One account's choice as the accounts page says it, or "" for none."""
+    picked = episodes.decode(value)
+    if picked is None:
+        return ""
+    if picked.choice == episodes.LATEST:
+        return f"The newest {picked.count}"
+    return _EPISODE_LABELS[picked.choice]
+
+
+def _episode_counts(accounts: list[dict],
+                    chosen: dict[str, str]) -> list[tuple[str, int]]:
+    """How many accounts chose each kind, most first, then those who have not."""
+    tally: dict[str, int] = {}
+    unchosen = 0
+    for account in accounts:
+        picked = episodes.decode(chosen.get(account["id"]))
+        if picked is None:
+            unchosen += 1
+            continue
+        label = _EPISODE_LABELS[picked.choice]
         tally[label] = tally.get(label, 0) + 1
     ranked = sorted(tally.items(), key=lambda item: (-item[1], item[0]))
     return ranked + ([("Not chosen yet", unchosen)] if unchosen else [])
@@ -788,8 +833,13 @@ def index(request: Request, q: str = "", medium: str = "", unit: str = "",
     unit = unit if found and unit in found.units else (
         found.units[0] if found else "")
 
-    results = (wants.search(q.strip(), medium, unit, user)
-               if q.strip() and found else [])
+    try:
+        results = (wants.search(q.strip(), medium, unit, user)
+                   if q.strip() and found else [])
+    except podcasts.Unreadable as exc:
+        results = []
+        msg = msg or str(exc)
+    usual = wants.usual_episodes(user) if medium == media.PODCAST else None
     return templates.TemplateResponse(
         request=request, name="index.html",
         context={
@@ -802,6 +852,8 @@ def index(request: Request, q: str = "", medium: str = "", unit: str = "",
             "requests": wants.states(user),
             "message": msg,
             "allowance": {key: wants.allowance(user, key) for key in offered},
+            "episode_choices": _episode_options(),
+            "usual_episodes": usual.encode() if usual else "",
         })
 
 
@@ -813,7 +865,10 @@ def post_want(request: Request, medium: str = Form(...),
               ref: str = Form(""), album: str = Form(""),
               duration_seconds: float | None = Form(None, alias="durationSeconds"),
               image_url: str = Form("", alias="imageUrl"),
-              overview: str = Form("")):
+              overview: str = Form(""),
+              feed_url: str = Form("", alias="feedUrl"),
+              itunes_id: str = Form("", alias="itunesId"),
+              episodes_asked: str = Form("", alias="episodes")):
     """Ask for one thing, then send the browser back to the list.
 
     A redirect rather than a rendered response so that a reload does not
@@ -827,9 +882,15 @@ def post_want(request: Request, medium: str = Form(...),
     hit = {"title": title, "year": year, "artist": artist,
            "source": source, "ref": ref, "album": album,
            "durationSeconds": duration_seconds,
-           "imageUrl": image_url, "overview": overview}
+           "imageUrl": image_url, "overview": overview,
+           "feedUrl": feed_url, "itunesId": itunes_id}
     try:
-        _, message = wants.want(user, medium, item_key, unit, hit)
+        _, message = wants.want(
+            user, medium, item_key, unit, hit,
+            episodes_choice=episodes.decode(episodes_asked),
+            # A choice made on the page is kept as usual: the page offers it
+            # on every podcast, so the next one is prefilled with it.
+            remember=bool(episodes_asked))
     except wants.Denied as denied:
         message = str(denied)
     return _back(medium, message)
@@ -968,7 +1029,8 @@ BOOK = "book"
 #: Named here rather than read from the media registry because that registry
 #: only carries a medium whose acquisition tool is configured, and a film
 #: shelf needs no Radarr.
-DISCOVER_LABELS = {media.MOVIE: "Films", media.SERIES: "Series", BOOK: "Books"}
+DISCOVER_LABELS = {media.MOVIE: "Films", media.SERIES: "Series", BOOK: "Books",
+                   media.PODCAST: "Podcasts"}
 
 
 def discover_media() -> list[str]:
@@ -1051,10 +1113,43 @@ def get_discover(request: Request, medium: str = "", msg: str = "",
                             "current": key == medium} for key in shelves]}
     if medium == BOOK:
         context |= _book_shelves(user, undo_asin, undo_title)
+    elif medium == media.PODCAST:
+        context |= _podcast_shelves(user)
     else:
         context |= _owned_shelf(user, medium)
     return templates.TemplateResponse(
         request=request, name="discover.html", context=context)
+
+
+def _podcast_shelves(user: jellyfin.User) -> dict:
+    """The two podcast shelves: what to listen to next, and what to add.
+
+    The catalogue shelf is built in front of the person when it is not cached,
+    unlike the owned shelves: it is a handful of catalogue searches rather
+    than a twelve-second library read, and a page that says "working on it"
+    for three searches is worse than the three seconds.
+    """
+    context = _owned_shelf(user, media.PODCAST)
+    try:
+        catalogue = podcasts.catalogue_shelf(user)
+    except jellyfin.JellyfinUnavailable:
+        catalogue = []
+    usual = wants.usual_episodes(user)
+    return context | {
+        "catalogue": catalogue,
+        "allowance": wants.allowance(user, media.PODCAST),
+        "can_request": podgrab.configured(),
+        "episode_choices": _episode_options(),
+        "usual_episodes": usual.encode() if usual else "",
+    }
+
+
+def _episode_options() -> list[tuple[str, str]]:
+    """The choices of how much of a podcast to fetch, as a form offers them."""
+    return [(episodes.ALL, "Every episode"),
+            (episodes.Episodes(episodes.LATEST, episodes.DEFAULT_LATEST_COUNT).encode(),
+             f"The newest {episodes.DEFAULT_LATEST_COUNT}, then new ones"),
+            (episodes.NEW, "Only new episodes from now on")]
 
 
 def _book_shelves(user: jellyfin.User, undo_asin: str,

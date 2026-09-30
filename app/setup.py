@@ -144,6 +144,22 @@ def _buskarr_form() -> BackendForm:
     )
 
 
+def _podgrab_form() -> BackendForm:
+    return BackendForm(
+        key="podgrab", name="podgrab", label="podgrab", medium="podcast",
+        status=backends.status("podcast"),
+        note=("Podcasts need a Podcasts library in Jellyfin's audiobook fork, "
+              "pointed at the folder podgrab downloads into. A stock Jellyfin "
+              "has no such library kind, so nothing asked for here would ever "
+              "read as arrived on one."),
+        fields=(
+            _field("PODGRAB_URL", "podgrab address",
+                   help_text="For example http://podgrab:8080. podgrab has no "
+                             "API key; keep it off the internet."),
+        ),
+    )
+
+
 def _recommendation_sources_form() -> BackendForm:
     """The outside catalogues a shelf may consult.
 
@@ -202,7 +218,8 @@ def forms() -> tuple[BackendForm, ...]:
         _arr_form("sonarr", "Sonarr", "series", 8989),
         _listenarr_form(),
         _buskarr_form(),
-        # Last: these change how a shelf is ordered, and the four above decide
+        _podgrab_form(),
+        # Last: these change how a shelf is ordered, and the five above decide
         # whether anything can be asked for at all.
         _recommendation_sources_form(),
     )

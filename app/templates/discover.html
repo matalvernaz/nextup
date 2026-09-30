@@ -141,6 +141,84 @@
 </ol>
 {% endif %}
 
+{% elif medium == 'podcast' %}
+{#
+  Podcasts. Two shelves, the way books have two: what to listen to next from
+  the library, and what to add to it. The second has an Ask button apiece,
+  because there is a tool to ask.
+#}
+<p>
+  {% if not can_request %}Requests for podcasts are not enabled on this server.
+  {% elif allowance is none %}You have no daily limit.
+  {% else %}You can ask for {{ allowance }} more
+    podcast{{ '' if allowance == 1 else 's' }} today.{% endif %}
+</p>
+
+{% include "_refresh.html" %}
+
+<h3>Listen next, from the podcasts the library already has</h3>
+{% if pending %}<p>{{ pending }}</p>{% endif %}
+{% if not rows and not pending %}
+<p>Nothing yet. This fills in once you have listened to a few podcasts here,
+  and needs one you have not started left in the library to offer.</p>
+{% elif rows %}
+<p>{{ rows | length }} to choose from, best first.</p>
+<ol class="shelf">
+  {% for row in rows %}
+  <li>
+    <h4>{{ row.title }}</h4>
+    {% if row.reason %}
+    <ul class="why">
+      {% for reason in row.reason %}<li>{{ reason }}</li>{% endfor %}
+    </ul>
+    {% endif %}
+  </li>
+  {% endfor %}
+</ol>
+{% endif %}
+
+<h3>Podcasts the library does not have</h3>
+{% if not catalogue %}
+<p>Nothing to suggest yet. This is drawn from the genres and makers of the
+  podcasts you listen to here, once there are some.</p>
+{% else %}
+<p>{{ catalogue | length }} podcast{{ '' if catalogue | length == 1 else 's' }}, best first.</p>
+<ol class="shelf">
+  {% for r in catalogue %}
+  <li{% if r.thumbnailUrl %} class="with-cover"{% endif %}>
+    {% include "_cover.html" %}
+    <div>
+    <h4>{{ r.title }}</h4>
+    <p class="by">{% if r.artist %}by {{ r.artist }}{% endif %}
+      {%- if r.episodeCount %} · {{ r.episodeCount }} episodes{% endif %}</p>
+    {% if r.reason %}
+    <ul class="why">
+      {% for reason in r.reason %}<li>{{ reason }}</li>{% endfor %}
+    </ul>
+    {% endif %}
+    {% if r.requested %}
+    <p class="asked">Already asked for.</p>
+    {% elif can_request %}
+    <form method="post" action="/want">
+      <input type="hidden" name="medium" value="podcast">
+      <input type="hidden" name="item_key" value="{{ r.itemKey }}">
+      <input type="hidden" name="unit" value="podcast">
+      <input type="hidden" name="title" value="{{ r.title }}">
+      <input type="hidden" name="artist" value="{{ r.artist | default('') }}">
+      <input type="hidden" name="imageUrl" value="{{ r.imageUrl | default('') }}">
+      <input type="hidden" name="overview" value="{{ r.overview | default('') }}">
+      <input type="hidden" name="feedUrl" value="{{ r.feedUrl | default('') }}">
+      <input type="hidden" name="itunesId" value="{{ r.itunesId | default('') }}">
+      {% include "_episodes_choice.html" %}
+      <button type="submit">Ask for {{ r.title }}</button>
+    </form>
+    {% endif %}
+    </div>
+  </li>
+  {% endfor %}
+</ol>
+{% endif %}
+
 {% else %}
 {#
   Films and television. One shelf, of things the library already holds and

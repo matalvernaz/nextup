@@ -1,0 +1,18 @@
+{#
+  How much of a podcast to fetch. Nothing is preselected until this account
+  has chosen once: the beta chooses, the accounts page counts, and the most
+  common answer becomes the default by configuration later. Once chosen, the
+  usual choice is prefilled so the next podcast is one control fewer.
+
+  Reads `r` (the row, for a unique id), `episode_choices` and
+  `usual_episodes`.
+#}
+<p>
+  <label for="episodes-{{ r.itemKey | replace(':', '-') }}">How much of {{ r.title }} to fetch</label><br>
+  <select id="episodes-{{ r.itemKey | replace(':', '-') }}" name="episodes" required>
+    {% if not usual_episodes %}<option value="">Choose one</option>{% endif %}
+    {% for value, label in episode_choices %}
+    <option value="{{ value }}" {% if value == usual_episodes %}selected{% endif %}>{{ label }}</option>
+    {% endfor %}
+  </select>
+</p>

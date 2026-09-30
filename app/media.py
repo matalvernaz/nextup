@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass
 
 from . import (backends, buskarr, config, jellyfin, listenarr, logs,
-               radarr, recommendations, sonarr)
+               podgrab, radarr, recommendations, sonarr)
 
 log = logs.get("media")
 
@@ -19,6 +19,7 @@ MOVIE = radarr.MEDIUM
 SERIES = sonarr.MEDIUM
 MUSIC = buskarr.MEDIUM
 BOOK = listenarr.MEDIUM
+PODCAST = podgrab.MEDIUM
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +55,8 @@ _BACKENDS = (
     (MUSIC, "Music", buskarr.UNITS, buskarr.configured, lambda: config.MUSIC_DAILY_CAP),
     (BOOK, "Books", listenarr.UNITS, listenarr.configured,
      lambda: config.BOOK_DAILY_CAP),
+    (PODCAST, "Podcasts", podgrab.UNITS, podgrab.configured,
+     lambda: config.PODCAST_DAILY_CAP),
 )
 
 
@@ -172,6 +175,10 @@ def forget() -> None:
     _owned.forget()
     backends.forget()
     recommendations.forget()
+    # Imported here: podcasts reads this module's registry-free helpers and
+    # importing it at the top would be a cycle.
+    from . import podcasts
+    podcasts.forget()
 
 
 def get(medium: str) -> Medium | None:

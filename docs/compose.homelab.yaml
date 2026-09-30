@@ -52,6 +52,15 @@ services:
       BUSKARR_URL: "http://buskarr:8000"
       BUSKARR_API_KEY: "${BUSKARR_API_KEY}"
 
+      # Podcasts. podgrab subscribes and downloads into /media/podcasts, which
+      # it sees as /assets; the Jellyfin fork's Podcasts library reads the same
+      # folder. Nobody is given a default for how much of a podcast to fetch
+      # until the accounts page has counted the beta's answers.
+      PODGRAB_URL: "http://podgrab:8080"
+      PODGRAB_ASSETS_PATH: "/assets"
+      PODCAST_LIBRARY_PATH: "/media/podcasts"
+      PODCAST_EPISODES_DEFAULT: ""
+
       # Books, moved here when the audiobook service was merged in. The
       # library ids are stated rather than discovered because there are two of
       # them and only some of what is under a "books" collection type on this

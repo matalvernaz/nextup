@@ -69,17 +69,17 @@ check.equal(sorted(book["units"]), ["book", "series"],
 # Serving the nearest shape would make a client that is newer than its server,
 # and a client with a typo, both look like a server that simply has fewer
 # media -- which is the failure this whole codebase is arranged against.
-future = client.get("/api/v1/capabilities?protocol=3", headers=AUTH)
+future = client.get("/api/v1/capabilities?protocol=4", headers=AUTH)
 check.equal(future.status_code, 400, "an unknown protocol is refused")
-check.that("1, 2" in future.json()["detail"],
+check.that("1, 2, 3" in future.json()["detail"],
            "and the refusal says which ones there are")
 
 # --- /info advertises the choice ---------------------------------------------
 info = client.get("/api/v1/info").json()
 check.equal(info["protocol"], 1,
             "the field a shipped client reads still says 1")
-check.equal(info["protocols"], [1, 2],
-            "and the new one lists both, for a client that knows to look")
+check.equal(info["protocols"], [1, 2, 3],
+            "and the new one lists all three, for a client that knows to look")
 
 harness.cleanup()
 raise SystemExit(check.report())
