@@ -6,36 +6,23 @@ and finally the title reduced to its letters. The first two are exact and the
 Jellyfin fork writes both onto a podcast it identified; the title is for a
 podcast that arrived before it was identified, or that no catalogue lists.
 
-The same module keeps Jellyfin told about new episodes. `/media/podcasts` is
-NFS on the deployment this was built for, so Jellyfin's own watcher never
-sees a file podgrab writes and its scheduled scan is twelve hours apart. A
-nudge to `Library/Media/Updated` with the folder that changed has the fork
-re-read that folder in seconds.
+Fetching is the fork's own work (see `podfetch`): it downloads into the
+folder it will read, so nothing here needs to tell it about new files.
 """
 import threading
 import time
-from datetime import datetime, timedelta, timezone
 from typing import NamedTuple
 
-from . import (config, episodes, itunes, jellyfin, logs, podcastfeed, podgrab,
+from . import (config, episodes, itunes, jellyfin, logs, podcastfeed, podfetch,
                recommendations, store)
 
 log = logs.get("podcasts")
 
-MEDIUM = podgrab.MEDIUM
+MEDIUM = podfetch.MEDIUM
 
 #: How long the list of owned podcasts is kept. The same lifetime as the film
 #: and series index, for the same reason: arrival can only be as fresh as this.
 OWNED_TTL_SECONDS = 900
-
-#: How long one folder is left alone after Jellyfin was told about it. A
-#: podcast fetching its back catalogue writes a file every few seconds, and
-#: each nudge is a rescan of that folder.
-NUDGE_INTERVAL_SECONDS = 600
-
-#: Waited out before the first upkeep pass, so a container that has just
-#: started is not asking podgrab and Jellyfin questions while both are busy.
-FIRST_UPKEEP_DELAY_SECONDS = 180
 
 
 class OwnedPodcast(NamedTuple):
@@ -161,7 +148,7 @@ def hit_from_preview(preview: podcastfeed.FeedPreview) -> dict:
     hit = {
         "itemKey": itunes.item_key(preview.url),
         "medium": MEDIUM,
-        "unit": podgrab.UNIT,
+        "unit": podfetch.UNIT,
         "title": preview.title,
         "year": str(preview.latest.year) if preview.latest else "",
         "artist": preview.author,
@@ -200,7 +187,7 @@ def mark(hits: list[dict], user: jellyfin.User | None) -> list[dict]:
 def arrived(row) -> bool:
     """Whether a request's podcast is in the library with at least one episode.
 
-    Unknown answers no. A podcast folder appears the moment podgrab writes its
+    Unknown answers no. A podcast folder appears the moment the fork writes its
     cover, before any episode; calling that arrived would close the request
     with nothing to play. A Jellyfin that cannot be asked keeps the request
     waiting, which costs one more look later and nothing else.
@@ -226,18 +213,8 @@ def still_held(row) -> bool:
 
 
 def progress(row) -> dict | None:
-    """What podgrab says about a request still on its way, or None.
-
-    Also the moment Jellyfin is told about the folder: a podcast fetching its
-    back catalogue lands files for an hour, and the request is what somebody
-    is watching while it does.
-    """
-    reported = podgrab.state(row["backend_id"])
-    if reported and reported.get("downloaded"):
-        folder = podgrab.folder(row["backend_id"])
-        if folder:
-            nudge([podgrab.library_path(folder)])
-    return reported
+    """What the fork says about a request still on its way, or None."""
+    return podfetch.state(row["backend_id"])
 
 
 def describe(reported: dict | None) -> str:
@@ -245,87 +222,22 @@ def describe(reported: dict | None) -> str:
     if not reported:
         return ""
     downloaded, total = reported.get("downloaded", 0), reported.get("total", 0)
+    if reported.get("error"):
+        return f"Trouble fetching it: {reported['error']}"
     if reported.get("paused"):
-        return "Paused in podgrab."
+        return "Not being followed any more."
+    if not reported.get("in_feed"):
+        return "Subscribed; the feed has not been read yet."
+    fetching = " Fetching now." if reported.get("downloading") else ""
     if not total:
-        return "Subscribed; podgrab has not read the feed yet."
+        return "Subscribed; new episodes will be fetched as they come out." + fetching
     if not downloaded:
-        return f"Subscribed; none of its {total} episodes downloaded yet."
+        return f"Subscribed; none of its {total} episodes fetched yet." + fetching
+    if downloaded >= total:
+        return (f"All {total} episode{'' if total == 1 else 's'} asked for "
+                "have been fetched.")
     return (f"{downloaded} of {total} episode{'' if total == 1 else 's'} "
-            "downloaded so far.")
-
-
-# --- telling Jellyfin ---------------------------------------------------------
-
-_nudged: dict[str, float] = {}
-_nudge_guard = threading.Lock()
-
-
-def nudge(paths: list[str]) -> int:
-    """Tell Jellyfin these folders changed, at most once per folder per interval.
-
-    Returns how many folders were sent. Never raises: a Jellyfin that cannot
-    be told finds out at its next scheduled scan instead.
-    """
-    now = time.monotonic()
-    due = []
-    with _nudge_guard:
-        for path in sorted(set(paths)):
-            if now - _nudged.get(path, -NUDGE_INTERVAL_SECONDS) >= NUDGE_INTERVAL_SECONDS:
-                _nudged[path] = now
-                due.append(path)
-    if not due:
-        return 0
-    try:
-        jellyfin.media_updated(due)
-    except jellyfin.JellyfinUnavailable as exc:
-        log.warning("could not tell Jellyfin about %d folder(s): %s", len(due), exc)
-        with _nudge_guard:
-            for path in due:
-                _nudged.pop(path, None)
-        return 0
-    log.info("told Jellyfin about %d folder(s): %s", len(due), ", ".join(due))
-    forget()
-    return len(due)
-
-
-_last_pass: str | None = None
-
-
-def upkeep_once() -> int:
-    """One pass: folders podgrab wrote to since the last pass, told to Jellyfin."""
-    global _last_pass
-    since = _last_pass or (datetime.now(timezone.utc)
-                           - timedelta(minutes=config.PODCAST_UPKEEP_MINUTES)).isoformat()
-    _last_pass = datetime.now(timezone.utc).isoformat()
-    folders = podgrab.folders_downloaded_since(since)
-    if not folders:
-        return 0
-    return nudge([podgrab.library_path(folder) for folder in folders])
-
-
-def _loop() -> None:
-    time.sleep(FIRST_UPKEEP_DELAY_SECONDS)
-    while True:
-        try:
-            sent = upkeep_once()
-            if sent:
-                log.info("upkeep told Jellyfin about %d podcast folder(s)", sent)
-        except Exception as exc:  # noqa: BLE001 - the thread must not die, or new
-            # episodes silently stop appearing until the next scheduled scan.
-            log.warning("podcast upkeep pass failed: %s", exc)
-        time.sleep(config.PODCAST_UPKEEP_MINUTES * 60)
-
-
-def watch() -> None:
-    """Start the upkeep pass, if this deployment has podgrab at all."""
-    if not podgrab.configured():
-        return
-    if not config.PODCAST_UPKEEP_MINUTES:
-        log.info("podcast upkeep is off (PODCAST_UPKEEP_MINUTES=0); new episodes "
-                 "appear at Jellyfin's next scheduled scan")
-        return
-    threading.Thread(target=_loop, name="podcast-upkeep", daemon=True).start()
+            "fetched so far." + fetching)
 
 
 # --- what to add ----------------------------------------------------------------

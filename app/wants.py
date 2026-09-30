@@ -8,7 +8,7 @@ quietly skips half of it.
 import time
 
 from . import (artwork, buskarr, config, jellyfin, logs, media, podcasts,
-               podgrab, radarr, seasons, sonarr, store)
+               podfetch, radarr, seasons, sonarr, store)
 # Under another name: three functions here already take an `episodes`
 # argument, the per-series episode counts.
 from . import episodes as episode_choice
@@ -334,8 +334,8 @@ def _add(medium: str, unit: str, item_key: str, hit: dict,
     if medium == media.PODCAST:
         # The feed is the whole identity; the ledger key is only a digest of
         # it, so the address itself has to travel with the ask.
-        return podgrab.add(str(hit.get("feedUrl") or ""), hit.get("title", ""),
-                           choice)
+        return podfetch.add(str(hit.get("feedUrl") or ""), hit.get("title", ""),
+                            choice)
     # The name, not the ledger key: buskarr renders `requested_by` in its own
     # queue table for a person to read, and an account id says nothing there.
     return buskarr.add(unit, hit, user.name)
@@ -409,7 +409,7 @@ def states(user: jellyfin.User, medium: str | None = None) -> list[dict]:
     for row in rows:
         # Asked for once and passed to both callers. Each music row costs a
         # round trip to buskarr, and deriving the state and describing it are
-        # two questions about the same answer. A podcast row asks podgrab the
+        # two questions about the same answer. A podcast row asks podfetch the
         # same way, and that ask is also what tells Jellyfin to look.
         reported = None
         if row["fulfilled_at"] is None:
@@ -617,5 +617,5 @@ def _stop(medium: str, row) -> bool:
     if medium == media.SERIES:
         return sonarr.cancel(backend_id)
     if medium == media.PODCAST:
-        return podgrab.cancel(backend_id)
+        return podfetch.cancel(backend_id)
     return buskarr.cancel(backend_id)

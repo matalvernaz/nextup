@@ -26,7 +26,7 @@ from fastapi.templating import Jinja2Templates
 
 from . import (api, arr, artwork, backends, compat_nextread, config,
                episodes, imports, jellyfin, listenarr, logs, media, podcasts,
-               podgrab, recommendations, seasons, selfcheck, sessions,
+               podfetch, recommendations, seasons, selfcheck, sessions,
                settings, setup, store, throttle, wants)
 from .books import audible as book_audible
 from .books import hardcover_shelf
@@ -46,7 +46,6 @@ async def lifespan(_: FastAPI):
     selfcheck.watch()
     upkeep.watch()
     book_stamp.watch()
-    podcasts.watch()
     yield
 
 
@@ -1138,7 +1137,7 @@ def _podcast_shelves(user: jellyfin.User) -> dict:
     return context | {
         "catalogue": catalogue,
         "allowance": wants.allowance(user, media.PODCAST),
-        "can_request": podgrab.configured(),
+        "can_request": podfetch.configured(),
         "episode_choices": _episode_options(),
         "usual_episodes": usual.encode() if usual else "",
     }

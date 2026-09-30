@@ -12,7 +12,6 @@ needed to choose what a Jellyfin user should read next.
 | Nextup | Recommendations across media; user requests, allowances, shared demand and cancellation | User preferences, dismissals, request intent |
 | Listenarr | Book catalogue search, edition resolution, acquisition, quality and import | Its managed books and acquisition jobs |
 | Sonarr / Radarr / buskarr | Acquisition for their respective media | Their managed items and jobs |
-| podgrab | Subscribing to a podcast feed and downloading its episodes | Its subscriptions and downloads |
 | Describarr | Finding, aligning and publishing audio description | Description jobs and outcomes |
 | Share gateway | Expiring links for selected media | Share grants, expiration and download limits |
 

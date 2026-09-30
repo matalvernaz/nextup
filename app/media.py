@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass
 
 from . import (backends, buskarr, config, jellyfin, listenarr, logs,
-               podgrab, radarr, recommendations, sonarr)
+               podfetch, radarr, recommendations, sonarr)
 
 log = logs.get("media")
 
@@ -19,7 +19,7 @@ MOVIE = radarr.MEDIUM
 SERIES = sonarr.MEDIUM
 MUSIC = buskarr.MEDIUM
 BOOK = listenarr.MEDIUM
-PODCAST = podgrab.MEDIUM
+PODCAST = podfetch.MEDIUM
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,7 +55,7 @@ _BACKENDS = (
     (MUSIC, "Music", buskarr.UNITS, buskarr.configured, lambda: config.MUSIC_DAILY_CAP),
     (BOOK, "Books", listenarr.UNITS, listenarr.configured,
      lambda: config.BOOK_DAILY_CAP),
-    (PODCAST, "Podcasts", podgrab.UNITS, podgrab.configured,
+    (PODCAST, "Podcasts", podfetch.UNITS, podfetch.configured,
      lambda: config.PODCAST_DAILY_CAP),
 )
 

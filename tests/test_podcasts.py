@@ -3,7 +3,7 @@ import time
 
 import harness
 
-harness.setup(PODGRAB_URL="http://podgrab.invalid:8080", PODCAST_DAILY_CAP="2",
+harness.setup(PODCAST_DAILY_CAP="2",
               RADARR_URL="http://radarr.invalid", RADARR_API_KEY="k",
               RADARR_QUALITY_PROFILE_ID="6")
 
@@ -11,7 +11,7 @@ from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app import (api, arr, backends, episodes, gone, itunes, jellyfin,  # noqa: E402
-                 media, podcastfeed, podcasts, podgrab, store, wants)
+                 media, podcastfeed, podcasts, podfetch, store, wants)
 
 check = harness.Check("podcasts")
 store.init()
@@ -30,31 +30,25 @@ media.forget()
 media._owned._value = jellyfin.Owned()
 media._owned._built_at = time.monotonic()
 
-# --- what Jellyfin holds, and what podgrab does, are both stated -----------------
+# --- what Jellyfin holds, and what the fork's fetcher does, are both stated ------
 MAGNUS_FEED = "https://feeds.acast.com/public/shows/magnus"
 LIBRARY: list[dict] = []          # Jellyfin's Podcast items
 COUNTS: dict[str, int] = {}       # episodes per Jellyfin podcast id
 jellyfin.podcasts_owned = lambda: list(LIBRARY)
 jellyfin.podcast_episode_count = lambda item_id: COUNTS.get(item_id)
-nudged: list[list[str]] = []
-jellyfin.media_updated = lambda paths: nudged.append(list(paths))
+# The fork is present: its fetch task was "seen", so nothing probes the task list.
+podfetch._presence = (True, time.monotonic())
 
 added: list[tuple] = []
-podgrab.add = lambda feed, title="", choice=None: (
+podfetch.add = lambda feed, title="", choice=None: (
     added.append((feed, title, choice)) or arr.AddResult(
         True, "Subscribed.", "pg-1", title or "Untitled", image_url="", overview=""))
-PG_STATE = {"pg-1": {"downloaded": 0, "downloading": 0, "total": 250, "paused": False,
-                     "title": "The Magnus Archives", "url": MAGNUS_FEED}}
-podgrab.state = lambda backend_id: PG_STATE.get(backend_id)
-podgrab.folder = lambda backend_id: "/assets/TheMagnusArchives" if backend_id == "pg-1" else None
+PG_STATE = {"pg-1": {"downloaded": 0, "downloading": 0, "pending": 250, "total": 250,
+                     "in_feed": 250, "paused": False, "title": "The Magnus Archives",
+                     "url": MAGNUS_FEED, "error": ""}}
+podfetch.state = lambda backend_id: PG_STATE.get(backend_id)
 cancelled: list[str] = []
-podgrab.cancel = lambda backend_id: cancelled.append(backend_id) or True
-removed: list[str] = []
-podgrab.remove = lambda backend_id: removed.append(backend_id) or True
-PG_ROWS = [{"ID": "pg-1", "Title": "The Magnus Archives", "URL": MAGNUS_FEED}]
-podgrab.podcasts = lambda: list(PG_ROWS)
-podgrab.find = lambda feed: next((r for r in PG_ROWS
-                                  if itunes.canonical_feed(r["URL"]) == itunes.canonical_feed(feed)), None)
+podfetch.cancel = lambda backend_id: cancelled.append(backend_id) or True
 
 MAGNUS_HIT = {"itemKey": itunes.item_key(MAGNUS_FEED), "medium": "podcast", "unit": "podcast",
               "title": "The Magnus Archives", "year": "2021", "artist": "Rusty Quill",
@@ -125,23 +119,23 @@ bad = client.get("/api/v1/search?medium=podcast&q=https://example.invalid/nothin
 check.equal(bad.status_code, 400, "an address that is not a feed is a 400")
 check.that("404" in bad.json()["detail"], "with the sentence saying why")
 
-# --- the ask: refused until the person says how much, then handed to podgrab -----
+# --- the ask: refused until the person says how much, then handed to the fork ------
 body = {"medium": "podcast", "itemKey": MAGNUS_HIT["itemKey"], "unit": "podcast",
         "title": "The Magnus Archives", "feedUrl": MAGNUS_FEED, "itunesId": "1131532370"}
 refused = client.post("/api/v1/want", json=body, headers=AUTH)
 check.equal(refused.status_code, 409, "with no choice and no default, the ask is refused")
 check.that("Choose how much" in refused.json()["detail"], "and says what to choose")
-check.equal(added, [], "podgrab was not asked")
+check.equal(added, [], "the fork was not asked")
 
 accepted = client.post("/api/v1/want", json={**body, "episodes": {"choice": "latest", "count": 3},
                                              "remember": True}, headers=AUTH)
 check.equal(accepted.status_code, 200, "with a choice, the ask is accepted")
 check.equal(accepted.json()["state"], wants.ON_ITS_WAY, "and is on its way")
-check.equal(added[-1][0], MAGNUS_FEED, "podgrab was given the feed")
+check.equal(added[-1][0], MAGNUS_FEED, "the fork was given the feed")
 check.equal(added[-1][2], episodes.Episodes("latest", 3), "and the choice")
 row = store.get(KID.key, "podcast", MAGNUS_HIT["itemKey"])
 check.equal(row["episodes"], "latest:3", "the ledger remembers how much was asked for")
-check.equal(row["backend_id"], "pg-1", "and podgrab's id")
+check.equal(row["backend_id"], "pg-1", "and the fork's item id")
 check.equal(store.user_setting(KID.key, episodes.SETTING), "latest:3",
             "remember keeps it as this account's usual choice")
 caps_after = client.get("/api/v1/capabilities?protocol=3", headers=AUTH).json()
@@ -154,21 +148,16 @@ repeat = client.post("/api/v1/want", json=body, headers=AUTH)
 check.equal(repeat.status_code, 200, "asking again is answered")
 check.equal(repeat.json()["message"], "Already asked for.", "and free")
 
-# --- the list of requests: podgrab's progress, and Jellyfin told to look ----------
+# --- the list of requests: the fork's progress ------------------------------------
 listed = client.get("/api/v1/requests?medium=podcast", headers=AUTH).json()["requests"]
 check.equal(len(listed), 1, "one request")
 check.equal(listed[0]["state"], wants.ON_ITS_WAY, "on its way")
 check.equal(listed[0]["episodes"], {"choice": "latest", "count": 3}, "saying how much was asked for")
-check.that("none of its 250 episodes" in listed[0]["detail"], "and where podgrab has got to")
-check.equal(nudged, [], "nothing downloaded yet, so Jellyfin was not told")
-
-PG_STATE["pg-1"]["downloaded"] = 3
+check.that("none of its 250 episodes" in listed[0]["detail"], "and where the fork has got to")
+PG_STATE["pg-1"].update({"downloaded": 3, "pending": 247, "downloading": 1})
 listed = client.get("/api/v1/requests?medium=podcast", headers=AUTH).json()["requests"]
-check.that("3 of 250 episodes" in listed[0]["detail"], "progress is reported")
-check.equal(nudged, [["/media/podcasts/TheMagnusArchives"]],
-            "and Jellyfin was told about the folder, as its container sees it")
-client.get("/api/v1/requests?medium=podcast", headers=AUTH)
-check.equal(len(nudged), 1, "but not again within the interval")
+check.that("3 of 250 episodes fetched so far. Fetching now." in listed[0]["detail"],
+           "counted as the fork counts, and saying it is fetching")
 
 # --- arrival: the podcast in Jellyfin, with at least one episode ------------------
 LIBRARY.append({"Id": "jf-magnus", "Name": "The Magnus Archives",
@@ -197,10 +186,11 @@ scp = {"medium": "podcast", "itemKey": itunes.item_key(scp_feed), "unit": "podca
 check.equal(client.post("/api/v1/want", json=scp, headers=AUTH).json()["state"],
             wants.IN_LIBRARY, "the downloader's spelling of the title still matches the library's")
 
-# --- cancelling stops podgrab following it -------------------------------------------
-PG_STATE["pg-2"] = {"downloaded": 0, "downloading": 0, "total": 10, "paused": False,
-                    "title": "Private Show", "url": "https://example.invalid/private.rss"}
-podgrab.add = lambda feed, title="", choice=None: arr.AddResult(True, "Subscribed.", "pg-2", title)
+# --- cancelling stops the fork following it -------------------------------------------
+PG_STATE["pg-2"] = {"downloaded": 0, "downloading": 0, "pending": 0, "total": 0, "in_feed": 10,
+                    "paused": False, "title": "Private Show",
+                    "url": "https://example.invalid/private.rss", "error": ""}
+podfetch.add = lambda feed, title="", choice=None: arr.AddResult(True, "Subscribed.", "pg-2", title)
 private = {"medium": "podcast", "itemKey": itunes.item_key("https://example.invalid/private.rss"),
            "unit": "podcast", "title": "Private Show",
            "feedUrl": "https://example.invalid/private.rss", "episodes": {"choice": "new"}}
@@ -209,7 +199,7 @@ check.equal(client.post("/api/v1/want", json=private, headers=AUTH).status_code,
 gone_now = client.post("/api/v1/cancel", json={"medium": "podcast", "itemKey": private["itemKey"]},
                        headers=AUTH)
 check.equal(gone_now.status_code, 200, "cancelling is answered")
-check.equal(cancelled, ["pg-2"], "and podgrab stops following it, keeping what it downloaded")
+check.equal(cancelled, ["pg-2"], "and the fork stops following it, keeping what it fetched")
 
 # --- the usual choice can be set and cleared on its own ----------------------------------
 put = client.put("/api/v1/episodes", json={"choice": "all"}, headers=AUTH)
@@ -240,7 +230,7 @@ check.that("SCP Archives" in suggested[-1][3], "by title as well as feed")
 check.equal(client.get("/api/v1/recommendations?medium=movie&surface=catalogue", headers=AUTH).status_code,
             404, "films have no catalogue shelf")
 
-# --- deleting a podcast from the library stops podgrab, or refuses while it is still there ---
+# --- deleting a podcast from the library clears the ledger, or refuses while it is still there ---
 CURRENT["user"] = MATT
 KEYHOLDER = {"X-Emby-Token": "a-keyholders-token"}
 still = client.post("/api/v1/deleted", json={
@@ -253,9 +243,8 @@ cleared = client.post("/api/v1/deleted", json={
     "itemId": "jf-magnus", "type": "Podcast", "name": "The Magnus Archives",
     "providerIds": {"PodcastFeed": MAGNUS_FEED}}, headers=KEYHOLDER)
 check.equal(cleared.status_code, 200, "once it is gone, the deletion is acted on")
-check.equal(removed, ["pg-1"], "podgrab drops the subscription")
-check.equal(cleared.json()["cleared"], True, "and reports that something was stopped")
-check.that("The Magnus Archives" in cleared.json()["message"], "naming it in the sentence")
+check.equal(cleared.json()["cleared"], False,
+            "nothing had to be stopped: the fork's fetch task only visits podcasts the library holds")
 
 harness.cleanup()
 raise SystemExit(check.report())

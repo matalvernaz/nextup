@@ -3,7 +3,7 @@
 Two questions are asked of it: what podcasts a title might mean, for the
 search box, and what podcasts sit near the ones somebody already listens to,
 for the Discover shelf. Both answer with the feed address, which is the only
-identity a podcast really has -- the same feed is what podgrab subscribes to
+identity a podcast really has -- the same feed is what the fork subscribes to
 and what the Jellyfin fork reads the podcast's own description from.
 
 Never fatal. A catalogue that does not answer is a search that says so and a

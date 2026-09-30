@@ -507,20 +507,6 @@ def podcast_episode_count(item_id: str) -> int | None:
     return int(total) if isinstance(total, int) else None
 
 
-def media_updated(paths: list[str]) -> None:
-    """Tell Jellyfin these folders changed, so it re-reads them now.
-
-    `/media/podcasts` is NFS on the deployment this was built for, where
-    Jellyfin's own watcher sees nothing, and its scheduled scan is twelve
-    hours apart. Paths are as the Jellyfin container sees them.
-    """
-    body = {"Updates": [{"Path": path, "UpdateType": "Modified"} for path in paths]}
-    try:
-        with _client() as c:
-            c.post("/Library/Media/Updated", json=body).raise_for_status()
-    except httpx.HTTPError as exc:
-        raise JellyfinUnavailable(str(exc)) from exc
-
 
 def item_with_path(item_id: str, user_id: str) -> dict | None:
     """One item, including where its file actually is. None when unknown.

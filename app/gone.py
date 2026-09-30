@@ -25,7 +25,7 @@ library carries a wrong TMDB id, which this one does in places. Nothing is
 cleared while anybody is still waiting, and files are never touched on either
 side.
 """
-from . import (itunes, jellyfin, listenarr, logs, media, podcasts, podgrab,
+from . import (itunes, jellyfin, listenarr, logs, media, podcasts,
                radarr, sonarr, store)
 from .books import engine as book_engine
 from .books import store as book_store
@@ -94,12 +94,11 @@ def clear(item: dict) -> dict:
 
 
 def _clear_podcast(item: dict) -> dict:
-    """A deleted podcast: stop podgrab following it, or it comes straight back.
+    """A deleted podcast: its ledger rows go; the order went with the folder.
 
-    podgrab fetches new episodes into the folder Jellyfin just removed, so a
-    podcast deleted from the library reappears at the next episode unless the
-    subscription goes too. Files are podgrab's to delete here because Jellyfin
-    already deleted them; what is left is the row and its future.
+    The fork's fetch task visits only podcasts the library still holds, so a
+    deleted folder is a cancelled order by itself. What is left to clear is
+    this service's own record of having asked for it.
     """
     provider_ids = item.get("providerIds") or {}
     feed = str(provider_ids.get("PodcastFeed") or "").strip()
@@ -114,27 +113,15 @@ def _clear_podcast(item: dict) -> dict:
                       title=name) is not None:
         raise StillHere(f"{name or 'That podcast'} is still in the library, "
                         "so nothing was changed.")
-    row = None
-    if feed:
-        row = podgrab.find(feed)
-    if row is None and name:
-        wanted = itunes.normalise_title(name)
-        row = next((r for r in podgrab.podcasts() or []
-                    if itunes.normalise_title(podgrab.row_title(r)) == wanted), None)
     dropped = 0
     if feed_key:
         _require_nobody_waiting(media.PODCAST, feed_key)
         dropped = store.drop_settled(media.PODCAST, feed_key)
-    if row is None:
-        log.info("deleted podcast name=%r: podgrab does not follow it, ledger rows=%d",
-                 name, dropped)
-        return _report(medium=media.PODCAST, cleared=None, item_key=feed_key,
-                       ledger_rows=dropped)
-    stopped = podgrab.remove(podgrab.row_id(row))
-    log.info("deleted podcast name=%r podgrab_id=%s stopped=%s ledger_rows=%d",
-             name, podgrab.row_id(row), stopped, dropped)
-    return _report(medium=media.PODCAST, cleared=podgrab.row_title(row) or name,
-                   item_key=feed_key, stopped=stopped, ledger_rows=dropped)
+    # Nothing to stop: the fork's fetch task visits only podcasts the library
+    # still holds, so a deleted folder is a cancelled order by itself.
+    log.info("deleted podcast name=%r: ledger rows=%d", name, dropped)
+    return _report(medium=media.PODCAST, cleared=None, item_key=feed_key,
+                   ledger_rows=dropped)
 
 
 # --- Films and series --------------------------------------------------------

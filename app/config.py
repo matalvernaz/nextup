@@ -335,10 +335,10 @@ PODCAST_DAILY_CAP = _int("PODCAST_DAILY_CAP", 3)
 
 # --- Podcasts ---------------------------------------------------------------
 #
-# podgrab subscribes and downloads; Apple's podcast catalogue, which needs no
-# key, answers searches and suggestions; Jellyfin's audiobook fork holds the
-# podcasts library. As with every backend, an unset URL means this deployment
-# does not offer podcasts.
+# The Jellyfin fork holds the podcasts library and fetches episodes itself;
+# Apple's podcast catalogue, which needs no key, answers searches and
+# suggestions. There is no separate backend to configure: podcasts are
+# offered once the fork's fetch task is seen in the server's task list.
 
 # How much of a podcast somebody gets when they have not chosen for
 # themselves: `all`, `new`, or `latest:<n>`. Empty means nobody is given one,
@@ -350,16 +350,6 @@ if PODCAST_EPISODES_DEFAULT and episodes.decode(PODCAST_EPISODES_DEFAULT) is Non
     raise ValueError(
         f"PODCAST_EPISODES_DEFAULT={PODCAST_EPISODES_DEFAULT!r} is not a choice of "
         "episodes; use all, new, or latest:<count>")
-
-# How often podgrab is asked what it downloaded so Jellyfin can be told. Zero
-# turns it off and leaves new episodes to Jellyfin's scheduled scan.
-PODCAST_UPKEEP_MINUTES = _int("PODCAST_UPKEEP_MINUTES", 60)
-
-# Where podgrab's download folder is inside its container, and where that same
-# folder is inside Jellyfin's. A path podgrab reports is rewritten from the
-# first to the second before Jellyfin is told about it.
-PODGRAB_ASSETS_PATH = _text("PODGRAB_ASSETS_PATH", "/assets")
-PODCAST_LIBRARY_PATH = _text("PODCAST_LIBRARY_PATH", "/media/podcasts")
 
 # Which of Apple's storefronts answers searches. Podcasts are the same in all
 # of them but availability is per store; `us` is the largest.
@@ -490,9 +480,6 @@ _SETTABLE = {
     "BUSKARR_URL": ("text", ""),
     "BUSKARR_API_KEY": ("text", ""),
 
-    # podgrab has no key: it is reached over the Docker network and nowhere
-    # else, which is also why it is never published to a phone.
-    "PODGRAB_URL": ("text", ""),
 
     # Recommendation sources outside the library, all optional and all dormant
     # without their credential. Each is off by default because each needs an
