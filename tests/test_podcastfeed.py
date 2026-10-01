@@ -81,5 +81,71 @@ check.equal(cut.episode_count, 2, "a truncated feed still parses, counting the w
 check.raises(podcastfeed.Unreadable, lambda: podcastfeed.fetch("not an address"),
              "words are refused before any request")
 
+# An address inside the house -- this machine, the Docker network, the LAN,
+# a link-local range -- is refused before any request is made. Names are
+# judged by what they resolve to, so a public-looking name that points inside
+# is refused too, and a name nothing resolves cannot be a feed.
+import httpx  # noqa: E402
+
+_real_resolve = podcastfeed._resolve
+_names = {
+    "feeds.example": ["8.8.8.8"],
+    "internal.example": ["10.0.0.5"],
+    "both.example": ["8.8.8.8", "192.168.1.181"],
+    "sixmapped.example": ["::ffff:192.168.1.181"],
+    "nowhere.example": [],
+}
+podcastfeed._resolve = lambda host: _names[host] if host in _names else _real_resolve(host)
+asked = []
+podcastfeed._transport = httpx.MockTransport(
+    lambda request: asked.append(str(request.url)) or httpx.Response(200, content=FEED))
+for inside in ("http://127.0.0.1/feed", "http://localhost:8096/feed", "http://[::1]/feed",
+               "http://192.168.1.181:8096/feed", "http://10.1.2.3/x", "http://172.18.0.5/x",
+               "http://169.254.169.254/latest/meta-data", "http://100.64.0.1/x",
+               "http://jellyfin:8096/feed", "http://dockge.local/x", "http://internal.example/feed",
+               "http://both.example/feed", "http://sixmapped.example/feed", "http://nowhere.example/feed",
+               "http://0.0.0.0/feed", "http://224.0.0.1/feed"):
+    check.raises(podcastfeed.Unreadable, lambda inside=inside: podcastfeed.fetch(inside),
+                 f"{inside} is refused")
+check.equal(asked, [], "none of them was requested")
+check.equal(podcastfeed.public_address_problem("https://feeds.example/show.rss"), None,
+            "a public address is allowed")
+check.equal(podcastfeed.public_address_problem("https://1.1.1.1/show.rss"), None,
+            "a public literal address is allowed")
+check.that(podcastfeed.public_address_problem("https://203.0.113.10/show.rss") is not None,
+           "a documentation-range address is not public either")
+check.equal(podcastfeed.fetch("https://feeds.example/show.rss").title, "Wooden Overcoats",
+            "and read")
+
+# A redirect is checked the same way at every hop: a public hop is followed,
+# an inside one is refused without being requested, and a loop is cut off.
+asked.clear()
+
+
+def _hops(request):
+    asked.append(str(request.url))
+    path = request.url.path
+    if path == "/redirect-inside":
+        return httpx.Response(302, headers={"Location": "http://192.168.1.181:8096/feed"})
+    if path == "/redirect-public":
+        return httpx.Response(302, headers={"Location": "https://feeds.example/show.rss"})
+    if path == "/loop":
+        return httpx.Response(302, headers={"Location": "https://feeds.example/loop"})
+    return httpx.Response(200, content=FEED, headers={"Content-Type": "application/rss+xml"})
+
+
+podcastfeed._transport = httpx.MockTransport(_hops)
+check.raises(podcastfeed.Unreadable, lambda: podcastfeed.fetch("https://feeds.example/redirect-inside"),
+             "a redirect to an inside address is refused")
+check.that(not any("192.168" in url for url in asked), "and the inside address was never requested")
+check.equal(podcastfeed.fetch("https://feeds.example/redirect-public").title, "Wooden Overcoats",
+            "a redirect to a public address is followed")
+check.raises(podcastfeed.Unreadable, lambda: podcastfeed.fetch("https://feeds.example/loop"),
+             "a redirect loop is cut off")
+check.that(asked.count("https://feeds.example/loop") <= podcastfeed.MAX_REDIRECTS + 1,
+           "after a bounded number of hops")
+podcastfeed._transport = None
+podcastfeed._resolve = _real_resolve
+
 harness.cleanup()
 raise SystemExit(check.report())

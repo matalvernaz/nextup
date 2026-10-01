@@ -21,7 +21,7 @@ import time
 
 import httpx
 
-from . import arr, config, episodes, jellyfin, logs
+from . import arr, config, episodes, jellyfin, logs, podcastfeed
 
 log = logs.get("podfetch")
 
@@ -105,6 +105,13 @@ def add(feed_url: str, title: str = "",
     feed_url = (feed_url or "").strip()
     if not feed_url:
         return arr.AddResult(False, "That podcast has no feed address, so it cannot be asked for.")
+    # The address arrives from the client as it was typed, not only from a
+    # preview this server made, so it is checked here as well as there: the
+    # fork fetches whatever it is handed, with the server's own reach.
+    problem = podcastfeed.public_address_problem(feed_url)
+    if problem:
+        log.info("add refused url=%s: %s", feed_url, problem)
+        return arr.AddResult(False, problem)
     backfill = backfill_of(choice)
     body = {"feedUrl": feed_url, "backfill": backfill}
     if title:

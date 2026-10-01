@@ -7,11 +7,14 @@ categories, per-episode detail -- is the Jellyfin fork's job once the files
 are there; this is the preview.
 """
 import html
+import ipaddress
 import re
+import socket
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import NamedTuple
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -28,6 +31,13 @@ TIMEOUT = httpx.Timeout(15.0, connect=8.0)
 #: block and a count of items, not every show note ever written. Anything past
 #: this is cut, and the count is then "at least".
 MAX_BYTES = 4_000_000
+
+#: A pasted address is followed through this many redirects at most, each
+#: hop checked the way the first was.
+MAX_REDIRECTS = 5
+
+#: A transport for tests to answer requests with; None for the network.
+_transport: httpx.BaseTransport | None = None
 
 _TAG = re.compile(r"<[^>]+>")
 #: A paragraph's end becomes a blank line; a line break, a line. The same
@@ -59,6 +69,64 @@ def looks_like_url(text: str) -> bool:
     """Whether a search box holds an address rather than words."""
     text = (text or "").strip()
     return text.startswith(("http://", "https://")) and " " not in text
+
+
+def _resolve(host: str) -> list[str]:
+    """Every address a host name resolves to; a literal address is itself."""
+    try:
+        ipaddress.ip_address(host)
+        return [host]
+    except ValueError:
+        pass
+    try:
+        found = socket.getaddrinfo(host, None)
+    except (OSError, UnicodeError):
+        # gaierror is one of these; so is a resolver with no network at all.
+        return []
+    return sorted({entry[4][0] for entry in found})
+
+
+def public_address_problem(url: str) -> str | None:
+    """Why a feed address may not be fetched, in a sentence, or None when it may.
+
+    Anybody with an account can paste an address, and the server would fetch
+    it on their behalf, so an address that points back inside the house --
+    this machine, the Docker network, the LAN, a link-local or reserved range
+    -- is refused before any request is made, and again at every redirect.
+    An address nothing resolves is refused too, since a feed nobody can reach
+    is not a feed.
+    """
+    parts = urlsplit((url or "").strip())
+    if parts.scheme not in ("http", "https"):
+        return "That is not a web address."
+    host = (parts.hostname or "").strip().rstrip(".").lower()
+    if not host:
+        return "That address has no host name."
+    if host == "localhost" or host.endswith(".localhost") or host.endswith(".local") \
+            or host.endswith(".internal") or "." not in host and not _is_ip(host):
+        return "That address points inside this network, so it cannot be used as a feed."
+    addresses = _resolve(host)
+    if not addresses:
+        return "That address could not be resolved."
+    for text in addresses:
+        try:
+            address = ipaddress.ip_address(text.split("%", 1)[0])
+        except ValueError:
+            return "That address could not be resolved."
+        mapped = getattr(address, "ipv4_mapped", None)
+        if mapped is not None:
+            address = mapped
+        if not address.is_global or address.is_multicast:
+            return "That address points inside this network, so it cannot be used as a feed."
+    return None
+
+
+def _is_ip(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return False
 
 
 def strip_html(text: str | None) -> str:
@@ -131,19 +199,37 @@ def fetch(url: str) -> FeedPreview:
     url = (url or "").strip()
     if not looks_like_url(url):
         raise Unreadable("That is not a web address.")
+    problem = public_address_problem(url)
+    if problem:
+        log.info("feed refused url=%s: %s", url, problem)
+        raise Unreadable(problem)
     try:
-        with httpx.Client(timeout=TIMEOUT, follow_redirects=True,
+        with httpx.Client(timeout=TIMEOUT, follow_redirects=False, transport=_transport,
                           headers={"User-Agent": "nextup (podcast preview)"}) as client:
-            with client.stream("GET", url) as response:
-                if response.status_code >= 400:
-                    raise Unreadable(
-                        f"That address answered {response.status_code}, "
-                        "so the feed could not be read.")
-                body = b""
-                for chunk in response.iter_bytes():
-                    body += chunk
-                    if len(body) > MAX_BYTES:
-                        break
+            hops = 0
+            while True:
+                with client.stream("GET", url) as response:
+                    if response.is_redirect:
+                        hops += 1
+                        if hops > MAX_REDIRECTS:
+                            raise Unreadable("That address redirects too many times.")
+                        target = str(response.next_request.url) if response.next_request else ""
+                        problem = public_address_problem(target)
+                        if problem:
+                            log.info("feed refused url=%s redirect=%s: %s", url, target, problem)
+                            raise Unreadable(problem)
+                        url = target
+                        continue
+                    if response.status_code >= 400:
+                        raise Unreadable(
+                            f"That address answered {response.status_code}, "
+                            "so the feed could not be read.")
+                    body = b""
+                    for chunk in response.iter_bytes():
+                        body += chunk
+                        if len(body) > MAX_BYTES:
+                            break
+                    break
     except httpx.HTTPError as exc:
         log.info("feed unreadable url=%s (%s)", url, exc)
         raise Unreadable("That address could not be reached.") from exc
