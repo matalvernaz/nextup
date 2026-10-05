@@ -784,6 +784,104 @@ def set_playlist(uid: str, name: str, item_ids: list[str]) -> str | None:
     return pid
 
 
+def audio_items() -> list[dict]:
+    """Every song in the library: id, title, credits and album.
+
+    Followed page by page to the reported total, for the reason `_all_items`
+    gives: a limit bounds a page, not an answer.
+    """
+    items: list[dict] = []
+    try:
+        with _client() as c:
+            while True:
+                page = c.get("/Items", params={
+                    "includeItemTypes": "Audio", "recursive": "true",
+                    "startIndex": len(items), "limit": 1000,
+                    "fields": "Artists,AlbumArtist,Album",
+                    "enableImages": "false", "enableUserData": "false",
+                }).raise_for_status().json()
+                found = page.get("Items") or []
+                items.extend(found)
+                if not found or len(items) >= page.get("TotalRecordCount", 0):
+                    return items
+    except (httpx.HTTPError, ValueError) as exc:
+        raise JellyfinUnavailable(str(exc)) from exc
+
+
+def audio_count() -> int:
+    """How many songs the library holds. One cheap call."""
+    try:
+        with _client() as c:
+            return int(c.get("/Items", params={
+                "includeItemTypes": "Audio", "recursive": "true", "limit": 0,
+            }).raise_for_status().json().get("TotalRecordCount", 0))
+    except (httpx.HTTPError, ValueError) as exc:
+        raise JellyfinUnavailable(str(exc)) from exc
+
+
+def visible_playlists(uid: str) -> list[dict]:
+    """The playlists this account can see: its own, shared ones, and open ones.
+
+    Jellyfin does not say which are its own when asked with this service's
+    key, so a caller must not take a name match here as ownership. Followed
+    page by page: a playlist past the first page is one a name check missed.
+    """
+    found: list[dict] = []
+    try:
+        with _client() as c:
+            while True:
+                page = c.get("/Items", params={
+                    "includeItemTypes": "Playlist", "recursive": "true",
+                    "userId": uid, "startIndex": len(found), "limit": 500,
+                }).raise_for_status().json()
+                items = page.get("Items") or []
+                found.extend(items)
+                if not items or len(found) >= page.get("TotalRecordCount", 0):
+                    return found
+    except (httpx.HTTPError, ValueError) as exc:
+        raise JellyfinUnavailable(str(exc)) from exc
+
+
+def create_playlist(uid: str, name: str) -> str:
+    """A new, empty music playlist owned by this account. Returns its id."""
+    try:
+        with _client() as c:
+            return c.post("/Playlists", json={
+                "Name": name, "Ids": [], "UserId": uid, "MediaType": "Audio",
+            }).raise_for_status().json()["Id"]
+    except (httpx.HTTPError, ValueError, KeyError) as exc:
+        raise JellyfinUnavailable(str(exc)) from exc
+
+
+def playlist_items(uid: str, pid: str) -> list[str] | None:
+    """The item ids in a playlist, in order. None when the playlist is gone."""
+    try:
+        with _client() as c:
+            resp = c.get(f"/Playlists/{pid}/Items",
+                         params={"userId": uid, "limit": 10000})
+            if resp.status_code == 404:
+                return None
+            resp.raise_for_status()
+            return [item["Id"] for item in resp.json().get("Items") or []]
+    except (httpx.HTTPError, ValueError, KeyError) as exc:
+        raise JellyfinUnavailable(str(exc)) from exc
+
+
+def add_to_playlist(uid: str, pid: str, item_ids: list[str],
+                    position: int | None = None) -> None:
+    """Put songs into a playlist, at a 0-based position or at the end."""
+    if not item_ids:
+        return
+    params = {"ids": ",".join(item_ids), "userId": uid}
+    if position is not None:
+        params["position"] = position
+    try:
+        with _client() as c:
+            c.post(f"/Playlists/{pid}/Items", params=params).raise_for_status()
+    except httpx.HTTPError as exc:
+        raise JellyfinUnavailable(str(exc)) from exc
+
+
 # --- Signing in as a person, rather than as this service ---------------------
 
 #: What this service calls itself in Jellyfin's session list. A person looking

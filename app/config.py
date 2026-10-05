@@ -402,6 +402,11 @@ IMPORT_ARTIST_SONGS = _int("IMPORT_ARTIST_SONGS", 100)
 # How often the import queue is checked for songs that can go in now.
 IMPORT_QUEUE_SECONDS = _int("IMPORT_QUEUE_SECONDS", 600)
 
+# How long a song of an imported playlist that was not in the library yet is
+# waited for before it is given up on. Long enough for the import queue to
+# get through a big list at the daily allowance.
+PLAYLIST_PENDING_DAYS = _int("PLAYLIST_PENDING_DAYS", 60)
+
 # Between one row's catalogue search and the next. These land on third-party
 # catalogues -- Deezer, MusicBrainz, iTunes, Audible -- and the way to find
 # out where their rate limits are is to send five hundred queries at machine

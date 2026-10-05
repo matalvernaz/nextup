@@ -25,8 +25,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from . import (api, arr, artwork, backends, compat_nextread, config,
-               episodes, imports, jellyfin, listenarr, logs, media, podcasts,
-               podfetch, recommendations, seasons, selfcheck, sessions,
+               episodes, imports, jellyfin, listenarr, logs, media, playlists,
+               podcasts, podfetch, recommendations, seasons, selfcheck, sessions,
                settings, setup, store, throttle, wants)
 from .books import audible as book_audible
 from .books import hardcover_shelf
@@ -968,6 +968,7 @@ def post_import_queue_clear(request: Request, confirm: str = Form("")):
 async def post_import(request: Request, medium: str = Form(...),
                       unit: str = Form(""),
                       pasted: str = Form(""),
+                      playlist: str = Form(""),
                       listing: UploadFile | None = File(default=None)):
     """Read an uploaded list and start matching it.
 
@@ -993,7 +994,8 @@ async def post_import(request: Request, medium: str = Form(...),
             url="/import?msg=" + quote("Choose a file, or paste a list."),
             status_code=303)
     try:
-        import_id = imports.start(user, medium, unit, filename, data)
+        import_id = imports.start(user, medium, unit, filename, data,
+                                  playlist=playlist)
     except imports.Unreadable as exc:
         return RedirectResponse(url="/import?msg=" + quote(str(exc)),
                                 status_code=303)
@@ -1016,6 +1018,7 @@ def get_import_batch(request: Request, import_id: str, msg: str = ""):
         request=request, name="import_batch.html",
         context={
             "user": user, "batch": batch, "rows": imports.view(batch),
+            "playlist": playlists.summary(import_id, batch.get("playlist")),
             "message": msg,
             "hit_label": imports.hit_label,
             "no_match": imports.NO_MATCH,

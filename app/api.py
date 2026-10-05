@@ -21,7 +21,8 @@ from threading import Lock
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query
 
 from . import (arr, config, describarr, episodes, gone, imports, jellyfin,
-               logs, media, podcasts, recommendations, seasons, store, wants)
+               logs, media, playlists, podcasts, recommendations, seasons, store,
+               wants)
 
 log = logs.get("api")
 
@@ -247,6 +248,9 @@ def capabilities(protocol: int = 1,
         # and only near misses are left for a person to confirm.
         "importList": {"supported": bool(offered),
                        "automatic": True,
+                       # A list of songs can be given a playlist name: the
+                       # songs go into that playlist of the caller's.
+                       "playlist": media.MUSIC in offered,
                        "maxRows": config.IMPORT_MAX_ROWS,
                        "maxRowsByMedium": {key: imports.max_rows(key)
                                            for key in offered},
@@ -810,7 +814,8 @@ def post_import(user: jellyfin.User = Depends(caller),
                 medium: str = Body(..., embed=True),
                 text: str = Body(..., embed=True),
                 unit: str = Body("", embed=True),
-                filename: str = Body("", embed=True)) -> dict:
+                filename: str = Body("", embed=True),
+                playlist: str = Body("", embed=True)) -> dict:
     """Read a list somebody has, and start matching it against the catalogue.
 
     The whole file as text, not rows a client has parsed. A native app that
@@ -823,7 +828,8 @@ def post_import(user: jellyfin.User = Depends(caller),
     second call confirms the ones a person has chosen. See `app/imports.py`.
     """
     try:
-        import_id = imports.start(user, medium, unit, filename, text)
+        import_id = imports.start(user, medium, unit, filename, text,
+                                  playlist=playlist)
     except imports.Unreadable as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     log.info("api import %s user=%s medium=%s", import_id, user.key, medium)
@@ -929,6 +935,10 @@ def _import_state(user: jellyfin.User, import_id: str) -> dict:
         "blanks": batch.get("blanks", 0),
         "rows": [_row_for_client(row) for row in batch.get("rows", [])],
         "report": report,
+        # The Jellyfin playlist this list fills, when it was given one: its
+        # name, how many songs are in it, and how many will be when they turn
+        # up in the library.
+        "playlist": playlists.summary(batch["id"], batch.get("playlist")),
         "error": batch.get("error"),
         "remainingToday": _import_remaining(user, batch),
         # Music lists have their own allowance, counted in songs; None for an

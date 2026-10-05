@@ -163,6 +163,44 @@ CREATE TABLE IF NOT EXISTS import_rows (
     PRIMARY KEY (import_id, line)
 );
 
+-- Playlists this service made for somebody from an imported list, by name.
+-- Jellyfin will not say who owns a playlist when asked with this service's
+-- key, so this is how a later list of the same name finds the playlist to add
+-- to, and why a playlist of that name this service did not make is left alone.
+CREATE TABLE IF NOT EXISTS import_playlists (
+    user_key    TEXT NOT NULL,
+    name_key    TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    playlist_id TEXT NOT NULL,
+    created_at  REAL NOT NULL,
+    PRIMARY KEY (user_key, name_key)
+);
+
+-- Which line of which list each song this service put in a playlist came
+-- from, so a song that turns up later can go in at its place in the list.
+CREATE TABLE IF NOT EXISTS playlist_lines (
+    playlist_id TEXT NOT NULL,
+    import_id   TEXT NOT NULL,
+    line        INTEGER NOT NULL,
+    item_id     TEXT NOT NULL,
+    PRIMARY KEY (playlist_id, import_id, line)
+);
+
+-- Songs of an imported playlist that were not in the library yet: asked for,
+-- waiting, or already on their way. Each goes in when it turns up.
+CREATE TABLE IF NOT EXISTS playlist_pending (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_key    TEXT NOT NULL,
+    playlist_id TEXT NOT NULL,
+    import_id   TEXT NOT NULL,
+    line        INTEGER NOT NULL,
+    title       TEXT NOT NULL,
+    artist      TEXT NOT NULL,
+    album       TEXT NOT NULL DEFAULT '',
+    item_id     TEXT NOT NULL DEFAULT '',
+    created_at  REAL NOT NULL
+);
+
 -- Rows of imported music lists that were ticked but did not fit in the day's
 -- import allowance. Each is asked for by itself on a later day, oldest first,
 -- and deleted once it has been. Kept apart from `imports` because a list is
@@ -1391,6 +1429,94 @@ def drop_legacy_imports() -> int:
         conn.executemany("DELETE FROM imports WHERE import_id=?",
                          [(import_id,) for import_id in legacy])
     return len(legacy)
+
+
+def import_playlist(user_key: str, name_key: str) -> sqlite3.Row | None:
+    with db() as conn:
+        return conn.execute(
+            "SELECT * FROM import_playlists WHERE user_key=? AND name_key=?",
+            (user_key, name_key)).fetchone()
+
+
+def put_import_playlist(user_key: str, name_key: str, name: str,
+                        playlist_id: str) -> None:
+    with db() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO import_playlists (user_key, name_key, name, "
+            "playlist_id, created_at) VALUES (?,?,?,?,?)",
+            (user_key, name_key, name, playlist_id, time.time()))
+
+
+def drop_import_playlist(user_key: str, name_key: str) -> None:
+    with db() as conn:
+        conn.execute("DELETE FROM import_playlists WHERE user_key=? AND name_key=?",
+                     (user_key, name_key))
+
+
+def add_playlist_lines(playlist_id: str, import_id: str,
+                       lines: list[tuple[int, str]]) -> None:
+    """Write down which line each song put in a playlist came from."""
+    with db() as conn:
+        conn.executemany(
+            "INSERT OR REPLACE INTO playlist_lines (playlist_id, import_id, line, "
+            "item_id) VALUES (?,?,?,?)",
+            [(playlist_id, import_id, line, item) for line, item in lines])
+
+
+def playlist_lines(playlist_id: str, import_id: str) -> dict[int, str]:
+    with db() as conn:
+        return {row["line"]: row["item_id"] for row in conn.execute(
+            "SELECT line, item_id FROM playlist_lines WHERE playlist_id=? "
+            "AND import_id=?", (playlist_id, import_id))}
+
+
+def playlist_line_count(import_id: str) -> int:
+    with db() as conn:
+        return int(conn.execute(
+            "SELECT COUNT(*) AS n FROM playlist_lines WHERE import_id=?",
+            (import_id,)).fetchone()["n"])
+
+
+def add_pending(user_key: str, playlist_id: str, import_id: str, line: int,
+                title: str, artist: str, album: str = "",
+                item_id: str = "") -> None:
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO playlist_pending (user_key, playlist_id, import_id, line, "
+            "title, artist, album, item_id, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (user_key, playlist_id, import_id, line, title, artist, album,
+             item_id, time.time()))
+
+
+def pending_all() -> list[sqlite3.Row]:
+    with db() as conn:
+        return conn.execute(
+            "SELECT * FROM playlist_pending ORDER BY playlist_id, import_id, line"
+        ).fetchall()
+
+
+def pending_count(import_id: str) -> int:
+    with db() as conn:
+        return int(conn.execute(
+            "SELECT COUNT(*) AS n FROM playlist_pending WHERE import_id=?",
+            (import_id,)).fetchone()["n"])
+
+
+def drop_pending(pending_id: int) -> None:
+    with db() as conn:
+        conn.execute("DELETE FROM playlist_pending WHERE id=?", (pending_id,))
+
+
+def drop_pending_for(playlist_id: str) -> int:
+    with db() as conn:
+        return conn.execute("DELETE FROM playlist_pending WHERE playlist_id=?",
+                            (playlist_id,)).rowcount
+
+
+def prune_pending(before: float) -> int:
+    with db() as conn:
+        return conn.execute("DELETE FROM playlist_pending WHERE created_at < ?",
+                            (before,)).rowcount
 
 
 def imports_in_state(state: str) -> list[sqlite3.Row]:
