@@ -979,15 +979,13 @@ def get_import_batch(request: Request, import_id: str, msg: str = ""):
         context={
             "user": user, "batch": batch, "groups": grouped,
             "message": msg,
-            "medium_label": (media.get(batch["medium"]) or
-                             media.Medium(batch["medium"], batch["medium"],
-                                          (), 0, ())).label,
             # Only worth working out where there is a button to press.
             "covered": imports.affordable(user, batch, lines) if ready else 0,
             "ticked": len(lines),
             "hit_label": imports.hit_label,
             "states": {"matched": imports.MATCHED, "uncertain": imports.UNCERTAIN,
                        "held": imports.HELD, "missing": imports.MISSING},
+            "no_match": imports.NO_MATCH,
         })
 
 

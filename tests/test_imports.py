@@ -231,6 +231,54 @@ check.raises(
     "and a file whose headings name no column this understands is refused "
     "rather than guessed at")
 
+# One recognised heading is still a heading row. Reading such a file line by
+# line turned "Dune,5" into a film called "Dune,5" and asked the catalogue for
+# the heading row as well.
+rated = imports.read("Title,Rating\nDune,5\nAlien,4\n")
+rows, _, _ = imports.rows(rated, media.MOVIE, "movie")
+check.equal([r.title for r in rows], ["Dune", "Alien"],
+            "a file with a title column and columns this does not know reads "
+            "the title column, not whole lines")
+check.equal(rated.headings, ("Title", "Rating"),
+            "and its first line is the heading row, not a film")
+
+for text, medium, unit, expected in (
+        ("Film,Year\nDune,2021\n", media.MOVIE, "movie", ("Dune", "", "2021")),
+        ("Book,Author\nDune,Frank Herbert\n", media.BOOK, "book",
+         ("Dune", "Frank Herbert", "")),
+        ("Show,Season\nLost,1\n", media.SERIES, "series", ("Lost", "", ""))):
+    rows, _, _ = imports.rows(imports.read(text), medium, unit)
+    check.equal([(r.title, r.artist, r.year) for r in rows], [expected],
+                f"a file headed {text.splitlines()[0]!r} reads its columns")
+
+movies = imports.read("Movies\nDune\nAlien\n")
+check.equal(len(movies.rows), 2,
+            "a single column headed with a plural loses that line to the "
+            "heading too")
+
+try:
+    old_mac = imports.read("Title,Year\rDune,2021\rAlien,1979\r")
+    rows, _, _ = imports.rows(old_mac, media.MOVIE, "movie")
+    read_back = [(r.title, r.year, r.line) for r in rows]
+except Exception as exc:  # noqa: BLE001 - the crash is what this records
+    read_back = f"{type(exc).__name__}: {exc}"
+check.equal(read_back, [("Dune", "2021", 2), ("Alien", "1979", 3)],
+            "a file whose lines end in a bare carriage return is read, with "
+            "its line numbers intact")
+
+unclosed = 'Title,Year\n"Dune,2021\n' + "Alien,1979\n" * 13000
+try:
+    imports.read(unclosed)
+except imports.Unreadable:
+    check.that(True, "a file the csv module gives up on is refused with a "
+                     "sentence")
+except Exception as exc:  # noqa: BLE001 - the crash is what this records
+    check.that(False, f"a file the csv module gives up on is refused with a "
+                      f"sentence, not {type(exc).__name__}: {exc}")
+else:
+    check.that(False, "a file the csv module gives up on is refused with a "
+                      "sentence")
+
 
 # --------------------------------------------------------------------------
 # Deciding whether a hit is the row
@@ -301,7 +349,7 @@ wants.search = explode
 found = imports.match(MATT, media.MUSIC, "album", row, set())
 check.equal(found["state"], imports.MISSING,
             "a search that throws loses its own row and not the whole file")
-check.that("could not be asked" in found["detail"],
+check.that("failed" in found["detail"] and found["detail"] != imports.NO_MATCH,
            "and says so rather than claiming the catalogue had nothing")
 wants.search = wants_search
 

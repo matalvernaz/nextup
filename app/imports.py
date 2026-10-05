@@ -56,6 +56,10 @@ UNCERTAIN = "uncertain"
 HELD = "held"
 MISSING = "missing"
 
+#: What a row the catalogue had nothing for says. Named because the review
+#: page leaves it unsaid under its "No match" heading and shows any other.
+NO_MATCH = "No match found."
+
 #: Only one import is matched at a time, whoever started it. Every row is a
 #: catalogue search against somebody else's rate limit, and two files at once
 #: is the way to find out where that limit is. A batch waiting its turn says
@@ -80,10 +84,17 @@ _ROLES = {
     "artist": ("artist", "artists", "artistname", "artistnames", "albumartist",
                "author", "authors", "performer", "performers", "band",
                "composer", "credit", "creator"),
-    "album": ("album", "albumname", "albumtitle", "release", "releasetitle"),
+    "album": ("album", "albumname", "albumtitle", "release", "releasetitle",
+              "albums"),
     "track": ("track", "trackname", "tracktitle", "song", "songname",
-              "songtitle", "recording"),
-    "title": ("title", "name", "booktitle", "filmtitle", "movie", "seriesname"),
+              "songtitle", "recording", "tracks", "songs"),
+    # The words a person heads their own list with come after the ones an
+    # export writes. "Series" is last because a book export uses it for the
+    # series a book belongs to, next to a Title column that should win.
+    "title": ("title", "name", "booktitle", "filmtitle", "movietitle", "movie",
+              "film", "book", "show", "showname", "tvshow", "tvshowname",
+              "seriesname", "podcast", "movies", "films", "books", "shows",
+              "podcasts", "series"),
     # Each tuple is in order of preference, and "date" is last in this one on
     # purpose: a Letterboxd export has both a Date column (when the film was
     # logged) and a Year column (when it came out), and taking whichever came
@@ -188,23 +199,38 @@ def read(data: bytes | str) -> Sheet:
     text = _decode(data)
     if not text.strip():
         raise Unreadable("That file is empty.")
+    # The csv module refuses a bare carriage return outside quotes, and old
+    # Mac files end every line with one.
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
     delimiter = _sniff(text[:4096])
     reader = csv.reader(io.StringIO(text), delimiter=delimiter)
     parsed: list[tuple[int, tuple[str, ...]]] = []
-    for record in reader:
-        cells = tuple(cell.strip() for cell in record)
-        if any(cells):
-            # `line_num` is the physical line the record ended on, which is
-            # the one a person counting down their file will land on.
-            parsed.append((reader.line_num, cells))
+    ended = 0
+    try:
+        for record in reader:
+            ended = reader.line_num
+            cells = tuple(cell.strip() for cell in record)
+            if any(cells):
+                # `line_num` is the physical line the record ended on, which
+                # is the one a person counting down their file will land on.
+                parsed.append((ended, cells))
+    except csv.Error as exc:
+        # An opening quote that never closes swallows the rest of the file
+        # into one field, and past the field size limit that is an error
+        # rather than a very long title. The field began on the line after
+        # the last record that ended.
+        raise Unreadable(
+            f"Could not read that file from line {ended + 1} on. That line "
+            f"may have a quotation mark that is never closed.") from exc
     if not parsed:
         raise Unreadable("That file has no rows in it.")
 
     first = parsed[0][1]
-    known = set().union(*_ROLES.values())
-    recognised = sum(_fold_heading(cell) in known for cell in first)
-    if len(first) == 1 or recognised < 2:
-        # Preserve complete physical titles, including commas and semicolons.
+    recognised = sum(_fold_heading(cell) in _HEADING_WORDS for cell in first)
+    if len(first) == 1 or not recognised:
+        # A list with no heading row is one title per line, commas and all:
+        # "Crouching Tiger, Hidden Dragon" is one film, not two columns. One
+        # recognised heading is enough to make the first line a heading row.
         # A quoted CSV field is decoded only when it encloses the whole line.
         parsed = []
         for line, raw in enumerate(text.splitlines(), start=1):
@@ -237,7 +263,7 @@ def read(data: bytes | str) -> Sheet:
     else:
         headings, body = (), parsed
     if not body:
-        raise Unreadable("That file has a heading row and nothing under it.")
+        raise Unreadable("That file has headings but no rows under them.")
     return Sheet(tuple(headings), tuple(cells for _, cells in body),
                  tuple(line for line, _ in body), roles, delimiter)
 
@@ -315,9 +341,10 @@ def rows(sheet: Sheet, medium: str, unit: str) -> tuple[list[Row], int, int]:
             title_at = 0
         else:
             raise Unreadable(
-                "None of the column headings say which column holds the "
-                "title. Name one of them " + _understood(order if medium == media.MUSIC else ("title",)) + ", or give "
-                "a file with a single column and nothing else in it.")
+                "Could not tell which column has the titles. Give it the "
+                "heading " + _understood(order if medium == media.MUSIC
+                                         else ("title",))
+                + ", or use a file with only one column.")
     # An artist column is not used for the artist unit: there the credit *is*
     # the title, and reading both would ask for "Bruce Springsteen by Bruce
     # Springsteen".
@@ -367,12 +394,18 @@ def rows(sheet: Sheet, medium: str, unit: str) -> tuple[list[Row], int, int]:
     return found, duplicates, blanks
 
 
+#: How a role's heading is written when telling somebody what to call it.
+#: The folded names above ("artistnames") are for matching, not for reading.
+_SHOWN = {"artist": ("Artist",), "album": ("Album",), "track": ("Track",),
+          "title": ("Title", "Name")}
+
+
 def _understood(order: tuple[str, ...]) -> str:
     """The headings that would have worked, as an English list."""
-    names = []
-    for role in order:
-        names.extend(_ROLES[role][:2])
+    names = [name for role in order for name in _SHOWN[role]]
     quoted = [f"“{name}”" for name in dict.fromkeys(names)]
+    if len(quoted) == 1:
+        return quoted[0]
     return ", ".join(quoted[:-1]) + " or " + quoted[-1]
 
 
@@ -465,10 +498,10 @@ def match(user: jellyfin.User, medium: str, unit: str, row: Row,
         hits = wants.search(_query(row, medium, unit), medium, unit, user)
     except Exception as exc:  # noqa: BLE001 - see the docstring.
         log.warning("import row %d could not be looked up: %s", row.line, exc)
-        found["detail"] = "The catalogue could not be asked about this one."
+        found["detail"] = "The search for this one failed. Try it again later."
         return found
     if not hits:
-        found["detail"] = "Nothing in the catalogue matched."
+        found["detail"] = NO_MATCH
         return found
 
     exact = [hit for hit in hits if is_strict(row, hit, medium)]
@@ -485,12 +518,11 @@ def match(user: jellyfin.User, medium: str, unit: str, row: Row,
         return found
     if not exact:
         found["state"] = UNCERTAIN
-        found["detail"] = "The closest thing in the catalogue, which is not " \
-                          "quite what the file says."
+        found["detail"] = "Closest result, not an exact match."
         return found
     found["state"] = MATCHED
-    found["detail"] = (f"{len(exact)} catalogue entries match this exactly; "
-                       "the first is the one ticked." if len(exact) > 1 else "")
+    found["detail"] = (f"{len(exact)} exact matches. This asks for the first."
+                       if len(exact) > 1 else "")
     return found
 
 
@@ -530,27 +562,39 @@ def start(user: jellyfin.User, medium: str, unit: str, filename: str,
     their file has no title column. Only the matching -- one network call per
     row -- goes to a thread.
     """
-    found = media.get(medium)
-    if found is None:
-        raise Unreadable("This server cannot be asked for that kind of thing.")
-    if len(data) > config.IMPORT_MAX_BYTES:
-        raise Unreadable(
-            f"That file is larger than this accepts "
-            f"({config.IMPORT_MAX_BYTES // 1000} kB).")
-    sheet = read(data)
-    # An unstated unit is worked out from the headings, which is the default
-    # the form offers: a file with a Track Name column is a list of songs and
-    # saying so twice is a chance to disagree with yourself.
-    if unit not in found.units:
-        unit = (suggest_unit(sheet) if medium == media.MUSIC
-                else found.units[0])
-    items, duplicates, blanks = rows(sheet, medium, unit)
-    if not items:
-        raise Unreadable("No row in that file had anything in its title column.")
-    if len(items) > config.IMPORT_MAX_ROWS:
-        raise Unreadable(
-            f"That file has {len(items)} rows and this accepts "
-            f"{config.IMPORT_MAX_ROWS} at a time. Split it up.")
+    sheet: Sheet | None = None
+    try:
+        found = media.get(medium)
+        if found is None:
+            raise Unreadable("This server does not take requests for that.")
+        if len(data) > config.IMPORT_MAX_BYTES:
+            raise Unreadable(
+                f"That file is too big. The limit is "
+                f"{config.IMPORT_MAX_BYTES // 1000:,} kB.")
+        sheet = read(data)
+        # An unstated unit is worked out from the headings, which is the
+        # default the form offers: a file with a Track Name column is a list
+        # of songs and saying so twice is a chance to disagree with yourself.
+        if unit not in found.units:
+            unit = (suggest_unit(sheet) if medium == media.MUSIC
+                    else found.units[0])
+        items, duplicates, blanks = rows(sheet, medium, unit)
+        if not items:
+            raise Unreadable(
+                "Every row in that file has an empty title column.")
+        if len(items) > config.IMPORT_MAX_ROWS:
+            raise Unreadable(
+                f"That file has {len(items):,} rows. The limit is "
+                f"{config.IMPORT_MAX_ROWS:,} per file, so split it into "
+                f"smaller files.")
+    except Unreadable as exc:
+        # The person is told why on the page. This puts the reason, and the
+        # headings the file had, where a report of "importing does not work"
+        # can be checked afterwards.
+        log.info("import refused user=%s medium=%s file=%r headings=%r: %s",
+                 user.key, medium, filename,
+                 list(sheet.headings) if sheet else None, exc)
+        raise
 
     import_id = uuid.uuid4().hex
     payload = {
@@ -593,9 +637,9 @@ def _read_through(import_id: str, user: jellyfin.User, medium: str, unit: str,
             # silently, or the page waits for a phase that has stopped.
             log.exception("import %s failed while reading: %s", import_id, exc)
             _close(import_id, FAILED, {"rows": matched,
-                                       "error": "Something went wrong reading "
-                                                "this file. Nothing was asked "
-                                                "for."})
+                                       "error": "Something went wrong while "
+                                                "looking these up. Nothing was "
+                                                "asked for."})
             return
         # Inside the try, not after it. Out there a failing write leaves the
         # batch reading forever, and the only thing that would ever move it is
@@ -648,8 +692,8 @@ def get(user: jellyfin.User, import_id: str) -> dict | None:
         # Written before it is stored, not after: the page reads `error` out
         # of the payload, so setting it on the way out would explain this once
         # and then show a blank reason on every load afterwards.
-        payload["error"] = ("This stopped part way through — the service was "
-                            "probably restarted. Nothing further was asked "
+        payload["error"] = ("This stopped partway through, probably because "
+                            "the server restarted. Nothing more was asked "
                             "for.")
         store.close_import(import_id, FAILED, payload)
         state = FAILED
@@ -745,7 +789,7 @@ def _ask_for(import_id: str, user: jellyfin.User, medium: str,
                 # not the file's, and this runs where nobody is watching.
                 log.warning("import %s could not ask for %r: %s",
                             import_id, label, exc)
-                refused.append(f"{label}: something went wrong asking for it.")
+                refused.append(f"{label}: something went wrong.")
             else:
                 (already if state == wants.IN_LIBRARY or message.startswith("Already ") else asked).append(
                     label)
