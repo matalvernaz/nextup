@@ -61,26 +61,25 @@ only.
 
 ### Import a list
 
-`/import` takes a CSV of what somebody else has — the albums on their shelf, a
-playlist exported from a streaming service, their films — and turns it into
-requests. In two steps, and never in one.
+`/import` takes a CSV file, or a pasted list, of films, series, music, books or
+podcasts and turns it into requests in two steps.
 
-Uploading acquires nothing. Every row is looked up in the same catalogue the
-search box uses, and the answer is a page of what each one matched: the exact
-matches ticked, the near misses shown unticked beside the closest thing the
-catalogue had, and separate lists of what is already here and what matched
-nothing at all. Only the second step, on the rows still ticked, asks for
-anything — one ordinary request each, against the same daily allowance, so an
-import cannot do what a person sitting at the search box could not.
+Uploading asks for nothing. Each row is looked up in the same catalogue the
+search box uses. Exact matches come back ticked, close matches unticked, and
+anything already here or with no match is listed separately. Only the second
+step asks for the rows that are still ticked, one ordinary request each,
+against the same daily limit as search.
 
-Headings are recognised rather than guessed at, which means a file straight out
-of Spotify (`Track Name`, `Artist Name(s)`), Letterboxd (`Name`, `Year`) or a
-spreadsheet somebody typed all work, in any column order, separated by commas,
-semicolons or tabs, in UTF-8, UTF-16 or Windows-1252. A list with no headings at all works too, one thing per
-line; for music, `Artist - Title` is read apart. A file whose headings name
-nothing recognisable is refused with the names that would have worked, rather
-than being guessed at — the cost of guessing here is a download of the wrong
-thing.
+The first row should be column headings, in any order, separated by commas,
+semicolons or tabs, in UTF-8, UTF-16 or Windows-1252. Exports from Spotify
+(`Track Name`, `Artist Name(s)`) and Letterboxd (`Name`, `Year`) work as they
+are, and so do headings a person would type, such as `Title`, `Film`, `Book`,
+`Show`, `Artist`, `Album` or `Author`. One recognised heading is enough to
+read the first row as headings, unless something else on that row looks like
+data, such as a year. The review page says which line it took for headings.
+A list with no headings is read as one title per line, and for music
+`Artist - Title` is split into the two. A file with headings but no title
+column is refused with the headings that would work.
 
 A shelf is never built while you wait. The first film shelf on a large library
 is around twelve seconds of Jellyfin, so the page says it is working on it and

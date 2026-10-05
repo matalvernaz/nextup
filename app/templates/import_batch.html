@@ -2,34 +2,36 @@
 {% block title %}Imported list — Nextup{% endblock %}
 {% block main %}
 
-{% set unit_word = batch.unit if batch.unit != 'movie' else 'film' %}
+{% set nouns = {'movie': ('film', 'films'), 'series': ('series', 'series'),
+                'album': ('album', 'albums'), 'track': ('track', 'tracks'),
+                'artist': ('artist', 'artists'), 'book': ('book', 'books'),
+                'podcast': ('podcast', 'podcasts')} %}
+{% set noun = nouns.get(batch.unit, (batch.unit, batch.unit ~ 's')) %}
 
-<h2>{{ batch.filename or 'A pasted list' }}</h2>
-<p>{{ batch.total }} {{ unit_word }}{{ '' if batch.total == 1 else 's' }},
-   read as {{ medium_label | lower }}.
-   {%- if batch.duplicates %} {{ batch.duplicates }} duplicate
-   row{{ '' if batch.duplicates == 1 else 's' }} ignored.{% endif %}
-   {%- if batch.blanks %} {{ batch.blanks }} row{{ '' if batch.blanks == 1 else 's' }}
-   had nothing in the title column and {{ 'was' if batch.blanks == 1 else 'were' }}
-   skipped.{% endif %}</p>
+<h2>{{ batch.filename or 'Pasted list' }}</h2>
+<p>{{ batch.total }} {{ noun[0] if batch.total == 1 else noun[1] }}.
+   {%- if batch.duplicates %} Skipped {{ batch.duplicates }} duplicate
+   row{{ '' if batch.duplicates == 1 else 's' }}.{% endif %}
+   {%- if batch.blanks %} Skipped {{ batch.blanks }}
+   row{{ '' if batch.blanks == 1 else 's' }} with no title.{% endif %}
+   {%- if batch.headings %} First line read as column headings: {{ batch.headings | join(', ') }}.{% endif %}</p>
 
 {# ---------------------------------------------------------------- reading #}
 {% if batch.state == 'reading' %}
-<h3>Still looking these up</h3>
-<p>{{ batch.done }} of {{ batch.total }} looked up so far. Each row is a
-   catalogue search, so a long list takes a few minutes. Nothing has been
-   asked for.</p>
+<h3>Looking these up</h3>
+<p>{{ batch.done }} of {{ batch.total }} done. A long list takes a few
+   minutes. Nothing has been asked for yet.</p>
 <p><a href="/import/{{ batch.id }}">Check again</a></p>
 
 {# ----------------------------------------------------------------- asking #}
 {% elif batch.state == 'asking' %}
-<h3>Still asking</h3>
+<h3>Asking for these</h3>
 <p>{{ batch.done }} of {{ batch.chosen }} sent so far.</p>
 <p><a href="/import/{{ batch.id }}">Check again</a></p>
 
 {# ----------------------------------------------------------------- failed #}
 {% elif batch.state == 'failed' %}
-<h3>This stopped</h3>
+<h3>This import stopped</h3>
 <p role="alert">{{ batch.error }}</p>
 <p><a href="/import">Import a list</a></p>
 
@@ -37,9 +39,15 @@
 {% elif batch.state == 'done' %}
 {% set report = batch.report or {} %}
 <h3>What was asked for</h3>
-<p>{{ report.asked | length }} asked for,
-   {{ report.already | length }} already on the list,
-   {{ report.refused | length }} refused.</p>
+<ul>
+  <li>{{ report.asked | length }} asked for</li>
+  {% if report.already %}
+  <li>{{ report.already | length }} already here or already asked for</li>
+  {% endif %}
+  {% if report.refused %}
+  <li>{{ report.refused | length }} refused</li>
+  {% endif %}
+</ul>
 
 {% if report.asked %}
 <h4>Asked for</h4>
@@ -49,8 +57,8 @@
 {% endif %}
 
 {% if report.already %}
-<h4>Already asked for</h4>
-<p>These were on your list before this import, so nothing was spent on them.</p>
+<h4>Already here or already asked for</h4>
+<p>These did not count against your daily limit.</p>
 <ul>
   {% for line in report.already %}<li>{{ line }}</li>{% endfor %}
 </ul>
@@ -58,8 +66,8 @@
 
 {% if report.refused %}
 <h4>Refused</h4>
-<p>Each of these says why. A daily allowance that ran out is the usual
-   reason, and the rest can be imported again tomorrow.</p>
+<p>The reason is given for each one. It is usually the daily limit. To ask
+   for these tomorrow, import the list again.</p>
 <ul>
   {% for line in report.refused %}<li>{{ line }}</li>{% endfor %}
 </ul>
@@ -83,28 +91,27 @@
 #}
 <ul>
   {% if matched %}
-  <li>{{ matched | length }} matched exactly, and
-    {{ 'is' if matched | length == 1 else 'are' }} ticked.</li>
+  <li>{{ matched | length }} exact
+    match{{ '' if matched | length == 1 else 'es' }}, ticked</li>
   {% endif %}
   {% if uncertain %}
-  <li>{{ uncertain | length }} nearly matched, and
-    {{ 'is' if uncertain | length == 1 else 'are' }} not.</li>
+  <li>{{ uncertain | length }} close
+    match{{ '' if uncertain | length == 1 else 'es' }}, not ticked</li>
   {% endif %}
   {% if held %}
-  <li>{{ held | length }} {{ 'is' if held | length == 1 else 'are' }} already
-    here, or already asked for.</li>
+  <li>{{ held | length }} already here or already asked for</li>
   {% endif %}
   {% if missing %}
-  <li>{{ missing | length }} matched nothing at all.</li>
+  <li>{{ missing | length }} with no match</li>
   {% endif %}
 </ul>
 
 {% if covered is none %}
-<p>Your account has no daily limit, so all of these can go at once.</p>
+<p>You have no daily limit.</p>
 {% elif covered < ticked %}
-<p role="alert">Today's allowance covers {{ covered }} of the {{ ticked }}
-   ticked. The rest will be refused, and the refusals are listed afterwards so
-   you know what to import again tomorrow.</p>
+<p role="alert">Your daily limit covers {{ covered }} of the {{ ticked }}
+   ticked. The rest will be refused. To ask for them tomorrow, import the
+   list again.</p>
 {% endif %}
 
 {% if matched or uncertain %}
@@ -118,13 +125,12 @@
     {#
       One label carrying both halves. A tick box labelled only "Kind of Blue"
       is unreadable next to forty others: what a reader needs to hear is what
-      the file said and what it was matched to, in one string, without having
+      it was matched to and what the file said, in one string, without having
       to go and find the second half somewhere else on the line.
     #}
     <input type="checkbox" id="row-{{ row.line }}" name="line"
            value="{{ row.line }}" checked>
-    <label for="row-{{ row.line }}">Ask for {{ hit_label(row.hit) }}
-      — line {{ row.line }} of the file says {{ row.label }}</label>
+    <label for="row-{{ row.line }}">{{ hit_label(row.hit) }}. Line {{ row.line }} of your file: {{ row.label }}</label>
     {% if row.detail %}<p>{{ row.detail }}</p>{% endif %}
   </li>
   {% endfor %}
@@ -132,21 +138,18 @@
 {% endif %}
 
 {% if uncertain %}
-<h4>Near misses</h4>
-<p>The catalogue had nothing spelled the way the file spells these. The
-   closest thing it did have is offered, unticked, so that a wrong one costs
-   you nothing by default.</p>
+<h4>Close matches</h4>
+<p>These are the nearest results, but not exact, so they are not ticked.
+   Tick the ones that are right.</p>
 <ul class="results">
   {% for row in uncertain %}
   <li>
     <input type="checkbox" id="row-{{ row.line }}" name="line"
            value="{{ row.line }}">
-    <label for="row-{{ row.line }}">Ask for {{ hit_label(row.hit) }}
-      — line {{ row.line }} of the file says {{ row.label }}</label>
+    <label for="row-{{ row.line }}">{{ hit_label(row.hit) }}. Line {{ row.line }} of your file: {{ row.label }}</label>
     {% if row.others %}
-    <p>{{ row.others }} other thing{{ '' if row.others == 1 else 's' }} also
-       matched. <a href="/?medium={{ batch.medium }}&amp;unit={{ batch.unit }}&amp;q={{ row.title | urlencode }}">Search
-       for {{ row.label }} yourself</a>.</p>
+    <p>{{ row.others }} other result{{ '' if row.others == 1 else 's' }}.
+       <a href="/?medium={{ batch.medium }}&amp;unit={{ batch.unit }}&amp;q={{ row.title | urlencode }}">Search for {{ row.label }}</a></p>
     {% endif %}
   </li>
   {% endfor %}
@@ -156,28 +159,24 @@
 <p><button type="submit">Ask for the ticked ones</button></p>
 </form>
 {% else %}
-<p>There is nothing here to ask for.</p>
+<p>Nothing on this list can be asked for.</p>
 {% endif %}
 
 {% if held %}
-<h4>Already here</h4>
+<h4>Already here or already asked for</h4>
 <ul class="results">
   {% for row in held %}
-  <li>{{ row.label }} — {{ row.detail | lower }}</li>
+  <li>{{ row.label }}: {{ row.detail | lower }}</li>
   {% endfor %}
 </ul>
 {% endif %}
 
 {% if missing %}
-<h4>Matched nothing</h4>
-<p>The catalogues these searches use do not carry everything. Each of these
-   can be searched for by hand, in case it is listed under a spelling the file
-   does not use.</p>
+<h4>No match</h4>
+<p>These may be listed under a different spelling.</p>
 <ul class="results">
   {% for row in missing %}
-  <li>{{ row.label }} —
-    <a href="/?medium={{ batch.medium }}&amp;unit={{ batch.unit }}&amp;q={{ row.title | urlencode }}">search
-    for it</a></li>
+  <li><a href="/?medium={{ batch.medium }}&amp;unit={{ batch.unit }}&amp;q={{ row.title | urlencode }}">Search for {{ row.label }}</a>{% if row.detail and row.detail != no_match %}. {{ row.detail }}{% endif %}</li>
   {% endfor %}
 </ul>
 {% endif %}

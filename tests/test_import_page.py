@@ -109,13 +109,15 @@ check.that("A Record Nobody Pressed" in review.text,
            "and what did not, rather than dropping it")
 check.that("collection.csv" in review.text,
            "under the name of the file it came from")
+check.that("First line read as column headings: Artist, Album." in review.text,
+           "saying which line was taken for headings, so a title lost to a "
+           "wrong guess can be noticed")
 
 # The label is the assertion. A column of forty tick boxes each labelled only
 # with a title is unreadable; what has to be in the one string is what the
 # file said and what it was matched to.
-check.that("Ask for Kind of Blue by Miles Davis" in review.text
-           and "line 2 of the file says Kind of Blue by Miles Davis"
-           in review.text,
+check.that("Kind of Blue by Miles Davis. Line 2 of your file: "
+           "Kind of Blue by Miles Davis</label>" in review.text,
            "every tick box says both what was matched and which line of the "
            "file it came from")
 check.that(review.text.count('name="line"') == 2,
@@ -174,9 +176,9 @@ pasted = client.post("/import", data={"medium": "music", "unit": "album",
                                       "pasted": "Miles Davis - Kind of Blue"})
 check.equal(pasted.status_code, 303, "a pasted list is accepted too")
 page = settle(pasted.headers["location"], "What matched")
-check.that("A pasted list" in page.text,
+check.that("Pasted list" in page.text,
            "and says where it came from, having no filename to show")
-check.that("Kind of Blue by Miles Davis — already asked for" in page.text,
+check.that("Kind of Blue by Miles Davis: already asked for" in page.text,
            "with 'Artist - Title' read apart -- which is how a list in a "
            "message is written -- and the row recognised as one already on "
            "this account's list rather than offered to be asked for twice")
@@ -206,6 +208,56 @@ check.that("The service was restarted." in page.text
            and 'role="alert"' in page.text,
            "with the reason announced rather than left on the page to be "
            "found")
+
+# --- files the csv module used to refuse with a 500 --------------------------
+old_mac = client.post("/import", data={"medium": "music", "unit": "album"},
+                      files={"listing": ("old.csv",
+                                         b"Artist,Album\rMiles Davis,Kind of Blue\r",
+                                         "text/csv")})
+check.equal(old_mac.status_code, 303,
+            "a file whose lines end in a bare carriage return is accepted")
+check.that(old_mac.headers.get("location", "").startswith("/import/"),
+           "and goes on to be looked up")
+
+unclosed = 'Artist,Album\n"Miles Davis,Kind of Blue\n' + "x,y\n" * 40000
+broken = client.post("/import", data={"medium": "music", "unit": "album"},
+                     files={"listing": ("broken.csv", unclosed.encode(),
+                                        "text/csv")})
+check.equal(broken.status_code, 303,
+            "a file with a quote that never closes comes back to the form")
+check.that("quotation mark" in unquote(broken.headers.get("location", "")),
+           "saying what to look for")
+
+# --- what the review says about rows that found nothing --------------------
+def row(line, title, state, detail, hit=None):
+    return {"line": line, "title": title, "artist": "", "year": "",
+            "label": title, "state": state, "detail": detail, "hit": hit,
+            "others": 0}
+
+
+store.put_import("looked-up", MATT.id, "series", imports.READY, 3,
+                 {"medium": "series", "unit": "series", "filename": "shows.csv",
+                  "rows": [
+                      row(2, "Lost", imports.MATCHED, "",
+                          {"itemKey": "tvdb:1", "title": "Lost",
+                           "year": 2004, "unit": "series"}),
+                      row(3, "Nothing Like It", imports.MISSING,
+                          imports.NO_MATCH),
+                      row(4, "Unlucky", imports.MISSING,
+                          "The search for this one failed. Try it again "
+                          "later."),
+                  ]})
+page = client.get("/import/looked-up")
+check.equal(page.status_code, 200, "a list of series renders")
+check.that("3 series." in page.text and "seriess" not in page.text,
+           "and counts them as series, not seriess")
+check.that("Search for Unlucky</a>. The search for this one failed"
+           in page.text,
+           "a row whose search failed says so, rather than reading as a "
+           "title the catalogue does not have")
+check.that(imports.NO_MATCH not in page.text,
+           "while a row with no match is not told so again under the No match "
+           "heading")
 
 harness.cleanup()
 raise SystemExit(check.report())
