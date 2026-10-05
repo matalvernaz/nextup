@@ -65,6 +65,16 @@ nothing is asked for on a guess.</p>
         <label for="unit-artist">An artist (their whole discography)</label>
       </p>
     </fieldset>
+    <p>
+      <label for="playlist">Playlist name, for a list of songs (optional)</label><br>
+      <input type="text" id="playlist" name="playlist" maxlength="100"
+             aria-describedby="playlist-help">
+      <span class="help" id="playlist-help">The songs go into a playlist of
+        yours with this name. If Nextup has made one by that name for you
+        before, they are added to it; otherwise a new one is made. A song
+        already in it is not added twice, and songs not in the library yet go
+        in when they arrive.</span>
+    </p>
     {% endif %}
     <p>
       <label for="listing">CSV file</label><br>

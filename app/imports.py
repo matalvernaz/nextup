@@ -31,7 +31,7 @@ import unicodedata
 import uuid
 from dataclasses import dataclass
 
-from . import config, jellyfin, logs, media, store, wants
+from . import config, jellyfin, logs, media, playlists, songs, store, wants
 
 log = logs.get("imports")
 
@@ -606,12 +606,15 @@ def max_rows(medium: str) -> int:
 
 
 def start(user: jellyfin.User, medium: str, unit: str, filename: str,
-          data: bytes | str) -> str:
+          data: bytes | str, playlist: str = "") -> str:
     """Read a file, start working through it, and return the batch's id.
 
     The reading is done here, where somebody is waiting and can be told that
     their file has no title column. The looking up and asking -- network calls
     per row -- go to a thread.
+
+    `playlist` names a Jellyfin playlist of the person's to put the songs in,
+    made if need be (see `playlists`). Only a list of songs can be one.
     """
     sheet: Sheet | None = None
     try:
@@ -638,6 +641,20 @@ def start(user: jellyfin.User, medium: str, unit: str, filename: str,
                 f"That file has {len(items):,} rows. The limit is "
                 f"{max_rows(medium):,} per file, so split it into "
                 f"smaller files.")
+        playlist_id = ""
+        if playlists.clean_name(playlist):
+            if medium != media.MUSIC or unit != "track":
+                raise Unreadable(
+                    "A playlist is made of songs, and this list is not read as "
+                    "songs. For music, choose “A track”, or leave the playlist "
+                    "name empty.")
+            try:
+                playlist_id = playlists.resolve(user, playlist)
+            except playlists.Refused as refused:
+                raise Unreadable(str(refused)) from refused
+            except jellyfin.JellyfinUnavailable as exc:
+                raise Unreadable("Jellyfin could not be reached to make the "
+                                 "playlist. Try again in a moment.") from exc
     except Unreadable as exc:
         # The person is told why on the page. This puts the reason, and the
         # headings the file had, where a report of "importing does not work"
@@ -657,6 +674,9 @@ def start(user: jellyfin.User, medium: str, unit: str, filename: str,
         "items": [{"line": r.line, "title": r.title, "artist": r.artist,
                    "year": r.year} for r in items],
     }
+    if playlist_id:
+        payload["playlist"] = {"name": playlists.clean_name(playlist),
+                               "id": playlist_id}
     store.prune_imports(time.time() - config.IMPORT_RETENTION_HOURS * 3600)
     store.put_import(import_id, user.key, medium, READING, len(items), payload)
     log.info("import %s started user=%s medium=%s unit=%s rows=%d file=%r",
@@ -692,14 +712,34 @@ def _start_working(import_id: str, user: jellyfin.User, medium: str, unit: str,
 
 def _work_through(import_id: str, user: jellyfin.User, medium: str, unit: str,
                   items: list[Row]) -> None:
-    """Look up every row, and ask for each exact match as soon as it is found."""
+    """Look up every row, and ask for each exact match as soon as it is found.
+
+    A list of songs is checked against the library first, so a song already
+    here is not asked for again; with a playlist, those go straight into it,
+    a few at a time in the order of the file, and every other song the list
+    asks for is waited for and put in when it turns up.
+    """
+    playlist = _playlist_of(import_id)
+    found_now: list[tuple[int, str]] = []
     try:
         requested = store.outstanding_keys(user.key, medium)
+        library = _library_for(medium, unit)
         done = len(store.import_row_lines(import_id))
         for index, row in enumerate(items, start=1):
             if import_id in _stopping:
                 log.info("import %s stopped after %d rows", import_id, done)
                 break
+            item_id = library.find(row.title, row.artist) if library else None
+            if item_id:
+                store.put_import_row(import_id, _in_library(row, item_id))
+                done += 1
+                store.touch_import(import_id, done)
+                if playlist:
+                    found_now.append((row.line, item_id))
+                    if len(found_now) >= PLAYLIST_BATCH:
+                        _add_found(user, playlist, import_id, found_now)
+                        found_now = []
+                continue
             with _turn:
                 found = match(user, medium, unit, row, requested)
             outcome, detail = (_ask_one(import_id, user, medium, found)
@@ -708,6 +748,8 @@ def _work_through(import_id: str, user: jellyfin.User, medium: str, unit: str,
                 log.info("import %s stopped after %d rows", import_id, done)
                 break
             store.put_import_row(import_id, found, outcome, detail)
+            if playlist:
+                _wait_for(user, playlist, import_id, found, outcome)
             done += 1
             store.touch_import(import_id, done)
             if config.IMPORT_PAUSE_SECONDS and index < len(items):
@@ -715,6 +757,8 @@ def _work_through(import_id: str, user: jellyfin.User, medium: str, unit: str,
                 # to find their rate limit is to send five thousand queries at
                 # machine speed.
                 time.sleep(config.IMPORT_PAUSE_SECONDS)
+        if playlist:
+            _add_found(user, playlist, import_id, found_now)
     except Exception as exc:  # noqa: BLE001 - the thread must not die
         # silently, or the page waits for a phase that has stopped.
         log.exception("import %s failed while reading: %s", import_id, exc)
@@ -729,6 +773,67 @@ def _work_through(import_id: str, user: jellyfin.User, medium: str, unit: str,
     _settle(import_id)
     log.info("import %s read: %s", import_id,
              _tally(store.import_rows(import_id)))
+
+
+#: Songs found in the library that go into a playlist in one call. A few at a
+#: time rather than one by one, so a long list is not a call per song, and not
+#: all at the end, so the playlist fills while the rest is looked up.
+PLAYLIST_BATCH = 25
+
+
+def _playlist_of(import_id: str) -> dict | None:
+    row = store.get_import(import_id)
+    return json.loads(row["payload"]).get("playlist") if row else None
+
+
+def _library_for(medium: str, unit: str) -> songs.LibraryIndex | None:
+    """The music library's songs, for a list of songs. None otherwise, or if unreadable."""
+    if medium != media.MUSIC or unit != "track":
+        return None
+    try:
+        return songs.LibraryIndex.load()
+    except jellyfin.JellyfinUnavailable as exc:
+        log.warning("library could not be read, so every song is looked up: %s", exc)
+        return None
+
+
+def _in_library(row: Row, item_id: str) -> dict:
+    """A row whose song the library already holds."""
+    return {"line": row.line, "title": row.title, "artist": row.artist,
+            "year": row.year, "label": row.label, "state": HELD,
+            "detail": "Already in the library.", "hit": None, "others": 0,
+            "itemId": item_id}
+
+
+def _add_found(user: jellyfin.User, playlist: dict, import_id: str,
+               found: list[tuple[int, str]]) -> None:
+    """Put library songs into the playlist; if that fails, wait for them instead."""
+    if not found:
+        return
+    try:
+        playlists.add_found(user, playlist["id"], import_id, found)
+    except (jellyfin.JellyfinUnavailable, playlists.Refused) as exc:
+        log.warning("import %s could not add %d song(s) to its playlist: %s",
+                    import_id, len(found), exc)
+        by_line = {row["line"]: row for row in store.import_rows(import_id)}
+        for line, _ in found:
+            if line in by_line:
+                playlists.wait_for(user, playlist["id"], import_id, line,
+                                   by_line[line]["title"], by_line[line]["artist"])
+
+
+def _wait_for(user: jellyfin.User, playlist: dict, import_id: str, row: dict,
+              outcome: str) -> None:
+    """Wait for a song of a playlist that is on its way, to put it in later."""
+    on_its_way = (outcome in (ASKED, WAITING, ALREADY)
+                  or (not outcome and row["state"] == HELD and row.get("hit")))
+    if not on_its_way:
+        return
+    hit = row.get("hit") or {}
+    playlists.wait_for(user, playlist["id"], import_id, row["line"],
+                       hit.get("title") or row["title"],
+                       hit.get("artist") or row["artist"],
+                       hit.get("album") or "")
 
 
 def _ask_one(import_id: str, user: jellyfin.User, medium: str,
@@ -962,12 +1067,15 @@ def _ask_chosen(import_id: str, user: jellyfin.User, medium: str,
                 chosen: list[dict], final: bool) -> None:
     """Ask for each ticked row, and write down what became of it."""
     try:
+        playlist = _playlist_of(import_id)
         for index, row in enumerate(chosen, start=1):
             outcome, detail = _ask_one(import_id, user, medium, row)
             # A list stopped while this was on its way: the row is offered
             # again rather than left claimed.
             store.set_import_outcome(import_id, row["line"], outcome or "",
                                      detail)
+            if playlist and outcome:
+                _wait_for(user, playlist, import_id, row, outcome)
             if final:
                 store.touch_import(import_id, index)
     except Exception as exc:  # noqa: BLE001 - the thread must not die silently.
@@ -1221,4 +1329,8 @@ def _queue_loop() -> None:
         except Exception as exc:  # noqa: BLE001 - the thread must not die, or
             # waiting rows silently stop going in.
             log.warning("import queue pass failed: %s", exc)
+        try:
+            playlists.resolve_pending()
+        except Exception as exc:  # noqa: BLE001 - as above.
+            log.warning("could not fill playlists: %s", exc)
         time.sleep(config.IMPORT_QUEUE_SECONDS)

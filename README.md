@@ -76,6 +76,17 @@ list does not hold up somebody else's short one. Music rows are looked up on
 Deezer first and in buskarr's other catalogues only when Deezer has nothing
 certain.
 
+A list of songs is checked against the Jellyfin music library first, so a song
+already here is not asked for again or counted against anybody's allowance.
+The match keeps versions apart: "Song (Live)" in the library is not "Song" in
+the file. A list of songs can also be given a playlist name. The songs the
+library holds go into a Jellyfin playlist of that name, the importer's own, in
+the order of the file; the rest are asked for and each goes in at its place
+when it turns up. A later list of the same name goes into the same playlist,
+and nothing in it is added twice. Jellyfin does not tell this service who owns
+a playlist, so it adds only to playlists it made: a name that matches somebody
+else's playlist is refused rather than added to.
+
 Music is the exception, because music lists are the long ones. A list of
 music takes up to 5,000 rows (500 for anything else) and has its own daily
 allowance of 200 songs, so it does not use up the requests somebody has for
