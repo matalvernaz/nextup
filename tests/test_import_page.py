@@ -47,7 +47,7 @@ CATALOGUE = [
     {"title": "Rumours", "artist": "Fleetwood Mac", "ref": "a2"},
 ]
 
-buskarr.search = lambda q, unit, limit: [
+buskarr.search = lambda q, unit, limit, sources=(): [
     buskarr._result(dict(row, source="deezer"), unit) for row in CATALOGUE
     if any(word in f"{row['artist']} {row['title']}".casefold()
            for word in q.casefold().split() if len(word) > 3)
@@ -86,27 +86,34 @@ check.that('enctype="multipart/form-data"' in form.text,
 check.that('<a href="/import">Import a list</a>' in form.text,
            "with a way in from the nav on every page, because a page nobody "
            "can find is a page that does not exist")
-check.that("Nothing is asked for yet" in form.text,
-           "saying before anything is uploaded that uploading acquires nothing")
+check.that("exact matches are asked for straight away" in " ".join(form.text.split()),
+           "saying before anything is uploaded what uploading does")
 check.that('name="unit" value="album"' in form.text,
            "and offering music's three units, which no other medium has")
 
 # --- uploading --------------------------------------------------------------
+LIST_WITH_NEAR_MISS = LIST + "Bill Evans,Kind of Blue\n"
 posted = client.post("/import", data={"medium": "music", "unit": "album"},
-                     files={"listing": ("collection.csv", LIST.encode(),
+                     files={"listing": ("collection.csv",
+                                        LIST_WITH_NEAR_MISS.encode(),
                                         "text/csv")})
 check.equal(posted.status_code, 303, "an uploaded list redirects to itself")
 where = posted.headers["location"]
 check.that(where.startswith("/import/"), "at an address of its own, so a "
                                          "reload does not re-upload the file")
-check.equal(asked, [], "and nothing at all has been asked for yet")
 
-review = settle(where, "What matched")
-check.equal(review.status_code, 200, "the review page answers")
-check.that("Kind of Blue" in review.text and "Rumours" in review.text,
-           "listing what matched")
-check.that("A Record Nobody Pressed" in review.text,
-           "and what did not, rather than dropping it")
+review = settle(where, "All looked up")
+check.equal(review.status_code, 200, "the list's page answers")
+check.equal(sorted(asked), ["Kind of Blue", "Rumours"],
+            "the two exact matches were asked for as the list was looked up, "
+            "with nobody pressing anything")
+flat = " ".join(review.text.split())
+check.that("<li>2 asked for</li>" in flat, "the page counts what was asked for")
+check.that("Kind of Blue by Miles Davis" in flat and "Rumours by Fleetwood Mac" in flat,
+           "and names it")
+check.that("Search for A Record Nobody Pressed by Nobody At All" in flat,
+           "a row nothing matched is listed with a way to look for it, rather "
+           "than dropped")
 check.that("collection.csv" in review.text,
            "under the name of the file it came from")
 check.that("First line read as column headings: Artist, Album." in review.text,
@@ -116,14 +123,14 @@ check.that("First line read as column headings: Artist, Album." in review.text,
 # The label is the assertion. A column of forty tick boxes each labelled only
 # with a title is unreadable; what has to be in the one string is what the
 # file said and what it was matched to.
-check.that("Kind of Blue by Miles Davis. Line 2 of your file: "
-           "Kind of Blue by Miles Davis</label>" in review.text,
-           "every tick box says both what was matched and which line of the "
-           "file it came from")
-check.that(review.text.count('name="line"') == 2,
-           "only the rows that matched something are offered")
-check.that(review.text.count("checked") == 2,
-           "and both exact matches are ticked ready")
+check.that("Kind of Blue by Miles Davis. Line 5 of your file: "
+           "Kind of Blue by Bill Evans</label>" in review.text,
+           "the near miss is offered with both what was matched and which "
+           "line of the file it came from")
+check.equal(review.text.count('name="line"'), 1,
+            "only the near miss waits for a tick")
+check.that('name="line"' in review.text and " checked" not in review.text,
+           "and it is not ticked: nothing is asked for on a guess")
 
 # --- somebody else's list ---------------------------------------------------
 signed_in = KID
@@ -133,31 +140,35 @@ check.equal(theirs.status_code, 303,
             "another account asking for that list is sent away")
 check.equal(theirs.headers["location"].split("?")[0], "/import",
             "to the form, with no hint that the list exists")
-stolen = client.post(where + "/confirm", data={"line": "2"})
+asked.clear()
+stolen = client.post(where + "/confirm", data={"line": "5"})
 check.equal(stolen.headers["location"].split("?")[0], "/import",
-            "and cannot confirm it either")
+            "and cannot ask for anything on it either")
 check.equal(asked, [], "so nothing was asked for on its owner's allowance")
 
 signed_in = MATT
 client.cookies.set(sessions.COOKIE_NAME, sessions.issue("a-token", MATT.id))
+recent = client.get("/import")
+check.that(f'<a href="{where}">collection.csv</a>' in recent.text,
+           "the import page lists the account's recent lists, so one can be "
+           "found again after leaving it")
 
-# --- confirming -------------------------------------------------------------
+# --- deciding about the near misses -----------------------------------------
 nothing = client.post(where + "/confirm", data={})
 check.equal(nothing.status_code, 303,
             "a form with every row unticked posts no field at all, and is a "
             "redirect rather than a missing-parameter error")
 check.that("Nothing was ticked" in unquote(nothing.headers["location"]),
            "and says so")
-check.equal(asked, [], "having asked for nothing")
 
-done = client.post(where + "/confirm", data={"line": ["2", "3"]})
-check.equal(done.status_code, 303, "confirming redirects back to the list")
-report = settle(where, "What was asked for")
-check.that(sorted(asked) == ["Kind of Blue", "Rumours"],
-           f"and the two ticked rows were asked for, not {asked}")
-check.that("2 asked for" in report.text, "the report counts them")
-check.that("See everything you have asked for" in report.text,
-           "and points at the list they are now on")
+left = client.post(where + "/leave")
+check.equal(left.status_code, 303, "leaving the rest redirects back")
+done = settle(where, "Close matches left out")
+check.that("Search for Kind of Blue by Bill Evans" in " ".join(done.text.split()),
+           "a near miss left out is still listed, with a way to look for it")
+check.that('name="line"' not in done.text, "and nothing is offered any more")
+check.that("See everything you have asked for" in done.text,
+           "and the page points at the list they are now on")
 
 # --- a file this cannot read ------------------------------------------------
 refused = client.post("/import", data={"medium": "music", "unit": "album"},
@@ -175,13 +186,15 @@ check.that("Choose a file" in unquote(empty.headers["location"]),
 pasted = client.post("/import", data={"medium": "music", "unit": "album",
                                       "pasted": "Miles Davis - Kind of Blue"})
 check.equal(pasted.status_code, 303, "a pasted list is accepted too")
-page = settle(pasted.headers["location"], "What matched")
+page = settle(pasted.headers["location"], "All looked up")
 check.that("Pasted list" in page.text,
            "and says where it came from, having no filename to show")
-check.that("Kind of Blue by Miles Davis: already asked for" in page.text,
+flat = " ".join(page.text.split())
+check.that("<li>1 already here or already asked for</li>" in flat
+           and "Kind of Blue by Miles Davis" in flat,
            "with 'Artist - Title' read apart -- which is how a list in a "
            "message is written -- and the row recognised as one already on "
-           "this account's list rather than offered to be asked for twice")
+           "this account's list rather than asked for twice")
 check.that('name="line"' not in page.text,
            "so there is no tick box on it at all")
 

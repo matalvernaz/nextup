@@ -927,7 +927,8 @@ def get_import(request: Request, msg: str = ""):
                                for key in offered},
                  "import_limit": _import_limit(user),
                  "import_queue": (imports.queue_status(user)
-                                  if media.MUSIC in offered else None)})
+                                  if media.MUSIC in offered else None),
+                 "recent": imports.recent(user)})
 
 
 def _import_limit(user: jellyfin.User) -> dict:
@@ -1010,20 +1011,12 @@ def get_import_batch(request: Request, import_id: str, msg: str = ""):
         return RedirectResponse(
             url="/import?msg=" + quote("That list is no longer here."),
             status_code=303)
-    ready = batch["state"] == imports.READY
-    grouped = imports.groups(batch)
-    lines = {row["line"] for row in grouped[imports.MATCHED]}
     return templates.TemplateResponse(
         request=request, name="import_batch.html",
         context={
-            "user": user, "batch": batch, "groups": grouped,
+            "user": user, "batch": batch, "rows": imports.view(batch),
             "message": msg,
-            # Only worth working out where there is a button to press.
-            "covered": imports.affordable(user, batch, lines) if ready else 0,
-            "ticked": len(lines),
             "hit_label": imports.hit_label,
-            "states": {"matched": imports.MATCHED, "uncertain": imports.UNCERTAIN,
-                       "held": imports.HELD, "missing": imports.MISSING},
             "no_match": imports.NO_MATCH,
             "import_limit": _import_limit(user),
         })
@@ -1031,7 +1024,7 @@ def get_import_batch(request: Request, import_id: str, msg: str = ""):
 
 @app.post("/import/{import_id}/confirm")
 async def post_import_confirm(request: Request, import_id: str):
-    """Ask for the ticked rows.
+    """Ask for the near misses somebody ticked, while the rest is looked up too.
 
     The ticks are read from the raw form rather than declared as a parameter
     because a checkbox that is not ticked sends nothing at all, so the field
@@ -1050,11 +1043,29 @@ async def post_import_confirm(request: Request, import_id: str):
             url=f"/import/{import_id}?msg=" + quote(
                 "Nothing was ticked, so nothing was asked for."),
             status_code=303)
-    if imports.confirm(user, import_id, lines) is None:
+    if imports.ask_for_lines(user, import_id, lines) is None:
         return RedirectResponse(
             url="/import?msg=" + quote("That list is no longer here."),
             status_code=303)
-    return RedirectResponse(url=f"/import/{import_id}", status_code=303)
+    return RedirectResponse(
+        url=f"/import/{import_id}?msg=" + quote(
+            f"Asking for {len(lines)}."), status_code=303)
+
+
+@app.post("/import/{import_id}/leave")
+def post_import_leave(request: Request, import_id: str):
+    """Leave the near misses on this list unasked."""
+    try:
+        user = viewer(request)
+    except LookupError as exc:
+        return _signin_page(request, detail=str(exc), status=401)
+    if imports.leave_rest(user, import_id) is None:
+        return RedirectResponse(
+            url="/import?msg=" + quote("That list is no longer here."),
+            status_code=303)
+    return RedirectResponse(
+        url=f"/import/{import_id}?msg=" + quote("Left them."),
+        status_code=303)
 
 
 BOOK = "book"

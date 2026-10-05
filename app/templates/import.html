@@ -9,11 +9,23 @@
 list to go.</p>
 {% else %}
 
-<p>Upload a CSV file or paste a list. Each row is looked up, and then you
-choose which matches to ask for.</p>
+<p>Upload a CSV file or paste a list. Each row is looked up, and exact matches
+are asked for straight away. Close matches are listed for you to check, so
+nothing is asked for on a guess.</p>
 
-<p><strong>Nothing is asked for yet.</strong> Exact matches are ticked for
-you. Close matches are left unticked.</p>
+{% if recent %}
+<h3>Your recent lists</h3>
+<ul>
+  {% for r in recent %}
+  <li><a href="/import/{{ r.id }}">{{ r.filename or 'Pasted list' }}</a>:
+    {% if r.state == 'reading' %}{{ "{:,}".format(r.done) }} of {{ "{:,}".format(r.total) }} looked up
+    {%- elif r.state == 'ready' %}close matches to check
+    {%- elif r.state == 'asking' %}asking
+    {%- elif r.state == 'done' %}finished
+    {%- else %}stopped{% endif %}</li>
+  {% endfor %}
+</ul>
+{% endif %}
 
 <form method="post" action="/import" enctype="multipart/form-data">
   <fieldset>

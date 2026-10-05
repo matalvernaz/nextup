@@ -47,7 +47,7 @@ media._registry_settled = True
 
 CATALOGUE = [{"title": f"Record {n}", "artist": f"Band {n}", "ref": f"a{n}"}
              for n in range(5)]
-buskarr.search = lambda q, unit, limit: [
+buskarr.search = lambda q, unit, limit, sources=(): [
     buskarr._result(dict(row, source="deezer"), unit) for row in CATALOGUE
     if f"{row['artist']} {row['title']}".casefold() == q.casefold()
 ] if unit == "album" else []
@@ -108,19 +108,20 @@ check.equal(caps["importList"]["maxRows"], config.IMPORT_MAX_ROWS,
 started = client.post("/api/v1/import", headers=as_("kid-token"),
                       json={"medium": "music", "unit": "album",
                             "text": LIST}).json()
-ready = until(started["importId"], "ready")
-lines = [row["line"] for row in ready["rows"] if row["state"] == "matched"]
-check.equal(len(lines), 4, "all four albums matched")
-check.that(ready["remainingToday"] >= 4,
-           "a client from before the queue is given enough to cover every "
-           "row, so it does not warn that the rest will be refused")
-check.equal(ready["importAllowance"]["leftToday"], 24,
-            "and the real import allowance is there for a client that reads it")
-done = client.post(f"/api/v1/import/{started['importId']}/confirm",
-                   headers=as_("kid-token"), json={"lines": lines}).json()
 done = until(started["importId"], "done")
 check.equal([title for title, _ in asked], ["Record 0", "Record 1"],
-            "two albums fit in 24 songs a day and are asked for at once")
+            "two albums fit in 24 songs a day and are asked for as the list "
+            "is looked up, with nobody confirming anything")
+check.equal({row["line"]: row["detail"] for row in done["rows"]},
+            {2: "Asked for.", 3: "Asked for.", 4: "Waiting for a later day.",
+             5: "Waiting for a later day."},
+            "every row says what became of it")
+check.that(done["remainingToday"] >= 4,
+           "a client from before the queue is given enough to cover every "
+           "row, so it does not warn that the rest will be refused")
+check.equal((done["importAllowance"]["leftToday"],
+             done["importAllowance"]["songsPerDay"]), (0, 24),
+            "and the real import allowance is there for a client that reads it")
 check.equal(done["report"]["waiting"],
             ["Record 2 by Band 2", "Record 3 by Band 3"],
             "the other two wait, and the report names them")

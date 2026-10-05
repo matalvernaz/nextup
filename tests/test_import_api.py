@@ -40,12 +40,15 @@ media._registry = {
 }
 media._registry_built_at = time.monotonic()
 media._registry_settled = True
+# Asking again for something already asked for checks the library, and the
+# harness keeps Jellyfin out of reach.
+media.owned = lambda *args, **kwargs: jellyfin.Owned()
 
 CATALOGUE = [
     {"title": "Kind of Blue", "artist": "Miles Davis", "ref": "a1"},
     {"title": "Rumours", "artist": "Fleetwood Mac", "ref": "a2"},
 ]
-buskarr.search = lambda q, unit, limit: [
+buskarr.search = lambda q, unit, limit, sources=(): [
     buskarr._result(dict(row, source="deezer"), unit) for row in CATALOGUE
     if any(word in f"{row['artist']} {row['title']}".casefold()
            for word in q.casefold().split() if len(word) > 3)
@@ -91,34 +94,44 @@ check.equal(caps["importList"]["maxRows"], 6,
             "and says how long a list it will take, so a client can refuse "
             "one before spending the upload")
 
+check.equal(caps["importList"].get("automatic"), True,
+            "and that exact matches are asked for while it is looked up")
+
 # --- handing over a list ----------------------------------------------------
 started = client.post("/api/v1/import", headers=as_("matt-token"),
                       json={"medium": "music", "unit": "album",
-                            "filename": "theirs.csv", "text": LIST})
+                            "filename": "theirs.csv",
+                            "text": LIST + "Bill Evans,Kind of Blue\n"})
 check.equal(started.status_code, 200, "a list is accepted")
 body = started.json()
-check.equal(body["total"], 3, "with every row of it counted")
-check.equal(asked, [], "and nothing acquired by the call that uploaded it")
+check.equal(body["total"], 4, "with every row of it counted")
 where = f"/api/v1/import/{body['importId']}"
 
 body = settle(where, "matt-token", "ready")
-states = {row["title"]: row["state"] for row in body["rows"]}
-check.equal(states, {"Kind of Blue": "matched", "Rumours": "matched",
-                     "A Record Nobody Pressed": "missing"},
-            "every row comes back with what became of it, including the one "
-            "that matched nothing")
+check.equal(sorted(asked), ["Kind of Blue", "Rumours"],
+            "the exact matches were asked for as the list was looked up")
+rows = {row["line"]: row for row in body["rows"]}
+check.equal({line: row["state"] for line, row in rows.items()},
+            {2: "held", 3: "held", 4: "missing", 5: "uncertain"},
+            "a row already asked for is sent as held, so a client written for "
+            "confirming everything offers only the near miss")
+check.equal(rows[2]["detail"], "Asked for.",
+            "and says what became of it")
 check.that(all("line" in row for row in body["rows"]),
-           "each carrying the line of the file it was, which is what a "
+           "each row carries the line of the file it was, which is what a "
            "client sends back to choose it")
+check.equal(len(body["report"]["asked"]), 2,
+            "the report already names what was asked for")
 check.equal(body["remainingToday"], None,
             "an uncapped account is told so rather than given a number")
 
 # --- one account cannot reach another's -------------------------------------
+asked.clear()
 check.equal(client.get(where, headers=as_("kid-token")).status_code, 404,
             "another account is told there is no such list, which is also "
             "all it should learn")
 check.equal(client.post(where + "/confirm", headers=as_("kid-token"),
-                        json={"lines": [2, 3]}).status_code, 404,
+                        json={"lines": [5]}).status_code, 404,
             "and cannot confirm it")
 check.equal(asked, [], "so nothing went to the acquisition tool")
 
@@ -126,14 +139,16 @@ check.equal(client.get(where).status_code, 401,
             "and a call with no token at all is refused, as everywhere else "
             "on this API")
 
-# --- confirming -------------------------------------------------------------
+# --- confirming the near miss -----------------------------------------------
 confirmed = client.post(where + "/confirm", headers=as_("matt-token"),
-                        json={"lines": [2, 3]})
+                        json={"lines": [5, 2]})
 check.equal(confirmed.status_code, 200, "the owner may confirm")
 body = settle(where, "matt-token", "done")
-check.equal(sorted(asked), ["Kind of Blue", "Rumours"],
-            "and exactly the confirmed lines are asked for")
-check.equal(len(body["report"]["asked"]), 2, "the report names both")
+check.equal(asked, [],
+            "the near miss's match was already asked for, so confirming it "
+            "costs nothing, and a line already dealt with is not asked again")
+check.equal(body["report"]["already"], ["Kind of Blue by Miles Davis"],
+            "and the report says it was already asked for")
 
 # --- a file that cannot be read ---------------------------------------------
 bad = client.post("/api/v1/import", headers=as_("matt-token"),

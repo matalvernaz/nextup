@@ -1,4 +1,5 @@
 """Reading somebody else's list, matching it, and asking for what was ticked."""
+import json
 import time
 import unicodedata
 
@@ -49,13 +50,16 @@ CATALOGUE = {
         {"title": "Rumours Live", "artist": "Fleetwood Mac", "ref": "a4"},
         {"title": "Blue", "artist": "Joni Mitchell", "ref": "a5"},
         {"title": "Café Bleu", "artist": "The Style Council", "ref": "a6"},
+        # Not on Deezer, so only the full search can find it.
+        {"title": "Hounds of Love", "artist": "Kate Bush", "ref": "a7",
+         "source": "itunes"},
     ],
     "track": [
         {"title": "Lovely Day", "artist": "Bill Withers", "duration": 254},
     ],
 }
 
-searched: list[tuple[str, str]] = []
+searched: list[tuple[str, str, tuple[str, ...]]] = []
 
 
 def fold(text: str) -> str:
@@ -64,20 +68,25 @@ def fold(text: str) -> str:
     return "".join(ch for ch in plain if not unicodedata.combining(ch))
 
 
-def fake_search(query: str, unit: str, limit: int) -> list[dict]:
-    """Anything sharing a real word with the query.
+def fake_search(query: str, unit: str, limit: int,
+                sources: tuple[str, ...] = ()) -> list[dict]:
+    """Anything sharing a real word with the query, from the named sources.
 
     Words of three letters or fewer are ignored, because "a" and "of" are a
     substring of most things and a catalogue that answered every query with
     its whole contents would make every test below pass for the wrong reason.
+    A row is on Deezer unless it says otherwise.
     """
-    searched.append((query, unit))
+    searched.append((query, unit, tuple(sources)))
     words = [word for word in fold(query).split() if len(word) > 3]
     rows = []
     for row in CATALOGUE.get(unit, []):
         haystack = fold(f"{row['artist']} {row['title']}")
+        source = row.get("source", "deezer")
+        if sources and source not in sources:
+            continue
         if any(word in haystack for word in words):
-            rows.append(dict(row, source="deezer"))
+            rows.append(dict(row, source=source))
     return [buskarr._result(row, unit) for row in rows[:limit]]
 
 
@@ -339,7 +348,7 @@ check.that(
     "and a file with no year at all does not disqualify the only Dune there is")
 
 wants_search = wants.search
-wants.search = lambda q, medium, unit="", user=None: [
+wants.search = lambda q, medium, unit="", user=None, sources=(): [
     hit("Kind of Blue", "Miles Davis", owned=True)]
 found = imports.match(MATT, media.MUSIC, "album", row, set())
 check.equal((found["state"], found["detail"]), (imports.HELD,
@@ -347,13 +356,13 @@ check.equal((found["state"], found["detail"]), (imports.HELD,
             "a strict match the library already holds is held back rather "
             "than offered")
 
-wants.search = lambda q, medium, unit="", user=None: [
+wants.search = lambda q, medium, unit="", user=None, sources=(): [
     hit("Kind of Blue", "Miles Davis")]
 found = imports.match(MATT, media.MUSIC, "album", row, {"bk:Kind of Blue"})
 check.equal(found["state"], imports.HELD,
             "and so is one this account has already asked for")
 
-wants.search = lambda q, medium, unit="", user=None: []
+wants.search = lambda q, medium, unit="", user=None, sources=(): []
 check.equal(imports.match(MATT, media.MUSIC, "album", row, set())["state"],
             imports.MISSING, "a row the catalogue has never heard of is missing")
 
@@ -370,6 +379,27 @@ check.that("failed" in found["detail"] and found["detail"] != imports.NO_MATCH,
            "and says so rather than claiming the catalogue had nothing")
 wants.search = wants_search
 
+# Deezer first. A music row it has an exact match for costs one quick lookup;
+# only a row it has nothing certain for goes on to every catalogue.
+searched.clear()
+found = imports.match(MATT, media.MUSIC, "album",
+                      imports.Row(2, "Kind of Blue", "Miles Davis"), set())
+check.equal((found["state"], [entry[2] for entry in searched]),
+            (imports.MATCHED, [("deezer",)]),
+            "an exact match on Deezer is looked up once, on Deezer alone")
+searched.clear()
+found = imports.match(MATT, media.MUSIC, "album",
+                      imports.Row(2, "Hounds of Love", "Kate Bush"), set())
+check.equal((found["state"], [entry[2] for entry in searched]),
+            (imports.MATCHED, [("deezer",), ()]),
+            "a row Deezer has nothing certain for is looked up everywhere, "
+            "and found there")
+searched.clear()
+imports.match(MATT, media.MUSIC, "artist", imports.Row(2, "Miles Davis"), set())
+check.equal([entry[2] for entry in searched], [()],
+            "an artist is looked up everywhere from the start, since telling "
+            "two acts of one name apart is what MusicBrainz is for")
+
 
 # --------------------------------------------------------------------------
 # A whole batch
@@ -382,7 +412,9 @@ LIST = ("Artist,Album\n"
         "Bill Evans,Kind of Blue\n"        # right title, wrong credit
         "Nobody At All,A Record Nobody Pressed\n")
 
+asked.clear()
 import_id = imports.start(MATT, media.MUSIC, "album", "collection.csv", LIST)
+# Ready rather than done: the near miss is still waiting for a decision.
 batch = wait_for(MATT, import_id, imports.READY)
 grouped = imports.groups(batch)
 check.equal(sorted(r["title"] for r in grouped[imports.MATCHED]),
@@ -400,45 +432,50 @@ check.equal([r["title"] for r in grouped[imports.MISSING]],
 check.equal([(r["artist"], r["title"]) for r in grouped[imports.UNCERTAIN]],
             [("Bill Evans", "Kind of Blue")],
             "and a row whose title the catalogue has under another credit is "
-            "offered as a near miss rather than asked for")
+            "kept as a near miss")
 check.equal(grouped[imports.UNCERTAIN][0]["hit"]["artist"], "Miles Davis",
             "with the credit the catalogue actually holds shown, so the "
-            "difference is visible before anything is ticked")
+            "difference is visible before anybody ticks it")
 check.that(all(row["hit"] is None or "itemKey" in row["hit"]
                for row in batch["rows"]),
            "every kept hit carries the identifier the request will be made on")
 
-check.that(imports.get(OTHER, import_id) is None,
-           "another account cannot read somebody else's imported list")
-check.that(imports.confirm(OTHER, import_id, {2, 3}) is None,
-           "nor confirm one")
-
-check.equal(imports.affordable(MATT, batch, {2, 3, 4}), None,
-            "an administrator is told there is no limit rather than a number")
-
-asked.clear()
-ticked = {row["line"] for row in grouped[imports.MATCHED]}
-imports.confirm(MATT, import_id, ticked)
-batch = wait_for(MATT, import_id, imports.DONE)
 check.equal(sorted(title for _, title in asked),
             ["Café Bleu", "Kind of Blue", "Rumours"],
-            "confirming asks for exactly the ticked rows, under the spelling "
-            "the catalogue gave rather than the one the file used")
-check.equal(len(batch["report"]["asked"]), 3,
-            "and the report names all three")
-check.equal(batch["report"]["refused"], [],
-            "with nothing refused on an uncapped account")
+            "the exact matches are asked for while the list is looked up, "
+            "under the spelling the catalogue gave rather than the file's")
+check.equal([r["outcome"] for r in grouped[imports.MATCHED]],
+            [imports.ASKED] * 3, "and each row says so")
+check.equal(grouped[imports.UNCERTAIN][0]["outcome"], "",
+            "while the near miss is not asked for on a guess")
+check.equal(len(imports.report(batch)["asked"]), 3,
+            "the report names all three")
 check.that(all(store.get(MATT.key, media.MUSIC, f"bk:album:deezer:a{n}")
                is not None for n in (1, 3, 6)),
            "each one is in the ledger afterwards, keyed the way a request "
            "made from the search page would be")
 
-# A second confirm of the same batch must not ask again: the batch has moved
-# on, and a reloaded page that re-posts is the ordinary way to find that out.
+check.that(imports.get(OTHER, import_id) is None,
+           "another account cannot read somebody else's imported list")
+near = grouped[imports.UNCERTAIN][0]["line"]
+check.that(imports.ask_for_lines(OTHER, import_id, {near}) is None,
+           "nor ask for anything on it")
+
+# Ticking the near miss asks for it, and with nothing left to decide the list
+# ends by itself. Its match was already asked for by the first row, so the ask
+# costs nothing and says so.
 asked.clear()
-imports.confirm(MATT, import_id, ticked)
-check.equal(asked, [],
-            "confirming a list that has already been asked for does nothing")
+imports.ask_for_lines(MATT, import_id, {near})
+batch = wait_for(MATT, import_id, imports.DONE)
+check.equal(asked, [], "a near miss whose match is already asked for is free")
+check.equal([r["outcome"] for r in imports.groups(batch)[imports.UNCERTAIN]],
+            [imports.ALREADY], "and is reported as already asked for")
+
+# A second ask of the same line must not ask again: the row is decided, and a
+# reloaded page that re-posts is the ordinary way to find that out.
+asked.clear()
+imports.ask_for_lines(MATT, import_id, {near})
+check.equal(asked, [], "asking again for a row already dealt with does nothing")
 
 
 # --------------------------------------------------------------------------
@@ -455,41 +492,29 @@ SHORT = ("Artist,Album\n"
 # refused past it either: what does not fit waits for a later day.
 config.IMPORT_MUSIC_DAILY_SONGS = 3 * config.IMPORT_ALBUM_SONGS
 
-import_id = imports.start(KID, media.MUSIC, "album", "theirs.csv", SHORT)
-batch = wait_for(KID, import_id, imports.READY)
-lines = {row["line"] for row in imports.groups(batch)[imports.MATCHED]}
-check.equal(len(lines), 3, "three of the capped account's rows matched")
-check.equal(imports.affordable(KID, batch, lines), 3,
-            "and today's import allowance of three albums covers all three")
-
 asked.clear()
 bulk_marks.clear()
-imports.confirm(KID, import_id, lines)
+import_id = imports.start(KID, media.MUSIC, "album", "theirs.csv", SHORT)
 batch = wait_for(KID, import_id, imports.DONE)
-check.equal(len(batch["report"]["asked"]), 3,
-            "so all three are asked for")
+check.equal(len(imports.report(batch)["asked"]), 3,
+            "all three are asked for, and with nothing to decide the list is "
+            "done as soon as it is looked up")
 check.equal(bulk_marks, [True, True, True],
             "each marked bulk, so buskarr works them after this person's "
             "own searches")
 check.equal(wants.import_allowance(KID, media.MUSIC), 0,
-            "and the day's import allowance is spent exactly, not overspent")
+            "the day's import allowance is spent exactly, not overspent")
 check.equal(wants.allowance(KID, media.MUSIC), 3,
             "while the three a day for searching are untouched")
 
+asked.clear()
 import_id = imports.start(KID, media.MUSIC, "album",
                           "theirs-again.csv",
                           "Artist,Album\nThe Style Council,Cafe Bleu\n")
-batch = wait_for(KID, import_id, imports.READY)
-lines = {row["line"] for row in imports.groups(batch)[imports.MATCHED]}
-check.equal(imports.affordable(KID, batch, lines), 0,
-            "with the import allowance gone, the page says up front that "
-            "today covers none of them")
-asked.clear()
-imports.confirm(KID, import_id, lines)
 batch = wait_for(KID, import_id, imports.DONE)
-check.equal(asked, [], "and confirming asks the acquisition tool for nothing")
-check.equal(batch["report"]["refused"], [], "nor refuses it")
-check.equal(batch["report"]["waiting"], ["Café Bleu by The Style Council"],
+check.equal(asked, [], "with the import allowance gone nothing more is sent")
+check.equal(imports.report(batch)["refused"], [], "nor refused")
+check.equal(imports.report(batch)["waiting"], ["Café Bleu by The Style Council"],
             "it waits, and the report names it")
 check.equal(imports.queue_status(KID)["waiting"], 1,
             "in this account's queue")
@@ -513,57 +538,81 @@ check.equal(imports.queue_status(KID), None, "and the queue is empty")
 # behind it even if the allowance has room.
 store.queue_rows(KID.key, media.MUSIC, "earlier", [(2, "Earlier", {
     "itemKey": "bk:album:deezer:zz", "unit": "album", "title": "Earlier"})])
+asked.clear()
 import_id = imports.start(KID, media.MUSIC, "album", "third.csv",
                           "Artist,Album\nFleetwood Mac,Rumours Live\n")
-batch = wait_for(KID, import_id, imports.READY)
-lines = {row["line"] for row in batch["rows"]
-         if row["state"] in (imports.MATCHED, imports.UNCERTAIN)}
-asked.clear()
-imports.confirm(KID, import_id, lines)
 batch = wait_for(KID, import_id, imports.DONE)
-check.equal(asked, [], "a list confirmed behind waiting rows asks for nothing yet")
-check.equal([row["label"] for row in store.queued(KID.key)][0], "Earlier",
+check.equal(asked, [], "a list behind waiting rows asks for nothing yet")
+check.equal([row["label"] for row in store.queued(KID.key)],
+            ["Earlier", "Rumours Live by Fleetwood Mac"],
             "and queues behind them, in order")
-waiting = store.queued_count(KID.key)
-check.equal(waiting, 1 + len(batch["report"]["waiting"]),
-            "the new list's rows all wait, behind the one already there")
-check.equal(imports.clear_queue(KID), waiting,
+check.equal(imports.clear_queue(KID), 2,
             "stopping the queue drops every waiting row")
 check.equal(store.queued_count(KID.key), 0, "so nothing is left to ask for")
 config.IMPORT_MUSIC_DAILY_SONGS = 200
 
-# A line that was never on offer -- held back, or matched to nothing -- cannot
-# be smuggled in by posting its number.
+# A line that was never on offer -- matched to nothing, or already decided --
+# cannot be smuggled in by posting its number.
 import_id = imports.start(MATT, media.MUSIC, "album", "sneaky.csv",
                           "Artist,Album\nNobody At All,A Record Nobody "
                           "Pressed\n")
-batch = wait_for(MATT, import_id, imports.READY)
+batch = wait_for(MATT, import_id, imports.DONE)
 check.equal([r["state"] for r in batch["rows"]], [imports.MISSING],
             "the one row of this list matched nothing")
 asked.clear()
-imports.confirm(MATT, import_id, {2})
-check.equal(imports.get(MATT, import_id)["state"], imports.READY,
-            "so confirming it leaves the list where it was")
-check.equal(asked, [], "and asks for nothing")
+imports.ask_for_lines(MATT, import_id, {2})
+check.equal(asked, [], "so posting its line asks for nothing")
 
 
 # --------------------------------------------------------------------------
-# A pass that stopped
+# A list a restart interrupted
 # --------------------------------------------------------------------------
 
+jellyfin.all_users = lambda: {"matt": MATT.id, "kid": KID.id}
+jellyfin.user = lambda name: {"matt": MATT, "kid": KID}[name]
+
+asked.clear()
 import_id = imports.start(MATT, media.MUSIC, "album", "interrupted.csv",
-                          "Artist,Album\nMiles Davis,Kind of Blue\n")
-wait_for(MATT, import_id, imports.READY)
+                          "Artist,Album\nJoni Mitchell,Blue\n"
+                          "Fleetwood Mac,Rumours Live\n")
+wait_for(MATT, import_id, imports.DONE)
+# As though the container had stopped after the first row: the second row was
+# never looked up, let alone asked for, and the list still says it is reading.
 with store.db() as conn:
-    conn.execute("UPDATE imports SET state='reading', touched_at=? "
+    conn.execute("DELETE FROM import_rows WHERE import_id=? AND line=3",
+                 (import_id,))
+    conn.execute("DELETE FROM requests WHERE user_key=? AND item_key=?",
+                 (MATT.key, "bk:album:deezer:a4"))
+    conn.execute("UPDATE imports SET state='reading', done=1, touched_at=? "
+                 "WHERE import_id=?", (time.time() - 10_000, import_id))
+asked.clear()
+check.equal(imports.get(MATT, import_id)["state"], imports.READING,
+            "a list that kept its rows is not called failed while it waits "
+            "to carry on")
+check.equal(imports.resume_interrupted(), 1, "and the next pass picks it up")
+batch = wait_for(MATT, import_id, imports.DONE)
+check.equal([row["line"] for row in batch["rows"]], [2, 3],
+            "carrying on from the row it stopped at")
+check.equal(asked, [("album", "Rumours Live")],
+            "and asking only for what it had not reached, not starting over")
+
+# One from before the rows were kept cannot carry on, and says it stopped.
+import_id = imports.start(MATT, media.MUSIC, "album", "old.csv",
+                          "Artist,Album\nMiles Davis,Kind of Blue\n")
+wait_for(MATT, import_id, imports.DONE)
+with store.db() as conn:
+    payload = json.loads(conn.execute(
+        "SELECT payload FROM imports WHERE import_id=?",
+        (import_id,)).fetchone()["payload"])
+    payload.pop("items")
+    conn.execute("UPDATE imports SET state='reading', touched_at=?, payload=? "
                  "WHERE import_id=?",
-                 (time.time() - 10_000, import_id))
+                 (time.time() - 10_000, json.dumps(payload), import_id))
 stopped = imports.get(MATT, import_id)
 check.equal(stopped["state"], imports.FAILED,
-            "a pass whose row count has not moved for far longer than it "
-            "should is reported as stopped, not as still working")
-check.that("restarted" in stopped["error"],
-           "with a reason to read")
+            "a list that cannot carry on is reported as stopped, not as "
+            "still working")
+check.that("restarted" in stopped["error"], "with a reason to read")
 check.that("restarted" in imports.get(MATT, import_id)["error"],
            "and the reason survives a reload, having been written down rather "
            "than made up on the way out of one call")
