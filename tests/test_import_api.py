@@ -14,6 +14,7 @@ harness.setup(
     BUSKARR_URL="http://buskarr.invalid", BUSKARR_API_KEY="k",
     MUSIC_DAILY_CAP="3", MUSIC_ALBUM_COST="1", MUSIC_ARTIST_COST="3",
     MUSIC_TRACK_COST="1", IMPORT_PAUSE_SECONDS="0", IMPORT_MAX_ROWS="6",
+    IMPORT_MAX_ROWS_MUSIC="6",
 )
 
 from fastapi import FastAPI  # noqa: E402
@@ -51,7 +52,7 @@ buskarr.search = lambda q, unit, limit: [
 ] if unit == "album" else []
 
 asked: list[str] = []
-buskarr.add = lambda unit, hit, by: (
+buskarr.add = lambda unit, hit, by, bulk=False: (
     asked.append(hit.get("title", ""))
     or arr.AddResult(True, "Sent to buskarr.", "job:1", hit.get("title", "")))
 

@@ -10,10 +10,10 @@ harness.setup(
     BUSKARR_URL="http://buskarr.invalid", BUSKARR_API_KEY="k",
     MUSIC_DAILY_CAP="3", MUSIC_ARTIST_COST="3", MUSIC_ALBUM_COST="1",
     MUSIC_TRACK_COST="1", MOVIE_DAILY_CAP="2",
-    IMPORT_PAUSE_SECONDS="0", IMPORT_MAX_ROWS="6",
+    IMPORT_PAUSE_SECONDS="0", IMPORT_MAX_ROWS="6", IMPORT_MAX_ROWS_MUSIC="8",
 )
 
-from app import (arr, buskarr, imports, jellyfin, media, radarr,  # noqa: E402
+from app import (arr, buskarr, config, imports, jellyfin, media, radarr,  # noqa: E402
                  store, wants)
 
 check = harness.Check("imports")
@@ -86,8 +86,13 @@ buskarr.search = fake_search
 asked: list[tuple[str, str]] = []
 
 
-def fake_add(unit: str, hit: dict, by: str) -> arr.AddResult:
+#: Whether each add above was marked bulk, in step with `asked`.
+bulk_marks: list[bool] = []
+
+
+def fake_add(unit: str, hit: dict, by: str, bulk: bool = False) -> arr.AddResult:
     asked.append((unit, hit.get("title", "")))
+    bulk_marks.append(bulk)
     return arr.AddResult(True, "Sent to buskarr.", "job:1", hit.get("title", ""))
 
 
@@ -445,20 +450,31 @@ SHORT = ("Artist,Album\n"
          "Fleetwood Mac,Rumours\n"
          "Joni Mitchell,Blue\n")
 
+# Music from a list has an allowance of its own, counted in songs, so that a
+# list does not spend the three a day somebody has for searching and is not
+# refused past it either: what does not fit waits for a later day.
+config.IMPORT_MUSIC_DAILY_SONGS = 3 * config.IMPORT_ALBUM_SONGS
+
 import_id = imports.start(KID, media.MUSIC, "album", "theirs.csv", SHORT)
 batch = wait_for(KID, import_id, imports.READY)
 lines = {row["line"] for row in imports.groups(batch)[imports.MATCHED]}
 check.equal(len(lines), 3, "three of the capped account's rows matched")
 check.equal(imports.affordable(KID, batch, lines), 3,
-            "and today's allowance of three covers all three")
+            "and today's import allowance of three albums covers all three")
 
 asked.clear()
+bulk_marks.clear()
 imports.confirm(KID, import_id, lines)
 batch = wait_for(KID, import_id, imports.DONE)
 check.equal(len(batch["report"]["asked"]), 3,
             "so all three are asked for")
-check.equal(wants.allowance(KID, media.MUSIC), 0,
-            "and the day's allowance is spent exactly, not overspent")
+check.equal(bulk_marks, [True, True, True],
+            "each marked bulk, so buskarr works them after this person's "
+            "own searches")
+check.equal(wants.import_allowance(KID, media.MUSIC), 0,
+            "and the day's import allowance is spent exactly, not overspent")
+check.equal(wants.allowance(KID, media.MUSIC), 3,
+            "while the three a day for searching are untouched")
 
 import_id = imports.start(KID, media.MUSIC, "album",
                           "theirs-again.csv",
@@ -466,16 +482,55 @@ import_id = imports.start(KID, media.MUSIC, "album",
 batch = wait_for(KID, import_id, imports.READY)
 lines = {row["line"] for row in imports.groups(batch)[imports.MATCHED]}
 check.equal(imports.affordable(KID, batch, lines), 0,
-            "with the allowance gone, the page says up front that it covers "
-            "none of them")
+            "with the import allowance gone, the page says up front that "
+            "today covers none of them")
 asked.clear()
 imports.confirm(KID, import_id, lines)
 batch = wait_for(KID, import_id, imports.DONE)
 check.equal(asked, [], "and confirming asks the acquisition tool for nothing")
-check.equal(len(batch["report"]["refused"]), 1,
-            "the refusal is reported rather than swallowed")
-check.that("Café Bleu" in batch["report"]["refused"][0],
-           "naming which row it was, so it can be imported again tomorrow")
+check.equal(batch["report"]["refused"], [], "nor refuses it")
+check.equal(batch["report"]["waiting"], ["Café Bleu by The Style Council"],
+            "it waits, and the report names it")
+check.equal(imports.queue_status(KID)["waiting"], 1,
+            "in this account's queue")
+
+check.equal(imports._release_for(KID), 0,
+            "the queue asks for nothing while the allowance is still spent")
+check.equal(store.queued_count(KID.key), 1, "and keeps the row")
+
+# A day later the allowance has come back, and the queue asks by itself.
+with store.db() as conn:
+    conn.execute("UPDATE requests SET requested_at = requested_at - 90000 "
+                 "WHERE user_key=?", (KID.key,))
+asked.clear()
+bulk_marks.clear()
+check.equal(imports._release_for(KID), 1, "the next day the row goes in")
+check.equal((asked, bulk_marks), ([("album", "Café Bleu")], [True]),
+            "asked for, in bulk, as the import would have")
+check.equal(imports.queue_status(KID), None, "and the queue is empty")
+
+# A second list never jumps a first: while anything waits, a new list waits
+# behind it even if the allowance has room.
+store.queue_rows(KID.key, media.MUSIC, "earlier", [(2, "Earlier", {
+    "itemKey": "bk:album:deezer:zz", "unit": "album", "title": "Earlier"})])
+import_id = imports.start(KID, media.MUSIC, "album", "third.csv",
+                          "Artist,Album\nFleetwood Mac,Rumours Live\n")
+batch = wait_for(KID, import_id, imports.READY)
+lines = {row["line"] for row in batch["rows"]
+         if row["state"] in (imports.MATCHED, imports.UNCERTAIN)}
+asked.clear()
+imports.confirm(KID, import_id, lines)
+batch = wait_for(KID, import_id, imports.DONE)
+check.equal(asked, [], "a list confirmed behind waiting rows asks for nothing yet")
+check.equal([row["label"] for row in store.queued(KID.key)][0], "Earlier",
+            "and queues behind them, in order")
+waiting = store.queued_count(KID.key)
+check.equal(waiting, 1 + len(batch["report"]["waiting"]),
+            "the new list's rows all wait, behind the one already there")
+check.equal(imports.clear_queue(KID), waiting,
+            "stopping the queue drops every waiting row")
+check.equal(store.queued_count(KID.key), 0, "so nothing is left to ask for")
+config.IMPORT_MUSIC_DAILY_SONGS = 200
 
 # A line that was never on offer -- held back, or matched to nothing -- cannot
 # be smuggled in by posting its number.
@@ -519,11 +574,13 @@ check.that("restarted" in imports.get(MATT, import_id)["error"],
 # --------------------------------------------------------------------------
 
 long_list = "Artist,Album\n" + "".join(
-    f"Artist {n},Album {n}\n" for n in range(7))
+    f"Artist {n},Album {n}\n" for n in range(9))
 check.raises(
     imports.Unreadable,
     lambda: imports.start(MATT, media.MUSIC, "album", "long.csv", long_list),
     "a file longer than the row limit is refused before anything is searched")
+check.equal((imports.max_rows(media.MUSIC), imports.max_rows(media.MOVIE)),
+            (8, 6), "music, where the long lists are, has a limit of its own")
 check.raises(
     imports.Unreadable,
     lambda: imports.start(MATT, media.MUSIC, "album", "big.csv",

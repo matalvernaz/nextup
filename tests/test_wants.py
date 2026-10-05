@@ -66,7 +66,7 @@ sonarr.add = lambda tvdb, title="", monitored=True, choice=None: (
 #: allowance tests and one case further down is about the body it builds.
 REAL_BUSKARR_ADD = buskarr.add
 
-buskarr.add = lambda unit, hit, by: (
+buskarr.add = lambda unit, hit, by, bulk=False: (
     added.append(("music", unit)) or arr.AddResult(True, "Sent to buskarr.", "job:7",
                                                    hit.get("title", "")))
 buskarr.state = lambda ref: None
@@ -299,7 +299,10 @@ for n in range(3):
     store.record(MATT.key, media.MUSIC, f"probe-{n}", "album", f"Album {n}",
                  "", 1, f"backend-{n}")
 
+# A buskarr from before the batch endpoint answers `states` with None, and the
+# rows are then asked about one at a time.
 probes = []
+buskarr.states = lambda backend_ids: None
 buskarr.state = lambda backend_id: probes.append(backend_id) or None
 rows = {row["itemKey"]: row for row in wants.states(MATT)}
 check.equal(len(probes), 3,
@@ -314,6 +317,24 @@ rows = {row["itemKey"]: row for row in wants.states(MATT)}
 check.equal(len(probes), 3, "one probe per row when buskarr is healthy too")
 check.that(all(rows[f"probe-{n}"]["state"] == "in_library" for n in range(3)),
            "and a positive answer arrives them")
+
+# A buskarr with the batch endpoint is asked once for every waiting row. An
+# imported list of thousands made the request list a round trip per song.
+for n in range(3, 6):
+    store.record(MATT.key, media.MUSIC, f"probe-{n}", "album", f"Album {n}",
+                 "", 1, f"backend-{n}")
+probes.clear()
+batches = []
+buskarr.states = lambda backend_ids: batches.append(list(backend_ids)) or {
+    "backend-3": {"state": "have"}}
+rows = {row["itemKey"]: row for row in wants.states(MATT)}
+check.equal((len(batches), sorted(batches[0]) if batches else None, probes),
+            (1, ["backend-3", "backend-4", "backend-5"], []),
+            "the waiting rows are asked about in one call, and none one at a time")
+check.equal([rows[f"probe-{n}"]["state"] == "in_library" for n in range(3, 6)],
+            [True, False, False],
+            "a row the answer says is here arrives, and one it leaves out is "
+            "unknown and keeps waiting")
 
 # --- a track request carries what the search already knew --------------------
 #

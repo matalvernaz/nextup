@@ -40,6 +40,59 @@ class Denied(Exception):
     """The request was refused before anything was acquired."""
 
 
+class TryLater(Denied):
+    """Refused because the acquisition tool could not be reached, not on merit.
+
+    The same refusal to somebody tapping a button, who can tap again. Code
+    asking on nobody's behalf, like the import queue, keeps the request and
+    tries again later instead of treating it as a final answer.
+    """
+
+
+class ImportLimitReached(Denied):
+    """An imported row that does not fit in today's import allowance.
+
+    Not a refusal in the ordinary sense: the importer puts the row in the
+    queue, and it is asked for on a later day by itself.
+    """
+
+
+#: The allowance imported music is charged to, apart from the ordinary one.
+IMPORT = store.IMPORT_POOL
+
+
+def import_cost(unit: str) -> int:
+    """What one imported music row counts as against the import allowance.
+
+    In songs, because that is what the allowance is a number of. Never more
+    than a whole day's worth, or a row that costs more than the allowance
+    would wait for ever.
+    """
+    cost = {"album": config.IMPORT_ALBUM_SONGS,
+            "artist": config.IMPORT_ARTIST_SONGS}.get(unit, 1)
+    return max(1, min(cost, config.IMPORT_MUSIC_DAILY_SONGS))
+
+
+def import_allowance(user: jellyfin.User, medium: str) -> int | None:
+    """Songs this account's imported lists may still hand over today.
+
+    None where there is no import allowance: an administrator, or a medium
+    other than music, whose imports spend the ordinary allowance.
+    """
+    if user.is_admin or medium != media.MUSIC:
+        return None
+    spent = store.spent_today(user.key, medium, time.time() - DAY_SECONDS,
+                              IMPORT)
+    return max(0, config.IMPORT_MUSIC_DAILY_SONGS - spent)
+
+
+def import_frees_at(user: jellyfin.User, medium: str) -> float | None:
+    """When the import allowance next gets something back, or None if now."""
+    oldest = store.oldest_charge(user.key, medium, time.time() - DAY_SECONDS,
+                                 IMPORT)
+    return None if oldest is None else oldest + DAY_SECONDS
+
+
 def daily_cap(user: jellyfin.User, medium: str) -> int | None:
     """What this account is allowed in a day on one medium, None if uncapped.
 
@@ -119,8 +172,14 @@ def search(query: str, medium: str, unit: str = "",
 def want(user: jellyfin.User, medium: str, item_key: str, unit: str = "",
          hit: dict | None = None, choice: seasons.Seasons | None = None,
          remember: bool = False,
-         episodes_choice: episode_choice.Episodes | None = None) -> tuple[str, str]:
+         episodes_choice: episode_choice.Episodes | None = None,
+         imported: bool = False) -> tuple[str, str]:
     """Ask for one thing. Returns (state, message). Raises Denied if refused.
+
+    `imported` is a row of an imported list. Music charges those to the import
+    allowance instead of the ordinary one, raises ImportLimitReached rather
+    than a plain refusal when it is spent, and tells buskarr they came in
+    bulk. Every other medium treats an imported row like any other ask.
 
     `choice` is which seasons of a series to ask for this once, and `remember`
     keeps it as this account's usual choice as well. `episodes_choice` is the
@@ -191,7 +250,7 @@ def want(user: jellyfin.User, medium: str, item_key: str, unit: str = "",
     with store.key_lock(user.key, medium):
         with store.key_lock("item", medium, item_key):
             return _admit(user, found, medium, item_key, unit, hit or {},
-                          choice)
+                          choice, imported)
 
 
 def usual_seasons(user: jellyfin.User) -> seasons.Seasons | None:
@@ -216,7 +275,8 @@ def usual_episodes(user: jellyfin.User) -> episode_choice.Episodes | None:
 
 def _admit(user: jellyfin.User, found: media.Medium, medium: str,
            item_key: str, unit: str, hit: dict,
-           choice: seasons.Seasons | None = None) -> tuple[str, str]:
+           choice: seasons.Seasons | None = None,
+           imported: bool = False) -> tuple[str, str]:
     """The guarded half of `want`. Never called without its lock held."""
     if (existing := store.get(user.key, medium, item_key)) is not None:
         if existing["fulfilled_at"] is None or _still_held(existing, medium):
@@ -247,23 +307,35 @@ def _admit(user: jellyfin.User, found: media.Medium, medium: str,
         if podcasts.match_hit(candidates, {**hit, "itemKey": item_key}) is not None:
             return IN_LIBRARY, "Already in the library."
 
-    price = media.cost(medium, unit)
-    remaining = allowance(user, medium)
-    if remaining is not None and remaining < price:
-        cap = daily_cap(user, medium)
-        log.warning("want denied user=%s medium=%s key=%s reason=daily-cap "
-                    "cost=%d remaining=%d cap=%d", user.key, medium, item_key,
-                    price, remaining, cap)
-        raise Denied(_cap_message(found, unit, price, remaining, cap))
+    pool = IMPORT if imported and medium == media.MUSIC else ""
+    if pool:
+        price = import_cost(unit)
+        remaining = import_allowance(user, medium)
+        if remaining is not None and remaining < price:
+            log.info("want waits user=%s medium=%s key=%s reason=import-limit "
+                     "cost=%d remaining=%d", user.key, medium, item_key,
+                     price, remaining)
+            raise ImportLimitReached(
+                "Today's import limit is used up, so this waits for tomorrow.")
+    else:
+        price = media.cost(medium, unit)
+        remaining = allowance(user, medium)
+        if remaining is not None and remaining < price:
+            cap = daily_cap(user, medium)
+            log.warning("want denied user=%s medium=%s key=%s reason=daily-cap "
+                        "cost=%d remaining=%d cap=%d", user.key, medium,
+                        item_key, price, remaining, cap)
+            raise Denied(_cap_message(found, unit, price, remaining, cap))
 
-    log.info("want user=%s medium=%s unit=%s key=%s cost=%d remaining=%s",
+    log.info("want user=%s medium=%s unit=%s key=%s cost=%d remaining=%s%s",
              user.key, medium, unit, item_key, price,
-             "uncapped" if remaining is None else remaining)
-    result = _add(medium, unit, item_key, hit, user, choice)
+             "uncapped" if remaining is None else remaining,
+             " pool=import" if pool else "")
+    result = _add(medium, unit, item_key, hit, user, choice, bulk=bool(pool))
     if not result.ok:
         log.warning("want refused user=%s key=%s reason=%s",
                     user.key, item_key, result.message)
-        raise Denied(result.message)
+        raise (TryLater if result.transient else Denied)(result.message)
 
     backend_id = result.backend_id
     if not result.created:
@@ -285,7 +357,8 @@ def _admit(user: jellyfin.User, found: media.Medium, medium: str,
                    or artwork.https_url(hit.get("imageUrl")) or ""),
         overview=(result.overview or str(hit.get("overview") or "")).strip(),
         episodes=(choice.encode()
-                  if medium == media.PODCAST and choice is not None else ""))
+                  if medium == media.PODCAST and choice is not None else ""),
+        allowance=pool)
     log.info("want accepted user=%s key=%s backend_id=%s message=%r",
              user.key, item_key, result.backend_id, result.message)
     return ON_ITS_WAY, result.message
@@ -323,7 +396,8 @@ def _still_held(row, medium: str) -> bool:
 
 
 def _add(medium: str, unit: str, item_key: str, hit: dict,
-         user: jellyfin.User, choice: seasons.Seasons | None = None):
+         user: jellyfin.User, choice: seasons.Seasons | None = None,
+         bulk: bool = False):
     """Hand one thing to whichever tool acquires that medium."""
     if medium == media.MOVIE:
         return radarr.add(_provider_id(item_key), hit.get("title", ""),
@@ -338,7 +412,7 @@ def _add(medium: str, unit: str, item_key: str, hit: dict,
                             choice)
     # The name, not the ledger key: buskarr renders `requested_by` in its own
     # queue table for a person to read, and an account id says nothing there.
-    return buskarr.add(unit, hit, user.name)
+    return buskarr.add(unit, hit, user.name, bulk=bulk)
 
 
 def _provider_id(item_key: str) -> str:
@@ -404,17 +478,24 @@ def states(user: jellyfin.User, medium: str | None = None) -> list[dict]:
         row["item_key"]: progress_by_backend.get(str(row["backend_id"]))
         for row in series_rows
     }
+    # Every waiting music row asked about in one call. One round trip per row
+    # was fine for ten and is minutes for an imported list of thousands. None
+    # is a buskarr from before it could answer that way.
+    music_waiting = [row["backend_id"] for row in rows
+                     if row["medium"] == media.MUSIC and row["fulfilled_at"] is None]
+    music_states = buskarr.states(music_waiting) if music_waiting else {}
     newly_arrived: dict[str, set[str]] = {}
     out = []
     for row in rows:
-        # Asked for once and passed to both callers. Each music row costs a
-        # round trip to buskarr, and deriving the state and describing it are
-        # two questions about the same answer. A podcast row asks podfetch the
-        # same way, and that ask is also what tells Jellyfin to look.
+        # Asked for once and passed to both callers. Deriving the state and
+        # describing it are two questions about the same answer. A podcast row
+        # asks podfetch, and that ask is also what tells Jellyfin to look.
         reported = None
         if row["fulfilled_at"] is None:
             if row["medium"] == media.MUSIC:
-                reported = buskarr.state(row["backend_id"])
+                reported = (buskarr.state(row["backend_id"])
+                            if music_states is None
+                            else music_states.get(row["backend_id"]))
             elif row["medium"] == media.PODCAST:
                 reported = podcasts.progress(row)
         state = _state(

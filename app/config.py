@@ -375,10 +375,32 @@ MUSIC_TRACK_COST = _int("MUSIC_TRACK_COST", 1)
 # long list is a minute's work and is asked for rather than guessed at.
 IMPORT_MAX_ROWS = _int("IMPORT_MAX_ROWS", 500)
 
-# And the most bytes, read before the file is parsed. A CSV of the row limit
-# above is tens of kilobytes; anything near this is not the kind of file this
-# is for, and finding that out by decoding it is the expensive way.
-IMPORT_MAX_BYTES = _int("IMPORT_MAX_BYTES", 2_000_000)
+# The same for a list of music, which is where the long lists are: a whole
+# library exported from a streaming service runs to thousands of songs. The
+# import queue below is what makes one that size worth taking.
+IMPORT_MAX_ROWS_MUSIC = _int("IMPORT_MAX_ROWS_MUSIC", 5000)
+
+# And the most bytes, read before the file is parsed. Five thousand rows of a
+# streaming service's export, the longest list this takes, is two or three
+# megabytes. EchoFin refuses a file over 5 MiB before sending it, and this
+# matches it so the two never disagree about the same file.
+IMPORT_MAX_BYTES = _int("IMPORT_MAX_BYTES", 5 * 1024 * 1024)
+
+# Songs a day that one account's imported music may hand to buskarr, apart from
+# MUSIC_DAILY_CAP for asking one at a time. Past it, the rest of a list waits
+# in the import queue and goes in on later days by itself. buskarr takes turns
+# between people, so this sets how fast one list arrives, not whether anybody
+# else has to wait for it. Administrators are not limited.
+IMPORT_MUSIC_DAILY_SONGS = _int("IMPORT_MUSIC_DAILY_SONGS", 200)
+
+# What an album and a whole artist count as against that, in songs. Measured
+# in buskarr on 2026-10-05: album adds came to 15 and 16 songs, artist adds to
+# a median of 99 (mean 194, the largest 922).
+IMPORT_ALBUM_SONGS = _int("IMPORT_ALBUM_SONGS", 12)
+IMPORT_ARTIST_SONGS = _int("IMPORT_ARTIST_SONGS", 100)
+
+# How often the import queue is checked for songs that can go in now.
+IMPORT_QUEUE_SECONDS = _int("IMPORT_QUEUE_SECONDS", 600)
 
 # Between one row's catalogue search and the next. These land on third-party
 # catalogues -- Deezer, MusicBrainz, iTunes, Audible -- and the way to find

@@ -148,6 +148,13 @@ asked for yet.</p>
   {% endfor %}
 </p>
 {% endif %}
+{% if import_queue %}
+<p>{{ "{:,}".format(import_queue.waiting) }} music
+request{{ '' if import_queue.waiting == 1 else 's' }} from your imported lists
+{{ 'is' if import_queue.waiting == 1 else 'are' }} waiting, and will be asked
+for by themselves at {{ import_queue.perDay }} songs a day.
+<a href="/import">See or stop them</a>.</p>
+{% endif %}
 
 {% if not requests %}
 <p>Nothing outstanding.</p>
