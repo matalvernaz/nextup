@@ -197,6 +197,7 @@ CREATE TABLE IF NOT EXISTS playlist_pending (
     title       TEXT NOT NULL,
     artist      TEXT NOT NULL,
     album       TEXT NOT NULL DEFAULT '',
+    item_id     TEXT NOT NULL DEFAULT '',
     created_at  REAL NOT NULL
 );
 
@@ -1477,13 +1478,14 @@ def playlist_line_count(import_id: str) -> int:
 
 
 def add_pending(user_key: str, playlist_id: str, import_id: str, line: int,
-                title: str, artist: str, album: str = "") -> None:
+                title: str, artist: str, album: str = "",
+                item_id: str = "") -> None:
     with db() as conn:
         conn.execute(
             "INSERT INTO playlist_pending (user_key, playlist_id, import_id, line, "
-            "title, artist, album, created_at) VALUES (?,?,?,?,?,?,?,?)",
+            "title, artist, album, item_id, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
             (user_key, playlist_id, import_id, line, title, artist, album,
-             time.time()))
+             item_id, time.time()))
 
 
 def pending_all() -> list[sqlite3.Row]:

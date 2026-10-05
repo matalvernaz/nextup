@@ -808,18 +808,36 @@ def audio_items() -> list[dict]:
         raise JellyfinUnavailable(str(exc)) from exc
 
 
+def audio_count() -> int:
+    """How many songs the library holds. One cheap call."""
+    try:
+        with _client() as c:
+            return int(c.get("/Items", params={
+                "includeItemTypes": "Audio", "recursive": "true", "limit": 0,
+            }).raise_for_status().json().get("TotalRecordCount", 0))
+    except (httpx.HTTPError, ValueError) as exc:
+        raise JellyfinUnavailable(str(exc)) from exc
+
+
 def visible_playlists(uid: str) -> list[dict]:
     """The playlists this account can see: its own, shared ones, and open ones.
 
     Jellyfin does not say which are its own when asked with this service's
-    key, so a caller must not take a name match here as ownership.
+    key, so a caller must not take a name match here as ownership. Followed
+    page by page: a playlist past the first page is one a name check missed.
     """
+    found: list[dict] = []
     try:
         with _client() as c:
-            return c.get("/Items", params={
-                "includeItemTypes": "Playlist", "recursive": "true",
-                "userId": uid, "limit": 1000,
-            }).raise_for_status().json().get("Items") or []
+            while True:
+                page = c.get("/Items", params={
+                    "includeItemTypes": "Playlist", "recursive": "true",
+                    "userId": uid, "startIndex": len(found), "limit": 500,
+                }).raise_for_status().json()
+                items = page.get("Items") or []
+                found.extend(items)
+                if not items or len(found) >= page.get("TotalRecordCount", 0):
+                    return found
     except (httpx.HTTPError, ValueError) as exc:
         raise JellyfinUnavailable(str(exc)) from exc
 

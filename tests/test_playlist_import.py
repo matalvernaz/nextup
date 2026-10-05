@@ -76,7 +76,16 @@ def add_to_playlist(uid, pid, ids, position=None):
     items[at:at] = ids
 
 
-jellyfin.audio_items = lambda: list(LIBRARY)
+library_reads = [0]
+
+
+def audio_items():
+    library_reads[0] += 1
+    return list(LIBRARY)
+
+
+jellyfin.audio_items = audio_items
+jellyfin.audio_count = lambda: len(LIBRARY)
 jellyfin.create_playlist = create_playlist
 jellyfin.visible_playlists = visible_playlists
 jellyfin.playlist_items = playlist_items
@@ -86,7 +95,7 @@ jellyfin.add_to_playlist = add_to_playlist
 SONGS = {"Bill Withers": ["Lovely Day", "Ain't No Sunshine"],
          "Fleetwood Mac": ["Dreams", "Go Your Own Way"],
          "The Longest Johns": ["Wellerman"],
-         "Kate Bush": ["Running Up That Hill"]}
+         "Kate Bush": ["Running Up That Hill", "Wuthering Heights"]}
 
 
 def fake_search(q, unit, limit, sources=()):
@@ -155,7 +164,7 @@ check.equal((PLAYLISTS[pid]["name"], PLAYLISTS[pid]["owner"]),
 check.equal(PLAYLISTS[pid]["items"], ["lib-lovely", "lib-dreams"],
             "with the songs the library holds, in the order of the file")
 summary = playlists.summary(import_id, batch["playlist"])
-check.equal((summary["added"], summary["pending"]), (2, 2),
+check.equal((summary["inPlaylist"], summary["pending"]), (2, 2),
             "and the two being asked for are waited for")
 
 # One of them turns up in the library: it goes in at its place, which is
@@ -240,8 +249,10 @@ while time.monotonic() < deadline:
     if body["state"] == "done":
         break
     time.sleep(0.02)
-check.equal(body["playlist"], {"name": "Via API", "added": 1, "pending": 0},
+check.equal({k: body["playlist"][k] for k in ("name", "inPlaylist", "pending")},
+            {"name": "Via API", "inPlaylist": 1, "pending": 0},
             "the API takes a playlist name and says how it is filling")
+check.that(body["playlist"]["id"] in PLAYLISTS, "with the playlist's id, to open it")
 
 web = TestClient(main.app, raise_server_exceptions=False, follow_redirects=False)
 web.cookies.set(sessions.COOKIE_NAME, sessions.issue("kid-token", KID.id))
@@ -251,6 +262,112 @@ check.that('name="playlist"' in form and 'aria-describedby="playlist-help"' in f
 page = " ".join(web.get(f"/import/{started['importId']}").text.split())
 check.that("Playlist “Via API”: 1 song from this list in it." in page,
            "and the list's page says how the playlist is filling")
+
+# --- what the review round found ---------------------------------------------
+from app import songs  # noqa: E402
+
+check.that(songs.song_key("Song (Live, 2011 Remaster)") != songs.song_key("Song"),
+           "a remaster tag beside a version word does not take the version with it")
+check.equal(songs.song_key("Song - Remastered 2009"), songs.song_key("Song"),
+            "while a remaster alone is the same recording")
+index = songs.LibraryIndex([
+    {"Id": "bs", "Name": "Home", "Artists": ["Belle and Sebastian"],
+     "AlbumArtist": "Belle and Sebastian"},
+    {"Id": "sg", "Name": "The Boxer", "Artists": ["Simon & Garfunkel"],
+     "AlbumArtist": "Simon & Garfunkel"},
+    {"Id": "ru", "Name": "Любовь", "Artists": ["Кино"], "AlbumArtist": "Кино"}])
+check.equal(index.find("Home", "Sebastian"), None,
+            "a band's name is not cut at 'and' to match another artist")
+check.equal(index.find("The Boxer", "Simon"), None, "nor at '&'")
+check.equal(index.find("The Boxer", "Simon and Garfunkel"), "sg",
+            "while '&' and 'and' are the same join")
+check.equal(index.find("Любовь", "Кино"), "ru",
+            "and a song titled in another script is found")
+
+# A song already in the playlist in the middle of a batch keeps the order.
+PLAYLISTS["pl-anchor"] = {"name": "Anchor", "owner": KID.id, "items": ["B"],
+                          "open": False}
+playlists.add_found(KID, "pl-anchor", "anchor-list", [(2, "A"), (3, "B"), (4, "C")])
+check.equal(PLAYLISTS["pl-anchor"]["items"], ["A", "B", "C"],
+            "songs either side of one already in the playlist go either side of it")
+
+# Where somebody has a song in twice, the new one goes beside the list's copy.
+check.equal(playlists._position(["A", "X", "A", "C"], {2: "A", 4: "C"}, 3), 3,
+            "after the last copy of the earlier song, before the later one")
+
+# Two writers at once add a song once.
+import threading  # noqa: E402
+PLAYLISTS["pl-race"] = {"name": "Race", "owner": KID.id, "items": [], "open": False}
+slow_items = jellyfin.playlist_items
+
+
+def slow_playlist_items(uid, pid):
+    found = slow_items(uid, pid)
+    time.sleep(0.05)
+    return found
+
+
+jellyfin.playlist_items = slow_playlist_items
+writers = [threading.Thread(target=playlists.add_found,
+                            args=(KID, "pl-race", f"race-{n}", [(2, "S")]))
+           for n in range(2)]
+for writer in writers:
+    writer.start()
+for writer in writers:
+    writer.join()
+jellyfin.playlist_items = slow_items
+check.equal(PLAYLISTS["pl-race"]["items"], ["S"], "two writers at once add a song once")
+
+# A library song that could not be put in just then goes in later as that
+# very item, not whatever a second search picks.
+LIBRARY.append({"Id": "lib-dreams-live", "Name": "Dreams", "Artists": ["Fleetwood Mac"],
+                "AlbumArtist": "Fleetwood Mac", "Album": "Live"})
+PLAYLISTS["pl-flaky"] = {"name": "Flaky", "owner": KID.id, "items": [], "open": False}
+real_add = jellyfin.add_to_playlist
+
+
+def refusing_add(uid, pid, ids, position=None):
+    raise jellyfin.JellyfinUnavailable("down")
+
+
+jellyfin.add_to_playlist = refusing_add
+imports._add_found(KID, {"id": "pl-flaky", "name": "Flaky"}, "flaky-list",
+                   [(2, "lib-dreams-live")])
+jellyfin.add_to_playlist = real_add
+playlists.resolve_pending()
+check.equal(PLAYLISTS["pl-flaky"]["items"], ["lib-dreams-live"],
+            "it goes in as the item first found, not the first copy a search "
+            "for its title turns up")
+
+# The library is read again only when its count of songs changes.
+songs.LibraryIndex.load()
+reads = library_reads[0]
+songs.LibraryIndex.load()
+songs.LibraryIndex.load()
+check.equal(library_reads[0] - reads, 0, "an unchanged library is not read again")
+LIBRARY.append({"Id": "lib-new", "Name": "New", "Artists": ["Someone"],
+                "AlbumArtist": "Someone", "Album": "New"})
+songs.LibraryIndex.load()
+check.equal(library_reads[0] - reads, 1, "a library with a new song is")
+
+# A list that fails part way still puts in the library songs it had found.
+real_ask = imports._ask_one
+
+
+def failing_ask(import_id, user, medium, row):
+    raise RuntimeError("something broke")
+
+
+imports._ask_one = failing_ask
+import_id = imports.start(KID, media.MUSIC, "track", "breaks.csv",
+                          "Artist Name(s),Track Name\n"
+                          "Bill Withers,Lovely Day\n"
+                          "Kate Bush,Wuthering Heights\n",
+                          playlist="Breaks")
+batch = until(KID, import_id, imports.FAILED)
+imports._ask_one = real_ask
+check.equal(PLAYLISTS[batch["playlist"]["id"]]["items"], ["lib-lovely"],
+            "a list that stopped on an error still put in what it had found")
 
 harness.cleanup()
 raise SystemExit(check.report())

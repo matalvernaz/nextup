@@ -63,23 +63,51 @@ def resolve(user: jellyfin.User, name: str) -> str:
     return playlist_id
 
 
+def lock(playlist_id: str):
+    """Held across reading a playlist, adding to it and writing down where.
+
+    An import and the pass that puts in songs that turned up can both be
+    adding to one playlist; without it each could read the song as missing
+    and add it.
+    """
+    return store.key_lock("playlist", playlist_id)
+
+
 def _position(current: list[str], placed: dict[int, str], line: int) -> int | None:
     """Where a song from `line` of the list goes in the playlist as it stands.
 
     Just after the latest earlier line of the same list that is in it, else
     just before the earliest later one, else at the end. Songs somebody put in
-    the playlist themselves are left where they are.
+    the playlist themselves are left where they are. Where somebody has a song
+    in it twice, the copy that keeps the new song between its neighbours is
+    the one used: after the last copy of an earlier one, before the first copy
+    of a later one.
     """
-    index_of: dict[str, int] = {}
+    indices: dict[str, list[int]] = {}
     for index, item in enumerate(current):
-        index_of.setdefault(item, index)
-    earlier = [index_of[item] for at, item in placed.items()
-               if at < line and item in index_of]
+        indices.setdefault(item, []).append(index)
+    earlier = [max(indices[item]) for at, item in placed.items()
+               if at < line and item in indices]
     if earlier:
         return max(earlier) + 1
-    later = [index_of[item] for at, item in placed.items()
-             if at > line and item in index_of]
+    later = [min(indices[item]) for at, item in placed.items()
+             if at > line and item in indices]
     return min(later) if later else None
+
+
+def _insert(user: jellyfin.User, playlist_id: str, import_id: str,
+            current: list[str], placed: dict[int, str],
+            run: list[tuple[int, str]]) -> None:
+    """Put a run of songs, consecutive in the list, in at their place."""
+    if not run:
+        return
+    position = _position(current, placed, run[0][0])
+    items = [item for _, item in run]
+    jellyfin.add_to_playlist(user.id, playlist_id, items, position)
+    at = len(current) if position is None else position
+    current[at:at] = items
+    placed.update(run)
+    store.add_playlist_lines(playlist_id, import_id, run)
 
 
 def add_found(user: jellyfin.User, playlist_id: str, import_id: str,
@@ -92,35 +120,58 @@ def add_found(user: jellyfin.User, playlist_id: str, import_id: str,
     """
     if not found:
         return 0
-    current = jellyfin.playlist_items(user.id, playlist_id)
-    if current is None:
-        raise Refused("The playlist has been deleted in Jellyfin.")
-    present = set(current)
-    new = []
-    for line, item in found:
-        if item not in present:
-            new.append(item)
-            present.add(item)
-    placed = store.playlist_lines(playlist_id, import_id)
-    jellyfin.add_to_playlist(user.id, playlist_id, new,
-                             _position(current, placed, found[0][0]) if new else None)
-    store.add_playlist_lines(playlist_id, import_id, found)
-    return len(new)
+    with lock(playlist_id):
+        current = jellyfin.playlist_items(user.id, playlist_id)
+        if current is None:
+            raise Refused("The playlist has been deleted in Jellyfin.")
+        placed = store.playlist_lines(playlist_id, import_id)
+        # A song already in the playlist splits the batch: it stays where it
+        # is, and the new songs either side of it go either side of it. Its
+        # line is written down first, so the run before it can be placed in
+        # front of it.
+        present = set(current)
+        anchors = [(line, item) for line, item in found if item in present]
+        placed.update(anchors)
+        store.add_playlist_lines(playlist_id, import_id, anchors)
+        run: list[tuple[int, str]] = []
+        seen: set[str] = set()
+        added = 0
+        for line, item in found:
+            if item in present:
+                _insert(user, playlist_id, import_id, current, placed, run)
+                added += len(run)
+                run = []
+            elif item not in seen:
+                # The same song on two lines of a list goes in once.
+                seen.add(item)
+                run.append((line, item))
+        _insert(user, playlist_id, import_id, current, placed, run)
+        return added + len(run)
 
 
 def wait_for(user: jellyfin.User, playlist_id: str, import_id: str, line: int,
-             title: str, artist: str, album: str = "") -> None:
-    """Remember a song of the list that is not in the library yet."""
+             title: str, artist: str, album: str = "",
+             item_id: str = "") -> None:
+    """Remember a song of the list that is not in the playlist yet.
+
+    `item_id` is for a song already found in the library that could not be
+    put in just then: it goes in as that very item, not whatever a second
+    search would pick.
+    """
     store.add_pending(user.key, playlist_id, import_id, line, title, artist,
-                      album)
+                      album, item_id)
 
 
 def summary(import_id: str, playlist: dict | None) -> dict | None:
-    """What a page or a client says about a list's playlist."""
+    """What a page or a client says about a list's playlist.
+
+    `inPlaylist` counts the list's songs that are in it, including any that
+    were already there; `pending`, the ones still to go in.
+    """
     if not playlist:
         return None
-    return {"name": playlist.get("name") or "",
-            "added": store.playlist_line_count(import_id),
+    return {"id": playlist.get("id") or "", "name": playlist.get("name") or "",
+            "inPlaylist": store.playlist_line_count(import_id),
             "pending": store.pending_count(import_id)}
 
 
@@ -146,26 +197,28 @@ def resolve_pending() -> int:
             store.drop_pending_for(playlist_id)
             continue
         user = jellyfin.user(name)
-        current = jellyfin.playlist_items(user.id, playlist_id)
-        if current is None:
-            dropped = store.drop_pending_for(playlist_id)
-            log.info("playlist %s is gone; %d waiting song(s) dropped",
-                     playlist_id, dropped)
-            continue
-        placed = store.playlist_lines(playlist_id, import_id)
-        for row in rows:
-            item = library.find(row["title"], row["artist"], row["album"])
-            if item is None:
+        with lock(playlist_id):
+            current = jellyfin.playlist_items(user.id, playlist_id)
+            if current is None:
+                dropped = store.drop_pending_for(playlist_id)
+                log.info("playlist %s is gone; %d waiting song(s) dropped",
+                         playlist_id, dropped)
                 continue
-            if item not in current:
-                position = _position(current, placed, row["line"])
-                jellyfin.add_to_playlist(user.id, playlist_id, [item], position)
-                current.insert(len(current) if position is None else position,
-                               item)
-                added += 1
-            store.add_playlist_lines(playlist_id, import_id, [(row["line"], item)])
-            placed[row["line"]] = item
-            store.drop_pending(row["id"])
+            placed = store.playlist_lines(playlist_id, import_id)
+            for row in rows:
+                item = ((row["item_id"] if library.has(row["item_id"]) else None)
+                        or library.find(row["title"], row["artist"], row["album"]))
+                if item is None:
+                    continue
+                if item not in current:
+                    _insert(user, playlist_id, import_id, current, placed,
+                            [(row["line"], item)])
+                    added += 1
+                else:
+                    placed[row["line"]] = item
+                    store.add_playlist_lines(playlist_id, import_id,
+                                             [(row["line"], item)])
+                store.drop_pending(row["id"])
     if added:
         log.info("playlists: %d song(s) that turned up were added", added)
     return added

@@ -66,8 +66,8 @@
 {% endif %}
 
 {% if playlist %}
-<p>Playlist “{{ playlist.name }}”: {{ "{:,}".format(playlist.added) }}
-   song{{ '' if playlist.added == 1 else 's' }} from this list in it
+<p>Playlist “{{ playlist.name }}”: {{ "{:,}".format(playlist.inPlaylist) }}
+   song{{ '' if playlist.inPlaylist == 1 else 's' }} from this list in it
    {%- if playlist.pending %}, and {{ "{:,}".format(playlist.pending) }} more
    will go in when {{ 'it arrives' if playlist.pending == 1 else 'they arrive' }}{% endif %}.</p>
 {% endif %}

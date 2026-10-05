@@ -759,9 +759,14 @@ def _work_through(import_id: str, user: jellyfin.User, medium: str, unit: str,
                 time.sleep(config.IMPORT_PAUSE_SECONDS)
         if playlist:
             _add_found(user, playlist, import_id, found_now)
+            found_now = []
     except Exception as exc:  # noqa: BLE001 - the thread must not die
         # silently, or the page waits for a phase that has stopped.
         log.exception("import %s failed while reading: %s", import_id, exc)
+        if playlist and found_now:
+            # Already marked as in the library, so nothing else would ever
+            # put them in the playlist.
+            _add_found(user, playlist, import_id, found_now)
         _close(import_id, FAILED, {
             "error": "Something went wrong while looking these up. Anything "
                      "asked for before it stopped is listed below."})
@@ -816,10 +821,11 @@ def _add_found(user: jellyfin.User, playlist: dict, import_id: str,
         log.warning("import %s could not add %d song(s) to its playlist: %s",
                     import_id, len(found), exc)
         by_line = {row["line"]: row for row in store.import_rows(import_id)}
-        for line, _ in found:
-            if line in by_line:
-                playlists.wait_for(user, playlist["id"], import_id, line,
-                                   by_line[line]["title"], by_line[line]["artist"])
+        for line, item_id in found:
+            row = by_line.get(line) or {}
+            playlists.wait_for(user, playlist["id"], import_id, line,
+                               row.get("title") or "", row.get("artist") or "",
+                               item_id=item_id)
 
 
 def _wait_for(user: jellyfin.User, playlist: dict, import_id: str, row: dict,
