@@ -13,7 +13,8 @@
    {%- if batch.duplicates %} Skipped {{ batch.duplicates }} duplicate
    row{{ '' if batch.duplicates == 1 else 's' }}.{% endif %}
    {%- if batch.blanks %} Skipped {{ batch.blanks }}
-   row{{ '' if batch.blanks == 1 else 's' }} with no title.{% endif %}</p>
+   row{{ '' if batch.blanks == 1 else 's' }} with no title.{% endif %}
+   {%- if batch.headings %} First line read as column headings: {{ batch.headings | join(', ') }}.{% endif %}</p>
 
 {# ---------------------------------------------------------------- reading #}
 {% if batch.state == 'reading' %}

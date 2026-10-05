@@ -187,6 +187,25 @@ def _sniff(sample: str) -> str:
         return ","
 
 
+def _is_heading_row(cells: tuple[str, ...]) -> bool:
+    """Whether a first line of several cells is column headings, not data.
+
+    Two different headings this recognises settle it. One is enough only when
+    nothing else on the line looks like data: "Title,Rating" is a heading row,
+    but "Movie, 1999" and "Film, Film, Film" are the first entries of a list
+    that has none, and taking them for headings would drop them unseen.
+    """
+    known = [name for name in map(_fold_heading, cells) if name in _HEADING_WORDS]
+    if len(set(known)) > 1:
+        return True
+    if len(known) != 1:
+        return False
+    # A heading is a word. A cell with no letters in it is a year, a rating
+    # or a date, which is what a row of data has and a heading row does not.
+    return not any(cell.strip() and not any(ch.isalpha() for ch in cell)
+                   for cell in cells)
+
+
 def read(data: bytes | str) -> Sheet:
     """A file as columns and rows. Raises `Unreadable` with a sentence to show.
 
@@ -226,11 +245,9 @@ def read(data: bytes | str) -> Sheet:
         raise Unreadable("That file has no rows in it.")
 
     first = parsed[0][1]
-    recognised = sum(_fold_heading(cell) in _HEADING_WORDS for cell in first)
-    if len(first) == 1 or not recognised:
+    if len(first) == 1 or not _is_heading_row(first):
         # A list with no heading row is one title per line, commas and all:
-        # "Crouching Tiger, Hidden Dragon" is one film, not two columns. One
-        # recognised heading is enough to make the first line a heading row.
+        # "Crouching Tiger, Hidden Dragon" is one film, not two columns.
         # A quoted CSV field is decoded only when it encloses the whole line.
         parsed = []
         for line, raw in enumerate(text.splitlines(), start=1):

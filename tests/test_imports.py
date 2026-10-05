@@ -251,6 +251,18 @@ for text, medium, unit, expected in (
     check.equal([(r.title, r.artist, r.year) for r in rows], [expected],
                 f"a file headed {text.splitlines()[0]!r} reads its columns")
 
+# The other side of that: a list with no headings whose first entry happens to
+# contain a heading word must not lose that entry to a heading row nobody sees.
+for text, expected in (
+        ("Movie, 1999\nAlien\n", ["Movie, 1999", "Alien"]),
+        ("Film, 2021\nDune, 2021\n", ["Film, 2021", "Dune, 2021"]),
+        ("Film, Film, Film\nDune\n", ["Film, Film, Film", "Dune"])):
+    sheet = imports.read(text)
+    rows, _, _ = imports.rows(sheet, media.MOVIE, "movie")
+    check.equal(([r.title for r in rows], sheet.headings), (expected, ()),
+                f"a list starting {text.splitlines()[0]!r} keeps that line as "
+                f"a title")
+
 movies = imports.read("Movies\nDune\nAlien\n")
 check.equal(len(movies.rows), 2,
             "a single column headed with a plural loses that line to the "

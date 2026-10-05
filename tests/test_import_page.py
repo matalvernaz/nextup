@@ -109,6 +109,9 @@ check.that("A Record Nobody Pressed" in review.text,
            "and what did not, rather than dropping it")
 check.that("collection.csv" in review.text,
            "under the name of the file it came from")
+check.that("First line read as column headings: Artist, Album." in review.text,
+           "saying which line was taken for headings, so a title lost to a "
+           "wrong guess can be noticed")
 
 # The label is the assertion. A column of forty tick boxes each labelled only
 # with a title is unreadable; what has to be in the one string is what the

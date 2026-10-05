@@ -75,9 +75,11 @@ semicolons or tabs, in UTF-8, UTF-16 or Windows-1252. Exports from Spotify
 (`Track Name`, `Artist Name(s)`) and Letterboxd (`Name`, `Year`) work as they
 are, and so do headings a person would type, such as `Title`, `Film`, `Book`,
 `Show`, `Artist`, `Album` or `Author`. One recognised heading is enough to
-read the first row as headings. A list with no headings is read as one title
-per line, and for music `Artist - Title` is split into the two. A file with
-headings but no title column is refused with the headings that would work.
+read the first row as headings, unless something else on that row looks like
+data, such as a year. The review page says which line it took for headings.
+A list with no headings is read as one title per line, and for music
+`Artist - Title` is split into the two. A file with headings but no title
+column is refused with the headings that would work.
 
 A shelf is never built while you wait. The first film shelf on a large library
 is around twelve seconds of Jellyfin, so the page says it is working on it and
