@@ -8,7 +8,15 @@
 asked for yet.</p>
 {% else %}
 
-<h2>Ask for something</h2>
+{% if import_context %}
+<h2>Choose a replacement</h2>
+<p>{{ import_context.source }}: {{ import_context.label }}.
+   <a href="/import/{{ import_context.id }}">Back to {{ import_context.filename }}</a></p>
+{% if medium == 'music' %}
+<p>This selection uses your import allowance of {{ import_limit.perDay }} songs a day.
+   Requests that do not fit today wait in your import queue.</p>
+{% endif %}
+{% else %}<h2>Ask for something</h2>{% endif %}
 {#
   Named rather than hidden. The medium stays on offer while its acquisition
   tool is down, because taking it away would also take away the list of what
@@ -28,6 +36,12 @@ asked for yet.</p>
 <form method="get" action="/" role="search">
   <fieldset>
     <legend>Search</legend>
+    {% if import_context %}
+    <input type="hidden" name="import_id" value="{{ import_context.id }}">
+    <input type="hidden" name="import_line" value="{{ import_context.line }}">
+    <input type="hidden" name="medium" value="{{ medium }}">
+    <input type="hidden" name="unit" value="{{ unit }}">
+    {% else %}
     <p>
       <label for="medium">What kind of thing</label><br>
       <select id="medium" name="medium">
@@ -49,6 +63,7 @@ asked for yet.</p>
       </p>
       {% endfor %}
     </fieldset>
+    {% endif %}
     {% endif %}
     <p>
       <label for="q">Title</label><br>
@@ -89,14 +104,18 @@ asked for yet.</p>
     <p><a href="/summary?asin={{ r.itemKey | urlencode }}">Read the summary of {{ r.title }}</a></p>
     <p><a href="/sample?asin={{ r.itemKey | urlencode }}">Hear a sample of {{ r.title }}</a></p>
     {% endif %}
-    {% if r.owned %}
+    {% if r.owned and not import_context %}
     <p class="owned">Already in the library.</p>
     {# Asking again is free and harmless, but a button offering it says the
        library has not been asked, which is not true. #}
-    {% elif r.requested %}
+    {% elif r.requested and not import_context %}
     <p class="owned">Already asked for. It is on its way.</p>
     {% else %}
     <form method="post" action="/want">
+      {% if import_context %}
+      <input type="hidden" name="import_id" value="{{ import_context.id }}">
+      <input type="hidden" name="import_line" value="{{ import_context.line }}">
+      {% endif %}
       <input type="hidden" name="medium" value="{{ r.medium }}">
       <input type="hidden" name="item_key" value="{{ r.itemKey }}">
       <input type="hidden" name="unit" value="{{ r.unit }}">
@@ -121,7 +140,7 @@ asked for yet.</p>
       <input type="hidden" name="itunesId" value="{{ r.itunesId | default('') }}">
       {% include "_episodes_choice.html" %}
       {% endif %}
-      <button type="submit">Ask for {{ r.title }}{% if r.artist and r.unit != 'artist' %} by {{ r.artist }}{% endif %}</button>
+      <button type="submit">{{ 'Select' if import_context else 'Ask for' }} {{ r.title }}{% if r.artist and r.unit != 'artist' %} by {{ r.artist }}{% endif %}</button>
     </form>
     {% endif %}
     </div>

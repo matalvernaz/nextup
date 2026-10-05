@@ -4,8 +4,8 @@ Two things use it. An imported list of songs checks the library before asking fo
 song already here is not asked for again; and a playlist made from a list needs the library item
 each of its songs is, to put it in.
 
-The title is matched more strictly than the importer's catalogue key, which drops every
-parenthetical. Here only the asides that name the same recording differently go: a featured
+Library lookup and catalogue imports share the same recording key. Only the
+asides that name the same recording differently go: a featured
 artist ("feat. X") and a remaster ("2011 Remaster"). "Live", "Acoustic", "Demo", "From The Vault"
 and "Taylor's Version" stay, because each is a different recording and a playlist that asked for
 one should not be given another. Spotify writes those asides after a dash ("Song - Live"), and the
@@ -23,6 +23,9 @@ import re
 import threading
 import time
 import unicodedata
+from difflib import SequenceMatcher
+from html import unescape
+from urllib.parse import unquote
 
 from . import jellyfin, logs
 
@@ -41,15 +44,18 @@ _DASH_ASIDE = re.compile(r"\s+-\s+(.+)$")
 #: Anything that is not a letter or digit, in any script.
 _LETTERS = re.compile(r"[\W_]+")
 #: What separates artists in an export's credit column.
-_LIST_SPLIT = re.compile(r"\s*(?:,|;|&|\bfeat\.?|\bft\.?|\bfeaturing\b|\bwith\b)\s*",
+_LIST_SPLIT = re.compile(r"\s*(?:,|;|&|\b(?:featuring|feat\.?|ft\.?|with)(?=\s|$))\s*",
                          re.IGNORECASE)
 #: What separates a lead from the guests in a library credit.
 _GUEST_SPLIT = re.compile(r"\s+(?:feat\.?|ft\.?|featuring|with)\s+", re.IGNORECASE)
+_TITLE_GUEST = re.compile(r"\s+(?:feat\.?|ft\.?|featuring)\s+(.+)$", re.IGNORECASE)
+_SINGLE = re.compile(r"\s+(?:-\s*)?single\s*$", re.IGNORECASE)
 
 
 def _plain(text: str) -> str:
     """Case, accents and curly apostrophes away, and "&" read as "and"."""
-    text = unicodedata.normalize("NFKD", text or "").replace("’", "'").replace("‘", "'")
+    text = unescape(unquote(text or ""))
+    text = unicodedata.normalize("NFKD", text).replace("’", "'").replace("‘", "'")
     text = "".join(ch for ch in text if not unicodedata.combining(ch))
     return text.casefold()
 
@@ -60,7 +66,15 @@ def _key(text: str) -> str:
 
 def song_key(title: str) -> str:
     """A song title reduced to what two spellings of one recording share."""
-    text = _plain(title).strip()
+    base, versions = title_parts(title)
+    # Keep the boundary: a recording qualifier must not disappear into the
+    # ordinary title when spaces are ignored.
+    return base.replace(" ", "") + "".join("|" + v.replace(" ", "") for v in versions)
+
+
+def title_parts(title: str) -> tuple[str, tuple[str, ...]]:
+    """Comparable title and recording qualifiers, without changing the display text."""
+    text = _SINGLE.sub("", _plain(title).replace("_", " ").strip())
     dash = _DASH_ASIDE.search(text)
     if dash:
         text = text[:dash.start()] + f" ({dash.group(1)})"
@@ -68,14 +82,107 @@ def song_key(title: str) -> str:
 
     def aside(match: re.Match) -> str:
         words = match.group(1).strip()
-        if words and not _CREDIT_ASIDE.search(words):
+        if words and words != "single" and not _CREDIT_ASIDE.search(words):
             rest = _key(_REMASTER.sub(" ", words))
             if rest:
                 kept.append(rest)
         return " "
 
     text = _ASIDE.sub(aside, text)
-    return " ".join([_key(text)] + kept).strip()
+    text = _TITLE_GUEST.sub("", text)
+    text = re.sub(r"\bn'?(?=\s|$)", "and", text)
+    # The file's example drops an article as well as changing punctuation.
+    # This rule is music-only; books and film titles keep their articles.
+    base = " ".join(w for w in _key(text).split() if w != "the")
+    return base, tuple(kept)
+
+
+def search_title(title: str) -> str:
+    """Readable query text with export encoding and release labels removed."""
+    text = unescape(unquote(title or "")).replace("_", " ")
+    text = _SINGLE.sub("", text.strip())
+    return re.sub(r"\bN['’]?(?=\s|$)", "and", text, flags=re.IGNORECASE)
+
+
+def name_key(credit: str) -> str:
+    return _key(re.sub(r"^by\s+", "", _plain(credit).strip()))
+
+
+def _same_name(a: str, b: str) -> bool:
+    a, b = name_key(a), name_key(b)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    first, second = a.split(), b.split()
+    # First/last-name inversion only, never an arbitrary rearrangement of a
+    # band name, an initial, or a credit joined with 'and'.
+    excluded = {"and", "the", "band", "orchestra", "dj"}
+    return (len(first) == len(second) == 2 and first == second[::-1]
+            and not excluded.intersection(first)
+            and all(len(word) > 1 and word.isalpha() for word in first))
+
+
+def same_credit(a: str, b: str) -> bool:
+    """Whole credits, allowing first/last inversion within named contributors."""
+    if _same_name(a, b):
+        return True
+    left = [p for p in _LIST_SPLIT.split(_plain(a)) if p.strip()]
+    right = [p for p in _LIST_SPLIT.split(_plain(b)) if p.strip()]
+    if len(left) < 2 or len(left) != len(right):
+        return False
+    # Do not turn one half of a band's name into a match. Both sides must
+    # supply the same complete list of contributors.
+    unused = list(right)
+    for part in left:
+        at = next((i for i, other in enumerate(unused) if _same_name(part, other)), None)
+        if at is None:
+            return False
+        unused.pop(at)
+    return True
+
+
+def guests(title: str) -> str:
+    credits = []
+    for match in _ASIDE.finditer(_plain(title)):
+        aside = match.group(1).strip()
+        prefix = _CREDIT_ASIDE.match(aside)
+        if prefix:
+            credits.append(aside[prefix.end():].strip())
+    tail = _TITLE_GUEST.search(_ASIDE.sub(" ", _plain(title)))
+    if tail:
+        credits.append(tail.group(1).strip())
+    return "; ".join(credits)
+
+
+def recording_matches(title: str, artist: str, other_title: str, other_artist: str) -> bool:
+    """A title and its credited artist identify the same recording."""
+    base, _ = title_parts(title)
+    if not base or song_key(title) != song_key(other_title):
+        return False
+    if same_credit(artist, other_artist):
+        left, right = guests(title), guests(other_title)
+        return not (left and right) or same_credit(left, right)
+    # A guest may be in the title on one export and the artist field on the
+    # other. Compare the complete credit after moving that metadata across.
+    left = artist + (" feat. " + guests(title) if guests(title) else "")
+    right = other_artist + (" feat. " + guests(other_title) if guests(other_title) else "")
+    return same_credit(left, right)
+
+
+def close_score(title: str, artist: str, other_title: str, other_artist: str) -> float:
+    """Rank plausible suggestions; unrelated artist/title hits score zero."""
+    base, _ = title_parts(title)
+    other, _ = title_parts(other_title)
+    if not base or not other:
+        return 0.0
+    title_score = SequenceMatcher(None, base.replace(" ", ""), other.replace(" ", "")).ratio()
+    if title_score < 0.7:
+        return 0.0
+    if artist and other_artist and not same_credit(artist, other_artist):
+        if SequenceMatcher(None, name_key(artist), name_key(other_artist)).ratio() < 0.8:
+            return 0.0
+    return title_score
 
 
 def listed_names(credit: str) -> set[str]:
@@ -151,9 +258,11 @@ class LibraryIndex:
         """
         if not artist:
             return None
-        wanted = listed_names(artist)
         found = [item for item in self._by_title.get(song_key(title), [])
-                 if wanted & _item_names(item)]
+                 if any(_same_name(want, held)
+                        for want in listed_names(artist) for held in _item_names(item))
+                 and (not guests(title) or not guests(item.get("Name") or "")
+                      or same_credit(guests(title), guests(item.get("Name") or "")))]
         if not found:
             return None
         if album:

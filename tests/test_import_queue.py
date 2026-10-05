@@ -10,6 +10,7 @@ be reached; and buskarr's batch state is asked once per thousand, with an old
 buskarr falling back and an unreachable one answering unknown.
 """
 import json
+import sqlite3
 import time
 from urllib.parse import unquote
 
@@ -174,6 +175,8 @@ check.equal(imports.release_queue(), 2, "a day later both go in")
 check.equal(asked, [("Record 2", True), ("Record 3", True)],
             "in order, and in bulk")
 check.equal(store.queued_count(KID.key), 0, "and the queue is empty")
+check.equal([r['outcome'] for r in store.import_rows(started['importId'])],
+            ['asked'] * 4, 'released rows also stop saying waiting on their import report')
 check.equal(wants.allowance(KID, media.MUSIC), 3,
             "none of it spent the allowance for searching")
 
@@ -202,7 +205,7 @@ def watching_add(unit, hit, by, bulk=False):
     return fake_add(unit, hit, by, bulk)
 
 
-def container_stops(row_id):
+def container_stops(row_id, *args):
     raise RuntimeError("the container stopped here")
 
 
@@ -270,6 +273,25 @@ buskarr._client = with_transport(transport(200, fail=True))
 check.equal(REAL_STATES(["want:1"]), {},
             "an unreachable one answers nothing known, rather than a probe "
             "per row that would each wait out the same timeout")
+
+# If queue removal fails, its source row must still say waiting. Retrying can
+# then complete both changes together instead of leaving contradictory history.
+store.put_import('atomic', KID.key, 'music', 'done', 1, {'unit': 'track'})
+store.put_import_row('atomic', {'line': 2, 'state': 'matched', 'title': 'Song'}, 'waiting')
+store.queue_rows(KID.key, 'music', 'atomic', [(2, 'Song', {'itemKey': 'atomic-key'})])
+queued_id = next(r['id'] for r in store.queued(KID.key) if r['import_id'] == 'atomic')
+with store.db() as conn:
+    conn.execute("CREATE TRIGGER fail_unqueue BEFORE DELETE ON import_queue "
+                 "WHEN OLD.import_id='atomic' BEGIN SELECT RAISE(ABORT, 'interrupted'); END")
+check.raises(sqlite3.IntegrityError, lambda: store.unqueue(queued_id, imports.ASKED),
+             'an interrupted queue completion fails atomically')
+check.equal(store.import_rows('atomic')[0]['outcome'], 'waiting', 'the report change is rolled back too')
+check.that(store.is_queued(queued_id), 'the interrupted entry remains available for retry')
+with store.db() as conn:
+    conn.execute('DROP TRIGGER fail_unqueue')
+store.unqueue(queued_id, imports.ASKED)
+check.equal((store.is_queued(queued_id), store.import_rows('atomic')[0]['outcome']),
+            (False, imports.ASKED), 'retry completes the queue and report together')
 
 harness.cleanup()
 raise SystemExit(check.report())
