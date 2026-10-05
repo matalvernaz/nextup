@@ -238,8 +238,17 @@ def capabilities(protocol: int = 1,
         # `importList` rather than `import`, which is a keyword in Python and
         # in Swift both: a JSON key that cannot be spelled as a field name is
         # an irritation in every client that reads it.
+        #
+        # `maxRows` is the limit for anything but music, kept for clients
+        # that read one number; `maxRowsByMedium` has each. `queue` is music
+        # past the day's import allowance waiting for a later day rather than
+        # being refused, readable and stoppable at /import/queue.
         "importList": {"supported": bool(offered),
-                       "maxRows": config.IMPORT_MAX_ROWS},
+                       "maxRows": config.IMPORT_MAX_ROWS,
+                       "maxRowsByMedium": {key: imports.max_rows(key)
+                                           for key in offered},
+                       "queue": {"supported": media.MUSIC in offered,
+                                 "songsPerDay": config.IMPORT_MUSIC_DAILY_SONGS}},
         "recommendations": {
             "media": recommendation_media,
         },
@@ -818,6 +827,25 @@ def post_import(user: jellyfin.User = Depends(caller),
     return _import_state(user, import_id)
 
 
+# These two come before /import/{import_id}, which would otherwise take
+# "queue" for a list id.
+@router.get("/import/queue")
+def get_import_queue(user: jellyfin.User = Depends(caller)) -> dict:
+    """What this account's imported lists left waiting for a later day."""
+    status = imports.queue_status(user) or {
+        "waiting": 0, "songs": 0, "perDay": config.IMPORT_MUSIC_DAILY_SONGS,
+        "days": 0, "leftToday": wants.import_allowance(user, media.MUSIC),
+        "nextAt": None}
+    return {"version": config.API_VERSION, **status}
+
+
+@router.delete("/import/queue")
+def delete_import_queue(user: jellyfin.User = Depends(caller)) -> dict:
+    """Stop asking for anything this account's imported lists left waiting."""
+    return {"version": config.API_VERSION,
+            "removed": imports.clear_queue(user)}
+
+
 @router.get("/import/{import_id}")
 def get_import(import_id: str,
                user: jellyfin.User = Depends(caller)) -> dict:
@@ -847,10 +875,19 @@ def _import_state(user: jellyfin.User, import_id: str) -> dict:
     `rows` is sent whole rather than grouped. A client's grouping is its own
     business -- EchoFin has one screen per section and the web page has four
     headings on one -- and the state on each row is what both are built from.
+
+    A report's `waiting` rows are also in `asked`, marked "(waiting)". A client
+    from before the queue reads only asked, already and refused, and would
+    otherwise say nothing about most of a long list. A client that reads
+    `waiting` takes those out of `asked`.
     """
     batch = imports.get(user, import_id)
     if batch is None:
         raise HTTPException(status_code=404, detail="No such list.")
+    report = batch.get("report")
+    if report and report.get("waiting"):
+        report = dict(report, asked=list(report.get("asked") or []) + [
+            f"{line} (waiting)" for line in report["waiting"]])
     return {
         "version": config.API_VERSION,
         "importId": batch["id"],
@@ -865,7 +902,34 @@ def _import_state(user: jellyfin.User, import_id: str) -> dict:
         "duplicates": batch.get("duplicates", 0),
         "blanks": batch.get("blanks", 0),
         "rows": batch.get("rows", []),
-        "report": batch.get("report"),
+        "report": report,
         "error": batch.get("error"),
-        "remainingToday": wants.allowance(user, batch["medium"]),
+        "remainingToday": _import_remaining(user, batch),
+        # Music lists have their own allowance, counted in songs; None for an
+        # account it does not limit.
+        "importAllowance": ({
+            "leftToday": wants.import_allowance(user, media.MUSIC),
+            "songsPerDay": config.IMPORT_MUSIC_DAILY_SONGS,
+            "albumSongs": config.IMPORT_ALBUM_SONGS,
+            "artistSongs": config.IMPORT_ARTIST_SONGS,
+        } if batch["medium"] == media.MUSIC else None),
     }
+
+
+def _import_remaining(user: jellyfin.User, batch: dict) -> int | None:
+    """What a client may spend on this list today, in the units it prices by.
+
+    EchoFin walks the ticked rows against this, priced by the ordinary costs,
+    and says that whatever does not fit "will be refused". For a list of music
+    that is no longer true -- the rest waits -- so a capped account is given
+    enough to cover every row it could tick, and a client from before the
+    queue says nothing rather than something false. `importAllowance` has the
+    real numbers.
+    """
+    if batch["medium"] != media.MUSIC:
+        return wants.allowance(user, batch["medium"])
+    if wants.import_allowance(user, media.MUSIC) is None:
+        return None
+    return sum(media.cost(media.MUSIC, (row.get("hit") or {}).get("unit")
+                          or batch.get("unit") or "")
+               for row in batch.get("rows", []))

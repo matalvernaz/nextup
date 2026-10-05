@@ -129,13 +129,18 @@ def _described(row: dict, unit: str) -> dict:
     }
 
 
-def add(unit: str, hit: dict, requested_by: str) -> arr.AddResult:
+def add(unit: str, hit: dict, requested_by: str,
+        bulk: bool = False) -> arr.AddResult:
     """Ask buskarr for one artist, album or track.
 
     `hit` is the search result being asked for. buskarr needs the catalogue
     ref for a bulk unit and the credit and title for a track, and passing the
     row back rather than re-deriving it is what keeps the two ends agreeing
     about which of several same-named artists was meant.
+
+    `bulk` is a row of an imported list. buskarr works those after anything
+    the same person asked for one at a time; a buskarr from before it knew
+    the field ignores it.
     """
     if not configured():
         return arr.AddResult(False, "Music is not available on this server.")
@@ -147,6 +152,7 @@ def add(unit: str, hit: dict, requested_by: str) -> arr.AddResult:
         "title": hit.get("title") or "",
         "album": hit.get("album") or "",
         "requestedBy": requested_by,
+        "bulk": bulk,
     }
     # Year and duration were published by the search and then dropped here, and
     # buskarr has accepted both all along. Duration is the one with teeth: its
@@ -171,12 +177,14 @@ def add(unit: str, hit: dict, requested_by: str) -> arr.AddResult:
             resp = c.post("/add", json=body)
     except httpx.HTTPError as exc:
         log.error("add failed unit=%s: buskarr unreachable (%s)", unit, exc)
-        return arr.AddResult(False, "buskarr could not be reached.")
+        return arr.AddResult(False, "buskarr could not be reached.",
+                             transient=True)
     if resp.status_code >= 400:
         detail = arr._detail(resp)[:180]
         log.error("add rejected unit=%s status=%d body=%s",
                   unit, resp.status_code, detail)
-        return arr.AddResult(False, f"buskarr refused it: {detail}")
+        return arr.AddResult(False, f"buskarr refused it: {detail}",
+                             transient=resp.status_code >= 500)
     try:
         payload = resp.json()
     except ValueError:
@@ -208,6 +216,39 @@ def state(backend_id: str) -> dict | None:
         return resp.json()
     except ValueError:
         return None
+
+
+#: The most references one `states` call to buskarr carries. Its own cap.
+STATES_PAGE = 1000
+
+
+def states(backend_ids: list[str]) -> dict[str, dict] | None:
+    """`state` for many requests in one call per thousand.
+
+    None only from a buskarr that predates the endpoint, and the caller then
+    asks one at a time. Unreachable is an empty answer instead: every request
+    is unknown, as a None from `state` would make it, and asking each one
+    again would only wait out the same timeout once per song. A reference
+    missing from the answer is unknown too.
+    """
+    if not configured():
+        return {}
+    wanted = [ref for ref in dict.fromkeys(backend_ids) if ref]
+    answers: dict[str, dict] = {}
+    try:
+        with _client() as c:
+            for start in range(0, len(wanted), STATES_PAGE):
+                resp = c.post("/states",
+                              json={"references": wanted[start:start + STATES_PAGE]})
+                if resp.status_code in (404, 405):
+                    return None
+                if resp.status_code >= 400:
+                    log.warning("batch state refused status=%d", resp.status_code)
+                    return answers
+                answers.update(resp.json().get("states") or {})
+    except (httpx.HTTPError, ValueError, AttributeError) as exc:
+        log.warning("batch state unreachable (%s)", exc)
+    return answers
 
 
 def cancel(backend_id: str) -> bool:

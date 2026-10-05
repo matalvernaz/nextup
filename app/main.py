@@ -46,6 +46,7 @@ async def lifespan(_: FastAPI):
     selfcheck.watch()
     upkeep.watch()
     book_stamp.watch()
+    imports.watch()
     yield
 
 
@@ -851,6 +852,8 @@ def index(request: Request, q: str = "", medium: str = "", unit: str = "",
             "requests": wants.states(user),
             "message": msg,
             "allowance": {key: wants.allowance(user, key) for key in offered},
+            "import_queue": (imports.queue_status(user)
+                             if media.MUSIC in offered else None),
             "episode_choices": _episode_options(),
             "usual_episodes": usual.encode() if usual else "",
         })
@@ -919,8 +922,44 @@ def get_import(request: Request, msg: str = ""):
         request=request, name="import.html",
         context={"user": user, "media": list(offered.values()),
                  "message": msg, "max_rows": config.IMPORT_MAX_ROWS,
+                 "max_rows_music": config.IMPORT_MAX_ROWS_MUSIC,
                  "allowance": {key: wants.allowance(user, key)
-                               for key in offered}})
+                               for key in offered},
+                 "import_limit": _import_limit(user),
+                 "import_queue": (imports.queue_status(user)
+                                  if media.MUSIC in offered else None)})
+
+
+def _import_limit(user: jellyfin.User) -> dict:
+    """The import allowance for music, as the import pages describe it."""
+    return {"perDay": config.IMPORT_MUSIC_DAILY_SONGS,
+            "albumSongs": config.IMPORT_ALBUM_SONGS,
+            "artistSongs": config.IMPORT_ARTIST_SONGS,
+            "leftToday": wants.import_allowance(user, media.MUSIC)}
+
+
+@app.post("/import/queue/clear")
+def post_import_queue_clear(request: Request, confirm: str = Form("")):
+    """Stop asking for whatever this account's imported lists left waiting.
+
+    Behind a tick box as well as the button, because it cannot be undone: the
+    list would have to be imported and ticked through again.
+    """
+    try:
+        user = viewer(request)
+    except LookupError as exc:
+        return _signin_page(request, detail=str(exc), status=401)
+    if confirm != "yes":
+        return RedirectResponse(
+            url="/import?msg=" + quote(
+                "Nothing was dropped. Tick the box to confirm first."),
+            status_code=303)
+    dropped = imports.clear_queue(user)
+    return RedirectResponse(
+        url="/import?msg=" + quote(
+            f"Stopped. {dropped:,} waiting row{'' if dropped == 1 else 's'} "
+            f"will not be asked for." if dropped else "Nothing was waiting."),
+        status_code=303)
 
 
 @app.post("/import")
@@ -986,6 +1025,7 @@ def get_import_batch(request: Request, import_id: str, msg: str = ""):
             "states": {"matched": imports.MATCHED, "uncertain": imports.UNCERTAIN,
                        "held": imports.HELD, "missing": imports.MISSING},
             "no_match": imports.NO_MATCH,
+            "import_limit": _import_limit(user),
         })
 
 

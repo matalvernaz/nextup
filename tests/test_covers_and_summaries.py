@@ -279,7 +279,7 @@ buskarr.state = lambda ref: None
 radarr.add = lambda tmdb, title="", year="", monitored=True: arr.AddResult(
     True, "Sent to Radarr.", "r1", "Dune", "2021", image_url=TMDB,
     overview="Radarr's own words.")
-buskarr.add = lambda unit, hit, by: arr.AddResult(True, "Queued.", "job:1",
+buskarr.add = lambda unit, hit, by, bulk=False: arr.AddResult(True, "Queued.", "job:1",
                                                   hit.get("title", ""))
 MATT = jellyfin.User(id="u-matt", name="matt", is_admin=True)
 

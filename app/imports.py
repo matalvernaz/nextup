@@ -571,6 +571,12 @@ def hit_label(hit: dict) -> str:
 # A batch, from upload to report
 # --------------------------------------------------------------------------
 
+def max_rows(medium: str) -> int:
+    """The most rows one list of this medium may hold."""
+    return (config.IMPORT_MAX_ROWS_MUSIC if medium == media.MUSIC
+            else config.IMPORT_MAX_ROWS)
+
+
 def start(user: jellyfin.User, medium: str, unit: str, filename: str,
           data: bytes | str) -> str:
     """Read a file, start matching it, and return the batch's id.
@@ -599,10 +605,10 @@ def start(user: jellyfin.User, medium: str, unit: str, filename: str,
         if not items:
             raise Unreadable(
                 "Every row in that file has an empty title column.")
-        if len(items) > config.IMPORT_MAX_ROWS:
+        if len(items) > max_rows(medium):
             raise Unreadable(
                 f"That file has {len(items):,} rows. The limit is "
-                f"{config.IMPORT_MAX_ROWS:,} per file, so split it into "
+                f"{max_rows(medium):,} per file, so split it into "
                 f"smaller files.")
     except Unreadable as exc:
         # The person is told why on the page. This puts the reason, and the
@@ -735,15 +741,25 @@ def affordable(user: jellyfin.User, batch: dict, lines: set[int]) -> int | None:
     "you have had your three for today" -- which is the truth arriving in the
     least useful order.
     """
-    left = wants.allowance(user, batch["medium"])
+    medium = batch["medium"]
+    if medium == media.MUSIC:
+        # Music has its own allowance for imports, and the rows past it wait
+        # rather than being refused. Somebody with rows already waiting has
+        # nothing covered today: these go in behind those.
+        left = wants.import_allowance(user, medium)
+        if left is not None and store.queued_count(user.key, medium):
+            return 0
+    else:
+        left = wants.allowance(user, medium)
     if left is None:
         return None
     covered = 0
     for row in batch.get("rows", []):
         if row["line"] not in lines or row["state"] not in (MATCHED, UNCERTAIN):
             continue
-        price = media.cost(batch["medium"], (row.get("hit") or {}).get("unit")
-                           or batch["unit"])
+        unit = (row.get("hit") or {}).get("unit") or batch["unit"]
+        price = (wants.import_cost(unit) if medium == media.MUSIC
+                 else media.cost(medium, unit))
         if price > left:
             break
         left -= price
@@ -788,18 +804,35 @@ def confirm(user: jellyfin.User, import_id: str, lines: set[int]) -> dict | None
 
 def _ask_for(import_id: str, user: jellyfin.User, medium: str,
              chosen: list[dict]) -> None:
-    """Ask for each ticked row, and keep a line about every one of them."""
+    """Ask for each ticked row, and keep a line about every one of them.
+
+    Music that does not fit in the day's import allowance is not refused. The
+    row it ran out on and every row after it go into this account's queue, in
+    order, and `release_queue` asks for them on later days. So does the whole
+    list when earlier rows are already waiting, so a second list cannot jump
+    ahead of the first.
+    """
     asked: list[str] = []
     refused: list[str] = []
     already: list[str] = []
+    waiting_from: int | None = None
+    if medium == media.MUSIC and store.queued_count(user.key, medium):
+        waiting_from = 0
     try:
         for done, row in enumerate(chosen, start=1):
+            if waiting_from is not None:
+                break
             hit = row["hit"]
             label = hit_label(hit)
             try:
                 state, message = wants.want(
                     user, medium, hit.get("itemKey", ""),
-                    hit.get("unit", ""), dict(hit))
+                    hit.get("unit", ""), dict(hit), imported=True)
+            except (wants.ImportLimitReached, wants.TryLater):
+                # Out of today's allowance, or buskarr is not answering: this
+                # row and the rest wait, and the queue tries them later.
+                waiting_from = done - 1
+                break
             except wants.Denied as denied:
                 refused.append(f"{label}: {denied}")
             except Exception as exc:  # noqa: BLE001 - one row's failure is
@@ -815,7 +848,147 @@ def _ask_for(import_id: str, user: jellyfin.User, medium: str,
             store.touch_import(import_id, done)
     except Exception as exc:  # noqa: BLE001 - as above, for the loop itself.
         log.exception("import %s failed while asking: %s", import_id, exc)
+    waiting: list[str] = []
+    if waiting_from is not None:
+        rest = chosen[waiting_from:]
+        try:
+            store.queue_rows(user.key, medium, import_id,
+                             [(row["line"], hit_label(row["hit"]), row["hit"])
+                              for row in rest])
+            waiting = [hit_label(row["hit"]) for row in rest]
+        except Exception as exc:  # noqa: BLE001 - said in the report.
+            log.exception("import %s could not queue %d rows: %s",
+                          import_id, len(rest), exc)
+            refused.extend(f"{hit_label(row['hit'])}: something went wrong."
+                           for row in rest)
+        store.touch_import(import_id, len(chosen))
     _close(import_id, DONE, {"report": {"asked": asked, "refused": refused,
-                                        "already": already}})
-    log.info("import %s done: asked=%d refused=%d already=%d", import_id,
-             len(asked), len(refused), len(already))
+                                        "already": already,
+                                        "waiting": waiting}})
+    log.info("import %s done: asked=%d refused=%d already=%d waiting=%d",
+             import_id, len(asked), len(refused), len(already), len(waiting))
+
+
+# --------------------------------------------------------------------------
+# The queue of imported music waiting for a later day
+# --------------------------------------------------------------------------
+
+#: Waited out before the first pass. A container that has just started is
+#: competing with its own first requests, and Jellyfin may not be up yet.
+QUEUE_FIRST_DELAY_SECONDS = 120
+
+
+def queue_status(user: jellyfin.User, medium: str = media.MUSIC) -> dict | None:
+    """What this account has waiting, for a page or a client to show. None if nothing.
+
+    `songs` counts an album and an artist at what they cost the allowance, so
+    `days` is how long the queue takes at today's rate, give or take the day
+    already under way.
+    """
+    rows = store.queued(user.key, medium)
+    if not rows:
+        return None
+    songs = sum(wants.import_cost(json.loads(row["hit"]).get("unit") or "")
+                for row in rows)
+    per_day = config.IMPORT_MUSIC_DAILY_SONGS
+    return {"waiting": len(rows), "songs": songs, "perDay": per_day,
+            "days": -(-songs // per_day) if per_day else None,
+            "leftToday": wants.import_allowance(user, medium),
+            "nextAt": wants.import_frees_at(user, medium)}
+
+
+def release_queue() -> int:
+    """Ask for whatever waiting rows today's import allowances now cover.
+
+    Accounts are resolved through Jellyfin, so a `User` here carries its real
+    administrator flag. Returns how many rows went in.
+    """
+    owners = store.queue_owners()
+    if not owners:
+        return 0
+    by_id = {uid: name for name, uid in jellyfin.all_users().items()}
+    went = 0
+    for key in owners:
+        name = by_id.get(key)
+        if not name:
+            dropped = store.clear_queue(key)
+            log.info("import queue: account %s is gone, dropped %d rows",
+                     key, dropped)
+            continue
+        went += _release_for(jellyfin.user(name))
+    return went
+
+
+def queue_lock(user: jellyfin.User):
+    """Held while one of this account's waiting rows is being asked for.
+
+    Clearing the queue takes it too, so "stop" cannot land between a row being
+    asked for and being taken out of the queue.
+    """
+    return store.key_lock("import-queue", user.key)
+
+
+def clear_queue(user: jellyfin.User) -> int:
+    """Drop everything this account has waiting. Returns how many rows went."""
+    with queue_lock(user):
+        dropped = store.clear_queue(user.key)
+    log.info("import queue cleared user=%s rows=%d", user.key, dropped)
+    return dropped
+
+
+def _release_for(user: jellyfin.User) -> int:
+    """One account's waiting rows, oldest first, until the allowance runs out.
+
+    A row leaves the queue only after it has been asked for or refused. Taken
+    out first, a restart in between lost it, and the queue looked empty to a
+    list confirmed while its last row was being asked for, which then went
+    ahead of it. Asking again after a restart costs nothing: the ledger already
+    has the row and `want` answers "Already asked for."
+    """
+    went = 0
+    for row in store.queued(user.key):
+        with queue_lock(user):
+            if not store.is_queued(row["id"]):
+                continue
+            hit = json.loads(row["hit"])
+            try:
+                state, _ = wants.want(user, row["medium"], hit.get("itemKey", ""),
+                                      hit.get("unit", ""), dict(hit),
+                                      imported=True)
+            except (wants.ImportLimitReached, wants.TryLater) as later:
+                if isinstance(later, wants.TryLater):
+                    log.warning("import queue: buskarr unavailable, trying "
+                                "again later user=%s: %s", user.key, later)
+                break
+            except wants.Denied as denied:
+                log.info("import queue: refused user=%s line=%d %r: %s",
+                         user.key, row["line"], row["label"], denied)
+                store.unqueue(row["id"])
+                continue
+            except Exception as exc:  # noqa: BLE001 - tried again next pass.
+                log.warning("import queue: could not ask user=%s %r: %s",
+                            user.key, row["label"], exc)
+                break
+            store.unqueue(row["id"])
+        went += 1
+        log.info("import queue: asked user=%s %r state=%s", user.key,
+                 row["label"], state)
+    return went
+
+
+def watch() -> None:
+    """Start the pass that empties the import queue a day's allowance at a time."""
+    threading.Thread(target=_queue_loop, name="import-queue", daemon=True).start()
+
+
+def _queue_loop() -> None:
+    time.sleep(QUEUE_FIRST_DELAY_SECONDS)
+    while True:
+        try:
+            went = release_queue()
+            if went:
+                log.info("import queue: %d row(s) asked for", went)
+        except Exception as exc:  # noqa: BLE001 - the thread must not die, or
+            # waiting rows silently stop going in.
+            log.warning("import queue pass failed: %s", exc)
+        time.sleep(config.IMPORT_QUEUE_SECONDS)

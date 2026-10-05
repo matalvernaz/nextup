@@ -54,7 +54,7 @@ buskarr.search = lambda q, unit, limit: [
 ] if unit == "album" else []
 
 asked: list[str] = []
-buskarr.add = lambda unit, hit, by: (
+buskarr.add = lambda unit, hit, by, bulk=False: (
     asked.append(hit.get("title", ""))
     or arr.AddResult(True, "Sent to buskarr.", "job:1", hit.get("title", "")))
 

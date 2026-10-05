@@ -148,6 +148,24 @@ CREATE TABLE IF NOT EXISTS imports (
 CREATE INDEX IF NOT EXISTS imports_by_user
     ON imports(user_key, created_at);
 
+-- Rows of imported music lists that were ticked but did not fit in the day's
+-- import allowance. Each is asked for by itself on a later day, oldest first,
+-- and deleted once it has been. Kept apart from `imports` because a list is
+-- finished, and its page says so, the moment it has been confirmed: these are
+-- that person's to wait on, not the list's.
+CREATE TABLE IF NOT EXISTS import_queue (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_key   TEXT NOT NULL,
+    medium     TEXT NOT NULL,
+    import_id  TEXT NOT NULL,
+    line       INTEGER NOT NULL,
+    label      TEXT NOT NULL,
+    hit        TEXT NOT NULL,
+    queued_at  REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS import_queue_by_user
+    ON import_queue(user_key, id);
+
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -374,7 +392,14 @@ _LATER_COLUMNS = (("authors", "TEXT NOT NULL DEFAULT ''"),
                   ("overview", "TEXT NOT NULL DEFAULT ''"),
                   # Podcasts only: how much of it was asked for, in the short
                   # form `episodes.decode` reads.
-                  ("episodes", "TEXT NOT NULL DEFAULT ''"))
+                  ("episodes", "TEXT NOT NULL DEFAULT ''"),
+                  # Which daily allowance this request was charged to: empty
+                  # for the ordinary one, IMPORT_POOL for an imported list.
+                  # Its `cost` is counted against that one and no other.
+                  ("allowance", "TEXT NOT NULL DEFAULT ''"))
+
+#: The `allowance` of a request that came from an imported list.
+IMPORT_POOL = "import"
 
 #: Longest blurb kept on a request. A catalogue blurb runs to a paragraph or
 #: two; this bounds what a client-supplied one can cost the ledger.
@@ -483,7 +508,7 @@ def rekey_users(name_to_id: dict[str, str]) -> int:
 def record(user_key: str, medium: str, item_key: str, unit: str,
            title: str, year: str, cost: int, backend_id: str,
            authors: str = "", seasons: str = "", image_url: str = "",
-           overview: str = "", episodes: str = "") -> bool:
+           overview: str = "", episodes: str = "", allowance: str = "") -> bool:
     """Write down that this account asked for this thing. True when it is new.
 
     An existing row is left alone rather than refreshed. Asking twice must not
@@ -495,12 +520,12 @@ def record(user_key: str, medium: str, item_key: str, unit: str,
         cur = conn.execute(
             "INSERT INTO requests (user_key, medium, item_key, unit, title, "
             "year, cost, backend_id, authors, seasons, image_url, overview, "
-            "episodes, requested_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+            "episodes, allowance, requested_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT (user_key, medium, item_key) DO NOTHING",
             (user_key, medium, item_key, unit, title, year, cost, backend_id,
              authors, seasons, image_url, overview[:MAX_OVERVIEW_LENGTH],
-             episodes, time.time()))
+             episodes, allowance, time.time()))
     return cur.rowcount > 0
 
 
@@ -567,11 +592,15 @@ def outstanding_keys(user_key: str, medium: str) -> set[str]:
     return {row["item_key"] for row in rows}
 
 
-def spent_today(user_key: str, medium: str, since: float) -> int:
+def spent_today(user_key: str, medium: str, since: float,
+                pool: str = "") -> int:
     """Allowance this account has used on this medium since `since`.
 
     Sums `cost`, not rows: an artist and a single track are both one row and
     are not the same request, which is the whole reason the column exists.
+    `pool` is which allowance: the ordinary one, or IMPORT_POOL. Each counts
+    only the requests charged to it, so an imported list never spends the
+    requests somebody has for asking one at a time.
 
     The window starts at the later of `since` and this account's last reset,
     so giving somebody their requests back does not also reach backwards past
@@ -580,11 +609,29 @@ def spent_today(user_key: str, medium: str, since: float) -> int:
     with db() as conn:
         row = conn.execute(
             "SELECT COALESCE(SUM(cost), 0) AS spent FROM requests "
-            "WHERE user_key=? AND medium=? AND requested_at >= MAX(?, "
+            "WHERE user_key=? AND medium=? AND allowance=? AND requested_at >= MAX(?, "
             "  COALESCE((SELECT reset_at FROM allowance_resets "
             "            WHERE user_key=? AND medium=?), 0))",
-            (user_key, medium, since, user_key, medium)).fetchone()
+            (user_key, medium, pool, since, user_key, medium)).fetchone()
     return int(row["spent"] or 0)
+
+
+def oldest_charge(user_key: str, medium: str, since: float,
+                  pool: str) -> float | None:
+    """When the oldest request still counted against an allowance was made.
+
+    Its cost comes back a day after that, which is the soonest anything
+    waiting on the allowance could go in.
+    """
+    with db() as conn:
+        row = conn.execute(
+            "SELECT MIN(requested_at) AS at FROM requests "
+            "WHERE user_key=? AND medium=? AND allowance=? AND cost > 0 "
+            "AND requested_at >= MAX(?, "
+            "  COALESCE((SELECT reset_at FROM allowance_resets "
+            "            WHERE user_key=? AND medium=?), 0))",
+            (user_key, medium, pool, since, user_key, medium)).fetchone()
+    return row["at"] if row and row["at"] is not None else None
 
 
 def reset_allowance(user_key: str, medium: str, at: float | None = None) -> float:
@@ -1165,6 +1212,76 @@ def close_import(import_id: str, state: str, payload) -> None:
             "UPDATE imports SET state=?, payload=?, touched_at=? "
             "WHERE import_id=?",
             (state, json.dumps(payload), time.time(), import_id))
+
+
+def queue_rows(user_key: str, medium: str, import_id: str,
+               rows: list[tuple[int, str, dict]]) -> int:
+    """Put ticked rows of an imported list in this account's queue.
+
+    `rows` is (line, label, hit) for each, in the order they are to be asked
+    for. Returns how many were queued.
+    """
+    now = time.time()
+    with db() as conn:
+        conn.executemany(
+            "INSERT INTO import_queue (user_key, medium, import_id, line, "
+            "label, hit, queued_at) VALUES (?,?,?,?,?,?,?)",
+            [(user_key, medium, import_id, line, label, json.dumps(hit), now)
+             for line, label, hit in rows])
+    return len(rows)
+
+
+def queued(user_key: str, medium: str | None = None) -> list[sqlite3.Row]:
+    """This account's waiting rows, oldest first."""
+    with db() as conn:
+        if medium is None:
+            return conn.execute(
+                "SELECT * FROM import_queue WHERE user_key=? ORDER BY id",
+                (user_key,)).fetchall()
+        return conn.execute(
+            "SELECT * FROM import_queue WHERE user_key=? AND medium=? "
+            "ORDER BY id", (user_key, medium)).fetchall()
+
+
+def queued_count(user_key: str, medium: str | None = None) -> int:
+    with db() as conn:
+        if medium is None:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM import_queue WHERE user_key=?",
+                (user_key,)).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM import_queue WHERE user_key=? "
+                "AND medium=?", (user_key, medium)).fetchone()
+    return int(row["n"])
+
+
+def queue_owners() -> list[str]:
+    """Every account with something waiting in the import queue."""
+    with db() as conn:
+        return [row["user_key"] for row in conn.execute(
+            "SELECT DISTINCT user_key FROM import_queue ORDER BY user_key")]
+
+
+def is_queued(row_id: int) -> bool:
+    """Whether a waiting row is still there, not stopped or already asked for."""
+    with db() as conn:
+        return conn.execute("SELECT 1 FROM import_queue WHERE id=?",
+                            (row_id,)).fetchone() is not None
+
+
+def unqueue(row_id: int) -> None:
+    """Take one row out of the queue, once it has been asked for or refused."""
+    with db() as conn:
+        conn.execute("DELETE FROM import_queue WHERE id=?", (row_id,))
+
+
+def clear_queue(user_key: str) -> int:
+    """Drop everything this account has waiting. Returns how many went."""
+    with db() as conn:
+        cur = conn.execute("DELETE FROM import_queue WHERE user_key=?",
+                           (user_key,))
+    return cur.rowcount
 
 
 def prune_imports(before: float) -> int:

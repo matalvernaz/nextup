@@ -58,7 +58,7 @@ radarr.add = lambda tmdb, title="", year="", monitored=True: (
 sonarr.add = lambda tvdb, title="", monitored=True, choice=None: (
     added.append(("series", tvdb))
     or arr.AddResult(True, "Sent to Sonarr.", "s1", title))
-buskarr.add = lambda unit, hit, by: (
+buskarr.add = lambda unit, hit, by, bulk=False: (
     added.append(("music", unit))
     or arr.AddResult(True, "Sent to buskarr.", "job:7", hit.get("title", "")))
 listenarr.add = lambda asin, monitored=True, metadata=None: (

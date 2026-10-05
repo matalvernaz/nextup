@@ -70,6 +70,15 @@ anything already here or with no match is listed separately. Only the second
 step asks for the rows that are still ticked, one ordinary request each,
 against the same daily limit as search.
 
+Music is the exception, because music lists are the long ones. A list of
+music takes up to 5,000 rows (500 for anything else) and has its own daily
+allowance of 200 songs, so it does not use up the requests somebody has for
+searching. An album counts as 12 songs and an artist as 100. Whatever does not
+fit waits in a queue and is asked for by itself on later days, oldest first,
+and the import page shows the queue and can stop it. Imported songs reach
+buskarr marked as bulk, and buskarr takes turns between people, so one long
+list never holds up anybody else's requests.
+
 The first row should be column headings, in any order, separated by commas,
 semicolons or tabs, in UTF-8, UTF-16 or Windows-1252. Exports from Spotify
 (`Track Name`, `Artist Name(s)`) and Letterboxd (`Name`, `Year`) work as they
@@ -250,6 +259,8 @@ it placed it under.
 | `POST` | `/api/v1/import` | Hand over a whole list as text; it is matched, and nothing is asked for |
 | `GET` | `/api/v1/import/{id}` | How far that list has got, and what each row matched |
 | `POST` | `/api/v1/import/{id}/confirm` | Ask for the lines somebody chose |
+| `GET` | `/api/v1/import/queue` | Music from imported lists still waiting for a later day |
+| `DELETE` | `/api/v1/import/queue` | Stop asking for it |
 
 `deleted` is a report rather than an instruction. A client knows a file has
 gone; what that means — a Radarr row to remove so the next sweep does not

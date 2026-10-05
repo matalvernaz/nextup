@@ -44,6 +44,9 @@
   {% if report.already %}
   <li>{{ report.already | length }} already here or already asked for</li>
   {% endif %}
+  {% if report.waiting %}
+  <li>{{ report.waiting | length }} waiting for a later day</li>
+  {% endif %}
   {% if report.refused %}
   <li>{{ report.refused | length }} refused</li>
   {% endif %}
@@ -62,6 +65,20 @@
 <ul>
   {% for line in report.already %}<li>{{ line }}</li>{% endfor %}
 </ul>
+{% endif %}
+
+{% if report.waiting %}
+<h4>Waiting</h4>
+<p>These did not fit in the import limit of {{ import_limit.perDay }} songs
+   on the day this list was confirmed, so they were queued to be asked for by
+   themselves on the days after, in this order. Some may have gone in, or been
+   stopped, since. <a href="/import">See what is still waiting</a>.</p>
+<details>
+  <summary>The {{ report.waiting | length }} waiting</summary>
+  <ul>
+    {% for line in report.waiting %}<li>{{ line }}</li>{% endfor %}
+  </ul>
+</details>
 {% endif %}
 
 {% if report.refused %}
@@ -108,6 +125,10 @@
 
 {% if covered is none %}
 <p>You have no daily limit.</p>
+{% elif covered < ticked and batch.medium == 'music' %}
+<p>Today's import limit covers {{ covered }} of the {{ ticked }} ticked. The
+   rest will wait and be asked for by themselves, {{ import_limit.perDay }}
+   songs a day.</p>
 {% elif covered < ticked %}
 <p role="alert">Your daily limit covers {{ covered }} of the {{ ticked }}
    ticked. The rest will be refused. To ask for them tomorrow, import the

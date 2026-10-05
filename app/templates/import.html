@@ -82,18 +82,52 @@ separated by commas, semicolons or tabs. These headings work:</p>
 <p>A list with no headings works too, with one title on each line. For music,
 write each line as Artist - Title.</p>
 
-<p>Up to {{ max_rows }} rows per file. Rows with no match are listed at the
-end so you can search for them yourself.</p>
+{% set has_music = media | selectattr('key', 'equalto', 'music') | first %}
+<p>Up to {{ "{:,}".format(max_rows_music) if has_music else max_rows }} rows
+per file{% if has_music %} for music, and {{ max_rows }} for anything
+else{% endif %}. Rows with no match are listed at the end so you can search
+for them yourself.</p>
+
+{% if import_queue %}
+<h3>Waiting from your lists</h3>
+<p>{{ "{:,}".format(import_queue.waiting) }} music
+request{{ '' if import_queue.waiting == 1 else 's' }} from your lists
+{{ 'is' if import_queue.waiting == 1 else 'are' }} waiting to be asked for.
+At {{ import_queue.perDay }} songs a day, that is about
+{{ import_queue.days }} more day{{ '' if import_queue.days == 1 else 's' }}.
+They are asked for by themselves.</p>
+<form method="post" action="/import/queue/clear">
+  <p>
+    <input type="checkbox" id="confirm-clear" name="confirm" value="yes" required>
+    <label for="confirm-clear">Yes, drop the waiting requests</label>
+  </p>
+  <p><button type="submit">Stop asking for them</button></p>
+</form>
+{% endif %}
 
 <h3>Your daily limit</h3>
 
-<p>Everything you ask for from a list counts against your daily limit, the
-same as asking from search.</p>
+{% if has_music %}
+<p>Music from a list has its own limit of {{ import_limit.perDay }} songs a
+day, so it does not use up what you have for searching. An album counts as
+{{ import_limit.albumSongs }} songs and an artist as
+{{ import_limit.artistSongs }}. Anything past the limit waits, and is asked for
+by itself on later days.</p>
+{% endif %}
+
+<p>Anything else from a list counts against your daily limit, the same as
+asking from search.</p>
 
 <ul>
   {% for m in media %}
   {% set left = allowance.get(m.key) %}
+  {% if m.key == 'music' %}
+  {% set songs = import_limit.leftToday %}
+  <li>Music: {% if left is none %}no limit{% else %}{{ left }} left today
+    from search, and {{ songs }} songs from lists{% endif %}</li>
+  {% else %}
   <li>{{ m.label }}: {% if left is none %}no limit{% else %}{{ left }} left today{% endif %}</li>
+  {% endif %}
   {% endfor %}
 </ul>
 
