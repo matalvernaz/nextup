@@ -9,139 +9,70 @@
 {% set noun = nouns.get(batch.unit, (batch.unit, batch.unit ~ 's')) %}
 
 <h2>{{ batch.filename or 'Pasted list' }}</h2>
-<p>{{ batch.total }} {{ noun[0] if batch.total == 1 else noun[1] }}.
+<p>{{ "{:,}".format(batch.total) }} {{ noun[0] if batch.total == 1 else noun[1] }}.
    {%- if batch.duplicates %} Skipped {{ batch.duplicates }} duplicate
    row{{ '' if batch.duplicates == 1 else 's' }}.{% endif %}
    {%- if batch.blanks %} Skipped {{ batch.blanks }}
    row{{ '' if batch.blanks == 1 else 's' }} with no title.{% endif %}
    {%- if batch.headings %} First line read as column headings: {{ batch.headings | join(', ') }}.{% endif %}</p>
 
-{# ---------------------------------------------------------------- reading #}
+{# --------------------------------------------------------------- progress #}
 {% if batch.state == 'reading' %}
 <h3>Looking these up</h3>
-<p>{{ batch.done }} of {{ batch.total }} done. A long list takes a few
-   minutes. Nothing has been asked for yet.</p>
-<p><a href="/import/{{ batch.id }}">Check again</a></p>
-
-{# ----------------------------------------------------------------- asking #}
+<p>{{ "{:,}".format(batch.done) }} of {{ "{:,}".format(batch.total) }} looked
+   up. Exact matches are asked for as they are found, so you can leave this
+   page and come back. <a href="/import/{{ batch.id }}">Check again</a></p>
+<form method="post" action="/import/{{ batch.id }}/stop">
+  <p><button type="submit">Stop this list</button></p>
+</form>
 {% elif batch.state == 'asking' %}
 <h3>Asking for these</h3>
 <p>{{ batch.done }} of {{ batch.chosen }} sent so far.</p>
 <p><a href="/import/{{ batch.id }}">Check again</a></p>
-
-{# ----------------------------------------------------------------- failed #}
 {% elif batch.state == 'failed' %}
 <h3>This import stopped</h3>
 <p role="alert">{{ batch.error }}</p>
 <p><a href="/import">Import a list</a></p>
-
-{# ------------------------------------------------------------------- done #}
-{% elif batch.state == 'done' %}
-{% set report = batch.report or {} %}
-<h3>What was asked for</h3>
-<ul>
-  <li>{{ report.asked | length }} asked for</li>
-  {% if report.already %}
-  <li>{{ report.already | length }} already here or already asked for</li>
-  {% endif %}
-  {% if report.waiting %}
-  <li>{{ report.waiting | length }} waiting for a later day</li>
-  {% endif %}
-  {% if report.refused %}
-  <li>{{ report.refused | length }} refused</li>
-  {% endif %}
-</ul>
-
-{% if report.asked %}
-<h4>Asked for</h4>
-<ul>
-  {% for line in report.asked %}<li>{{ line }}</li>{% endfor %}
-</ul>
-{% endif %}
-
-{% if report.already %}
-<h4>Already here or already asked for</h4>
-<p>These did not count against your daily limit.</p>
-<ul>
-  {% for line in report.already %}<li>{{ line }}</li>{% endfor %}
-</ul>
-{% endif %}
-
-{% if report.waiting %}
-<h4>Waiting</h4>
-<p>These did not fit in the import limit of {{ import_limit.perDay }} songs
-   on the day this list was confirmed, so they were queued to be asked for by
-   themselves on the days after, in this order. Some may have gone in, or been
-   stopped, since. <a href="/import">See what is still waiting</a>.</p>
-<details>
-  <summary>The {{ report.waiting | length }} waiting</summary>
-  <ul>
-    {% for line in report.waiting %}<li>{{ line }}</li>{% endfor %}
-  </ul>
-</details>
-{% endif %}
-
-{% if report.refused %}
-<h4>Refused</h4>
-<p>The reason is given for each one. It is usually the daily limit. To ask
-   for these tomorrow, import the list again.</p>
-<ul>
-  {% for line in report.refused %}<li>{{ line }}</li>{% endfor %}
-</ul>
-{% endif %}
-
-<p><a href="/">See everything you have asked for</a></p>
-
-{# ------------------------------------------------------------------ ready #}
+{% elif batch.stopped %}
+<h3>Stopped</h3>
+<p>Stopped after looking up {{ "{:,}".format(batch.done) }} of
+   {{ "{:,}".format(batch.total) }}. What it asked for before then stays asked
+   for.</p>
 {% else %}
-{% set matched = groups[states.matched] %}
-{% set uncertain = groups[states.uncertain] %}
-{% set held = groups[states.held] %}
-{% set missing = groups[states.missing] %}
-
-<h3>What matched</h3>
-{#
-  A list of counts rather than a sentence of them. Four numbers in one
-  paragraph have to be held in the head all at once to be compared; four list
-  items can be stepped through, and a group with nothing in it is left out
-  entirely rather than read aloud as a zero.
-#}
-<ul>
-  {% if matched %}
-  <li>{{ matched | length }} exact
-    match{{ '' if matched | length == 1 else 'es' }}, ticked</li>
-  {% endif %}
-  {% if uncertain %}
-  <li>{{ uncertain | length }} close
-    match{{ '' if uncertain | length == 1 else 'es' }}, not ticked</li>
-  {% endif %}
-  {% if held %}
-  <li>{{ held | length }} already here or already asked for</li>
-  {% endif %}
-  {% if missing %}
-  <li>{{ missing | length }} with no match</li>
-  {% endif %}
-</ul>
-
-{% if covered is none %}
-<p>You have no daily limit.</p>
-{% elif covered < ticked and batch.medium == 'music' %}
-<p>Today's import limit covers {{ covered }} of the {{ ticked }} ticked. The
-   rest will wait and be asked for by themselves, {{ import_limit.perDay }}
-   songs a day.</p>
-{% elif covered < ticked %}
-<p role="alert">Your daily limit covers {{ covered }} of the {{ ticked }}
-   ticked. The rest will be refused. To ask for them tomorrow, import the
-   list again.</p>
+<h3>All looked up</h3>
 {% endif %}
 
-{% if matched or uncertain %}
-<form method="post" action="/import/{{ batch.id }}/confirm">
+{#
+  A list of counts rather than a sentence of them. Several numbers in one
+  paragraph have to be held in the head all at once to be compared; list items
+  can be stepped through, and a group with nothing in it is left out entirely
+  rather than read aloud as a zero.
+#}
+{% set counts = [
+  (rows.asked, 'asked for', 'asked for'),
+  (rows.waiting, 'waiting for a later day', 'waiting for a later day'),
+  (rows.already, 'already here or already asked for',
+   'already here or already asked for'),
+  (rows.refused, 'refused', 'refused'),
+  (rows.close, 'close match to check', 'close matches to check'),
+  (rows.left, 'close match left out', 'close matches left out'),
+  (rows.missing, 'with no match', 'with no match')] %}
+{% if counts | selectattr(0) | list %}
+<ul>
+  {% for found, one, many in counts if found %}
+  <li>{{ "{:,}".format(found | length) }} {{ one if found | length == 1 else many }}</li>
+  {% endfor %}
+</ul>
+{% endif %}
 
-{% if matched %}
-<h4>Exact matches</h4>
+{# ---------------------------------------------------------- close matches #}
+{% if rows.close and batch.state in ('reading', 'ready') %}
+<h3>Close matches</h3>
+<p>These are not exact, so they were not asked for. Tick any that are
+   right.</p>
+<form method="post" action="/import/{{ batch.id }}/confirm">
 <ul class="results">
-  {% for row in matched %}
+  {% for row in rows.close %}
   <li>
     {#
       One label carrying both halves. A tick box labelled only "Kind of Blue"
@@ -149,22 +80,6 @@
       it was matched to and what the file said, in one string, without having
       to go and find the second half somewhere else on the line.
     #}
-    <input type="checkbox" id="row-{{ row.line }}" name="line"
-           value="{{ row.line }}" checked>
-    <label for="row-{{ row.line }}">{{ hit_label(row.hit) }}. Line {{ row.line }} of your file: {{ row.label }}</label>
-    {% if row.detail %}<p>{{ row.detail }}</p>{% endif %}
-  </li>
-  {% endfor %}
-</ul>
-{% endif %}
-
-{% if uncertain %}
-<h4>Close matches</h4>
-<p>These are the nearest results, but not exact, so they are not ticked.
-   Tick the ones that are right.</p>
-<ul class="results">
-  {% for row in uncertain %}
-  <li>
     <input type="checkbox" id="row-{{ row.line }}" name="line"
            value="{{ row.line }}">
     <label for="row-{{ row.line }}">{{ hit_label(row.hit) }}. Line {{ row.line }} of your file: {{ row.label }}</label>
@@ -175,33 +90,79 @@
   </li>
   {% endfor %}
 </ul>
-{% endif %}
-
 <p><button type="submit">Ask for the ticked ones</button></p>
+{% if batch.state == 'ready' %}
+<p><button type="submit" formaction="/import/{{ batch.id }}/leave">Ask for the
+   ticked ones and leave the rest</button></p>
+{% endif %}
 </form>
-{% else %}
-<p>Nothing on this list can be asked for.</p>
 {% endif %}
 
-{% if held %}
-<h4>Already here or already asked for</h4>
+{# ----------------------------------------------------------------- report #}
+{% macro said(row) %}{{ hit_label(row.hit) if row.hit else row.label }}{% endmacro %}
+
+{% if rows.asked %}
+<h3>Asked for</h3>
+<details{% if rows.asked | length <= 20 %} open{% endif %}>
+  <summary>The {{ "{:,}".format(rows.asked | length) }} asked for</summary>
+  <ul>
+    {% for row in rows.asked %}<li>{{ said(row) }}</li>{% endfor %}
+  </ul>
+</details>
+{% endif %}
+
+{% if rows.waiting %}
+<h3>Waiting</h3>
+<p>These did not fit in the day's import limit of {{ import_limit.perDay }}
+   songs, so they are queued and asked for by themselves on the days after, in
+   this order. Some may have gone in, or been stopped, since.
+   <a href="/import">See what is still waiting</a>.</p>
+<details{% if rows.waiting | length <= 20 %} open{% endif %}>
+  <summary>The {{ "{:,}".format(rows.waiting | length) }} waiting</summary>
+  <ul>
+    {% for row in rows.waiting %}<li>{{ said(row) }}</li>{% endfor %}
+  </ul>
+</details>
+{% endif %}
+
+{% if rows.already %}
+<h3>Already here or already asked for</h3>
+<details{% if rows.already | length <= 20 %} open{% endif %}>
+  <summary>The {{ "{:,}".format(rows.already | length) }} already here or asked for</summary>
+  <ul>
+    {% for row in rows.already %}<li>{{ said(row) }}</li>{% endfor %}
+  </ul>
+</details>
+{% endif %}
+
+{% if rows.refused %}
+<h3>Refused</h3>
+<p>The reason is given for each one. It is usually the daily limit. To ask
+   for these another day, import the list again.</p>
+<ul>
+  {% for row in rows.refused %}<li>{{ said(row) }}: {{ row.outcomeDetail or 'refused.' }}</li>{% endfor %}
+</ul>
+{% endif %}
+
+{% if rows.left %}
+<h3>Close matches left out</h3>
 <ul class="results">
-  {% for row in held %}
-  <li>{{ row.label }}: {{ row.detail | lower }}</li>
+  {% for row in rows.left %}
+  <li><a href="/?medium={{ batch.medium }}&amp;unit={{ batch.unit }}&amp;q={{ row.title | urlencode }}">Search for {{ row.label }}</a></li>
   {% endfor %}
 </ul>
 {% endif %}
 
-{% if missing %}
-<h4>No match</h4>
+{% if rows.missing %}
+<h3>No match</h3>
 <p>These may be listed under a different spelling.</p>
 <ul class="results">
-  {% for row in missing %}
+  {% for row in rows.missing %}
   <li><a href="/?medium={{ batch.medium }}&amp;unit={{ batch.unit }}&amp;q={{ row.title | urlencode }}">Search for {{ row.label }}</a>{% if row.detail and row.detail != no_match %}. {{ row.detail }}{% endif %}</li>
   {% endfor %}
 </ul>
 {% endif %}
 
-{% endif %}
+<p><a href="/">See everything you have asked for</a></p>
 
 {% endblock %}

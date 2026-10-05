@@ -62,13 +62,19 @@ only.
 ### Import a list
 
 `/import` takes a CSV file, or a pasted list, of films, series, music, books or
-podcasts and turns it into requests in two steps.
+podcasts and turns it into requests as it goes.
 
-Uploading asks for nothing. Each row is looked up in the same catalogue the
-search box uses. Exact matches come back ticked, close matches unticked, and
-anything already here or with no match is listed separately. Only the second
-step asks for the rows that are still ticked, one ordinary request each,
-against the same daily limit as search.
+Each row is looked up in the same catalogue the search box uses, and an exact
+match is asked for there and then, one ordinary request each, against the same
+daily limit as search. Close matches are not asked for on a guess: they are
+listed for the person to tick or leave, and can be ticked while the rest of the
+list is still being looked up. Anything already here, and anything with no
+match, is listed separately. The page shows a long list's progress as it goes,
+the import page links back to recent lists, and a list a restart interrupted
+carries on from where it stopped. Lists take turns a row at a time, so one long
+list does not hold up somebody else's short one. Music rows are looked up on
+Deezer first and in buskarr's other catalogues only when Deezer has nothing
+certain.
 
 Music is the exception, because music lists are the long ones. A list of
 music takes up to 5,000 rows (500 for anything else) and has its own daily
@@ -256,9 +262,9 @@ it placed it under.
 | `PUT` | `/api/v1/seasons` | Which seasons of a series this account usually asks for |
 | `POST` | `/api/v1/cancel` | Take one back |
 | `POST` | `/api/v1/deleted` | Something was deleted from the library; clear what was still acquiring it |
-| `POST` | `/api/v1/import` | Hand over a whole list as text; it is matched, and nothing is asked for |
-| `GET` | `/api/v1/import/{id}` | How far that list has got, and what each row matched |
-| `POST` | `/api/v1/import/{id}/confirm` | Ask for the lines somebody chose |
+| `POST` | `/api/v1/import` | Hand over a whole list as text; exact matches are asked for as it is looked up |
+| `GET` | `/api/v1/import/{id}` | How far that list has got, and what became of each row |
+| `POST` | `/api/v1/import/{id}/confirm` | Ask for the near misses somebody chose, and finish the list |
 | `GET` | `/api/v1/import/queue` | Music from imported lists still waiting for a later day |
 | `DELETE` | `/api/v1/import/queue` | Stop asking for it |
 
@@ -283,9 +289,12 @@ arrived, since Sonarr counts only monitored episodes in the total it reports.
 `import` takes the file as text rather than rows a client has already parsed.
 Comma quoting, byte-order marks and delimiter sniffing are done once, here, in
 the same code the web page uses — two parsers disagreeing about one file is a
-bug nobody can reproduce. It is two calls on purpose: the first acquires
-nothing and answers with what every row matched, the second asks for the line
-numbers a person ticked. `capabilities` reports `importList`.
+bug nobody can reproduce. The first call starts the list, and exact matches
+are asked for while it is looked up; a row already dealt with comes back as
+`held`, with what became of it as its `detail`, so a client that confirms once
+offers only the near misses. The second call asks for the near misses a person
+ticked and finishes the list. `capabilities` reports `importList`, with
+`automatic: true`.
 
 Nothing is taken on the caller's word: Jellyfin is re-read for the provider id
 (`409` while it is still there, `503` while it cannot be asked), a tool row

@@ -145,7 +145,8 @@ def reset_allowance(user: jellyfin.User, medium: str) -> int | None:
 
 
 def search(query: str, medium: str, unit: str = "",
-           user: jellyfin.User | None = None) -> list[dict]:
+           user: jellyfin.User | None = None,
+           sources: tuple[str, ...] = ()) -> list[dict]:
     """Catalogue hits for one medium, marked with what the library already has.
 
     The caller is optional because three of the four media do not need one:
@@ -154,6 +155,9 @@ def search(query: str, medium: str, unit: str = "",
     audiobook library read carries `userId`, because play state and ratings are
     what its shelf is built from -- so the book path is given the account and
     the others ignore it.
+
+    `sources` narrows a music search to some of buskarr's catalogues; nothing
+    else has more than one.
     """
     if media.get(medium) is None:
         return []
@@ -166,7 +170,7 @@ def search(query: str, medium: str, unit: str = "",
         return books.search_hits(user, query, unit or "book")
     if medium == media.PODCAST:
         return podcasts.search(query, user)
-    return buskarr.search(query, unit or "track", limit)
+    return buskarr.search(query, unit or "track", limit, sources)
 
 
 def want(user: jellyfin.User, medium: str, item_key: str, unit: str = "",

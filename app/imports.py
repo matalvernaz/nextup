@@ -2,20 +2,19 @@
 
 Somebody arrives with a file: the albums on their shelf, a playlist exported
 from a streaming service, the films they have collected. This turns that file
-into requests -- in two steps, and never in one.
+into requests as it goes.
 
-Step one reads the file and matches every row against the catalogue. Step two
-asks for the rows a person has ticked, and only happens after somebody has
-read what each row was matched to. Everywhere else in this service a request
-is one deliberate tap on one named thing; a file of five hundred rows cannot
-be deliberate row by row, and a wrong match here is a download rather than a
-bad suggestion. So a row that matches exactly is ticked for you, a row that
-merely looks plausible is shown unticked beside what it looked like, and
-nothing at all is asked for that nobody ticked.
+Each row is looked up in the catalogue, and a row that matches exactly is asked
+for there and then. A row that only nearly matches is not: a wrong match here
+is a download, not a bad suggestion, so near misses are kept for the person to
+tick or leave. Rows already in the library or already asked for are skipped,
+and rows nothing matched are listed with a way to search for them by hand.
 
-Both steps run in a thread and report how far they have got. Each row costs a
-catalogue search, and then, if it was ticked, a call to an acquisition tool;
-five hundred of either does not fit inside one page load.
+The work runs in a thread, a row at a time, and every row is written down as
+it is done, so a page can show what a long list has turned into while the rest
+of it is still being looked up. Lists take turns row by row, so one long list
+does not hold up somebody else's short one, and a list a restart interrupted
+carries on from where it got to.
 
 Requests go through `wants.want`, one row at a time, exactly as the search
 page does. The daily allowance, the duplicate check and the ledger entry are
@@ -60,10 +59,22 @@ MISSING = "missing"
 #: page leaves it unsaid under its "No match" heading and shows any other.
 NO_MATCH = "No match found."
 
-#: Only one import is matched at a time, whoever started it. Every row is a
-#: catalogue search against somebody else's rate limit, and two files at once
-#: is the way to find out where that limit is. A batch waiting its turn says
-#: it has read nothing yet, which is true.
+#: What became of a row that was acted on, kept beside its state. The state is
+#: what the lookup found; an exact match that was asked for is still MATCHED.
+ASKED = "asked"
+ALREADY = "already"
+WAITING = "waiting"
+REFUSED = "refused"
+#: A near miss the person chose not to ask for.
+LEFT = "left"
+#: A ticked near miss on its way to being asked for, claimed so a second press
+#: of the button cannot pick it up again.
+SENDING = "sending"
+
+#: One catalogue search at a time, whoever's list it is for. Every row is a
+#: search against somebody else's rate limit, and two lists at full speed is
+#: the way to find out where that limit is. Taken per row rather than per list,
+#: so two lists take turns instead of a long one holding the other for an hour.
 _turn = threading.Semaphore(1)
 
 
@@ -499,6 +510,16 @@ def _query(row: Row, medium: str, unit: str) -> str:
     return row.title
 
 
+#: The catalogue a music row is looked up in first, and the units that do it.
+#: Deezer answers in about a third of a second; asking all three of buskarr's
+#: catalogues took two seconds a row, most of it MusicBrainz, which also allows
+#: only one query a second. Only a row Deezer has nothing certain for goes on to
+#: the rest. Artists are left out: MusicBrainz leads an artist search because
+#: it is the one that tells two acts of the same name apart.
+FIRST_LOOK = ("deezer",)
+FIRST_LOOK_UNITS = ("track", "album")
+
+
 def match(user: jellyfin.User, medium: str, unit: str, row: Row,
           requested: set[str]) -> dict:
     """One row, looked up and judged. Never raises: a row that failed says so.
@@ -511,8 +532,15 @@ def match(user: jellyfin.User, medium: str, unit: str, row: Row,
     found: dict = {"line": row.line, "title": row.title, "artist": row.artist,
                    "year": row.year, "label": row.label, "state": MISSING,
                    "detail": "", "hit": None, "others": 0}
+    query = _query(row, medium, unit)
     try:
-        hits = wants.search(_query(row, medium, unit), medium, unit, user)
+        hits = []
+        if medium == media.MUSIC and unit in FIRST_LOOK_UNITS:
+            first = wants.search(query, medium, unit, user, sources=FIRST_LOOK)
+            if any(is_strict(row, hit, medium) for hit in first):
+                hits = first
+        if not hits:
+            hits = wants.search(query, medium, unit, user)
     except Exception as exc:  # noqa: BLE001 - see the docstring.
         log.warning("import row %d could not be looked up: %s", row.line, exc)
         found["detail"] = "The search for this one failed. Try it again later."
@@ -579,11 +607,11 @@ def max_rows(medium: str) -> int:
 
 def start(user: jellyfin.User, medium: str, unit: str, filename: str,
           data: bytes | str) -> str:
-    """Read a file, start matching it, and return the batch's id.
+    """Read a file, start working through it, and return the batch's id.
 
     The reading is done here, where somebody is waiting and can be told that
-    their file has no title column. Only the matching -- one network call per
-    row -- goes to a thread.
+    their file has no title column. The looking up and asking -- network calls
+    per row -- go to a thread.
     """
     sheet: Sheet | None = None
     try:
@@ -623,66 +651,167 @@ def start(user: jellyfin.User, medium: str, unit: str, filename: str,
     payload = {
         "medium": medium, "unit": unit, "filename": filename,
         "duplicates": duplicates, "blanks": blanks,
-        "headings": list(sheet.headings), "rows": [],
+        "headings": list(sheet.headings),
+        # The parsed rows, so a list a restart interrupted carries on from
+        # where it got to instead of being looked up again from the top.
+        "items": [{"line": r.line, "title": r.title, "artist": r.artist,
+                   "year": r.year} for r in items],
     }
     store.prune_imports(time.time() - config.IMPORT_RETENTION_HOURS * 3600)
     store.put_import(import_id, user.key, medium, READING, len(items), payload)
     log.info("import %s started user=%s medium=%s unit=%s rows=%d file=%r",
              import_id, user.key, medium, unit, len(items), filename)
-    threading.Thread(target=_read_through, name=f"import-{import_id[:8]}",
-                     args=(import_id, user, medium, unit, items),
-                     daemon=True).start()
+    _start_working(import_id, user, medium, unit, items)
     return import_id
 
 
-def _read_through(import_id: str, user: jellyfin.User, medium: str, unit: str,
-                  items: list[Row]) -> None:
-    """Match every row, then leave the batch waiting for a person."""
-    # Waiting for the turn is not the same as being stuck, and `get` cannot
-    # tell them apart from the outside: both look like a batch whose row count
-    # has not moved. So a queued batch keeps its clock wound while it waits,
-    # and "has not moved in fifteen minutes" goes on meaning what it says.
-    while not _turn.acquire(timeout=60):
-        store.touch_import(import_id, 0)
-    try:
-        matched: list[dict] = []
-        try:
-            requested = store.outstanding_keys(user.key, medium)
-            for done, row in enumerate(items, start=1):
-                matched.append(match(user, medium, unit, row, requested))
-                store.touch_import(import_id, done)
-                if config.IMPORT_PAUSE_SECONDS and done < len(items):
-                    # These searches land on third-party catalogues, and the
-                    # way to find their rate limit is to send five hundred
-                    # queries at machine speed.
-                    time.sleep(config.IMPORT_PAUSE_SECONDS)
-        except Exception as exc:  # noqa: BLE001 - the thread must not die
-            # silently, or the page waits for a phase that has stopped.
-            log.exception("import %s failed while reading: %s", import_id, exc)
-            _close(import_id, FAILED, {"rows": matched,
-                                       "error": "Something went wrong while "
-                                                "looking these up. Nothing was "
-                                                "asked for."})
+#: Lists a thread in this process is working through. One that says it is
+#: reading and is not in here was interrupted by a restart.
+_working: set[str] = set()
+#: Lists somebody has stopped, checked by their thread before each row.
+_stopping: set[str] = set()
+_working_guard = threading.Lock()
+
+
+def _start_working(import_id: str, user: jellyfin.User, medium: str, unit: str,
+                   items: list[Row]) -> None:
+    with _working_guard:
+        if import_id in _working:
             return
-        # Inside the try, not after it. Out there a failing write leaves the
-        # batch reading forever, and the only thing that would ever move it is
-        # the fifteen-minute stale clock -- which would call a finished match
-        # an interrupted one.
-        _close(import_id, READY, {"rows": matched})
-        log.info("import %s read: %s", import_id, _tally(matched))
+        _working.add(import_id)
+    try:
+        threading.Thread(target=_work_through, name=f"import-{import_id[:8]}",
+                         args=(import_id, user, medium, unit, items),
+                         daemon=True).start()
+    except Exception:
+        # Left marked, nothing would ever pick this list up again.
+        with _working_guard:
+            _working.discard(import_id)
+        raise
+
+
+def _work_through(import_id: str, user: jellyfin.User, medium: str, unit: str,
+                  items: list[Row]) -> None:
+    """Look up every row, and ask for each exact match as soon as it is found."""
+    try:
+        requested = store.outstanding_keys(user.key, medium)
+        done = len(store.import_row_lines(import_id))
+        for index, row in enumerate(items, start=1):
+            if import_id in _stopping:
+                log.info("import %s stopped after %d rows", import_id, done)
+                break
+            with _turn:
+                found = match(user, medium, unit, row, requested)
+            outcome, detail = (_ask_one(import_id, user, medium, found)
+                               if found["state"] == MATCHED else ("", ""))
+            if outcome is None:
+                log.info("import %s stopped after %d rows", import_id, done)
+                break
+            store.put_import_row(import_id, found, outcome, detail)
+            done += 1
+            store.touch_import(import_id, done)
+            if config.IMPORT_PAUSE_SECONDS and index < len(items):
+                # These searches land on third-party catalogues, and the way
+                # to find their rate limit is to send five thousand queries at
+                # machine speed.
+                time.sleep(config.IMPORT_PAUSE_SECONDS)
+    except Exception as exc:  # noqa: BLE001 - the thread must not die
+        # silently, or the page waits for a phase that has stopped.
+        log.exception("import %s failed while reading: %s", import_id, exc)
+        _close(import_id, FAILED, {
+            "error": "Something went wrong while looking these up. Anything "
+                     "asked for before it stopped is listed below."})
+        return
     finally:
-        _turn.release()
+        with _working_guard:
+            _working.discard(import_id)
+            _stopping.discard(import_id)
+    _settle(import_id)
+    log.info("import %s read: %s", import_id,
+             _tally(store.import_rows(import_id)))
 
 
-def _tally(matched: list[dict]) -> str:
+def _ask_one(import_id: str, user: jellyfin.User, medium: str,
+             row: dict) -> tuple[str | None, str]:
+    """Ask for one row's match. Returns its outcome and, for a refusal, why.
+
+    The outcome is None for a list that has been stopped: the row is not
+    asked for. That is decided under the same lock clearing the queue takes,
+    so a row cannot be queued after somebody has stopped the list and emptied
+    the queue.
+
+    Music that does not fit in the day's import allowance, or that buskarr is
+    not answering for, waits in this account's queue and goes in on a later
+    pass. So does every row after the first one that waits: while anything is
+    queued, a row goes in behind it, never ahead of it. Asks for one account
+    are made one at a time, so two of its lists cannot overtake each other.
+    """
+    hit = row["hit"]
+    label = hit_label(hit)
+    with ask_lock(user):
+        with _working_guard:
+            if import_id in _stopping:
+                return None, ""
+        if medium == media.MUSIC and store.queued_count(user.key, medium):
+            store.queue_rows(user.key, medium, import_id, [(row["line"], label, hit)])
+            return WAITING, ""
+        try:
+            state, message = wants.want(
+                user, medium, hit.get("itemKey", ""), hit.get("unit", ""),
+                dict(hit), imported=True)
+        except (wants.ImportLimitReached, wants.TryLater) as later:
+            if medium != media.MUSIC:
+                return REFUSED, str(later)
+            store.queue_rows(user.key, medium, import_id,
+                             [(row["line"], label, hit)])
+            return WAITING, ""
+        except wants.Denied as denied:
+            return REFUSED, str(denied)
+        except Exception as exc:  # noqa: BLE001 - one row's failure is not
+            # the list's, and this runs where nobody is watching.
+            log.warning("import %s could not ask for %r: %s", import_id, label, exc)
+            return REFUSED, "Something went wrong."
+    log.info("import %s asked for %r state=%s", import_id, label, state)
+    return (ALREADY if state == wants.IN_LIBRARY or message.startswith("Already ")
+            else ASKED), ""
+
+
+def ask_lock(user: jellyfin.User):
+    """Held while one of this account's rows is being asked for."""
+    return store.key_lock("import-ask", user.key)
+
+
+def _offerable(row: dict) -> bool:
+    """Whether a row is still waiting for somebody to decide about it."""
+    hit = row.get("hit") or {}
+    return (row["state"] in (MATCHED, UNCERTAIN) and bool(hit)
+            and not row.get("outcome")
+            and not hit.get("owned") and not hit.get("requested"))
+
+
+def _settle(import_id: str) -> None:
+    """Once every row is looked up: ready while near misses wait, else done."""
+    with store.key_lock("import", import_id):
+        current = store.get_import(import_id)
+        if current is None or current["state"] not in (READING, READY):
+            return
+        # A ticked row still being asked for is not decided yet: the ask
+        # settles the list itself when it is done.
+        undecided = any(_offerable(row) or row.get("outcome") == SENDING
+                        for row in store.import_rows(import_id))
+        _close(import_id, READY if undecided else DONE, {})
+
+
+def _tally(rows: list[dict]) -> str:
     counts: dict[str, int] = {}
-    for row in matched:
-        counts[row["state"]] = counts.get(row["state"], 0) + 1
+    for row in rows:
+        key = row.get("outcome") or row["state"]
+        counts[key] = counts.get(key, 0) + 1
     return " ".join(f"{state}={count}" for state, count in sorted(counts.items()))
 
 
 def _close(import_id: str, state: str, changes: dict) -> None:
-    """Write the worked-out half of a batch back, keeping the rest."""
+    """Move a batch on, with whatever it worked out, keeping the rest."""
     row = store.get_import(import_id)
     if row is None:
         log.warning("import %s vanished before it finished", import_id)
@@ -706,10 +835,10 @@ def get(user: jellyfin.User, import_id: str) -> dict | None:
     payload = json.loads(row["payload"])
     state = row["state"]
     stale = time.time() - row["touched_at"] > config.IMPORT_STALE_SECONDS
-    if state in (READING, ASKING) and stale:
-        # A container restarted mid-phase leaves a batch that will never
-        # finish, and a page that says "still working" forever is worse than
-        # one that says it stopped.
+    # A list still reading picks up after a restart by itself (see
+    # `resume_interrupted`), unless it is from before it kept its rows.
+    resumable = state == READING and payload.get("items")
+    if state in (READING, ASKING) and stale and not resumable:
         log.warning("import %s was %s and has not moved; calling it failed",
                     import_id, state)
         # Written before it is stored, not after: the page reads `error` out
@@ -720,12 +849,16 @@ def get(user: jellyfin.User, import_id: str) -> dict | None:
                             "for.")
         store.close_import(import_id, FAILED, payload)
         state = FAILED
+    payload.pop("items", None)
+    rows_now = store.import_rows(import_id) or payload.pop("rows", [])
+    payload.pop("rows", None)
     return {"id": import_id, "state": state, "done": row["done"],
-            "total": row["total"], "created_at": row["created_at"], **payload}
+            "total": row["total"], "created_at": row["created_at"],
+            **payload, "rows": rows_now}
 
 
 def groups(batch: dict) -> dict[str, list[dict]]:
-    """The batch's rows, gathered by what became of each."""
+    """The batch's rows, gathered by what the lookup found for each."""
     out: dict[str, list[dict]] = {MATCHED: [], UNCERTAIN: [], HELD: [],
                                   MISSING: []}
     for row in batch.get("rows", []):
@@ -733,140 +866,186 @@ def groups(batch: dict) -> dict[str, list[dict]]:
     return out
 
 
-def affordable(user: jellyfin.User, batch: dict, lines: set[int]) -> int | None:
-    """How many of these rows today's allowance covers, None if uncapped.
+def view(batch: dict) -> dict[str, list[dict]]:
+    """The batch's rows gathered by what became of them, for a page to show.
 
-    Said before anybody presses the button, because the alternative is a
-    report in which the first thirty rows were asked for and the rest say
-    "you have had your three for today" -- which is the truth arriving in the
-    least useful order.
+    `close` is the near misses still waiting for somebody to tick or leave.
     """
-    medium = batch["medium"]
-    if medium == media.MUSIC:
-        # Music has its own allowance for imports, and the rows past it wait
-        # rather than being refused. Somebody with rows already waiting has
-        # nothing covered today: these go in behind those.
-        left = wants.import_allowance(user, medium)
-        if left is not None and store.queued_count(user.key, medium):
-            return 0
-    else:
-        left = wants.allowance(user, medium)
-    if left is None:
-        return None
-    covered = 0
+    out: dict[str, list[dict]] = {"asked": [], "already": [], "waiting": [],
+                                  "refused": [], "close": [], "left": [],
+                                  "missing": []}
     for row in batch.get("rows", []):
-        if row["line"] not in lines or row["state"] not in (MATCHED, UNCERTAIN):
-            continue
-        unit = (row.get("hit") or {}).get("unit") or batch["unit"]
-        price = (wants.import_cost(unit) if medium == media.MUSIC
-                 else media.cost(medium, unit))
-        if price > left:
-            break
-        left -= price
-        covered += 1
-    return covered
+        outcome = row.get("outcome") or ""
+        if outcome in (ASKED, SENDING):
+            out["asked"].append(row)
+        elif outcome == WAITING:
+            out["waiting"].append(row)
+        elif outcome == REFUSED:
+            out["refused"].append(row)
+        elif outcome == LEFT:
+            out["left"].append(row)
+        elif row["state"] == MISSING:
+            out["missing"].append(row)
+        elif _offerable(row):
+            out["close"].append(row)
+        else:
+            out["already"].append(row)
+    return out
 
 
-def confirm(user: jellyfin.User, import_id: str, lines: set[int]) -> dict | None:
-    """Start asking for the ticked rows. Returns the batch, or None.
+def report(batch: dict) -> dict[str, list[str]]:
+    """What became of the rows that were acted on, a line each."""
+    seen = view(batch)
 
-    Ticks are checked against the batch rather than trusted: a posted line
-    number that was never matched, or was matched to something already in the
-    library, is dropped here. The form cannot offer those, which means a
-    request for one did not come from the form.
+    def said(row: dict) -> str:
+        return hit_label(row["hit"]) if row.get("hit") else row["label"]
+
+    return {"asked": [said(row) for row in seen["asked"]],
+            "already": [said(row) for row in seen["already"]],
+            "waiting": [said(row) for row in seen["waiting"]],
+            "refused": [f"{said(row)}: {row.get('outcomeDetail') or 'refused.'}"
+                        for row in seen["refused"]]}
+
+
+def ask_for_lines(user: jellyfin.User, import_id: str, lines: set[int],
+                  final: bool = False) -> dict | None:
+    """Ask for near misses somebody ticked. Returns the batch, or None.
+
+    Ticks are checked against the batch rather than trusted: a posted line that
+    was never offered, or has already been dealt with, is dropped here. The
+    form cannot offer those, which means a request for one did not come from
+    the form.
+
+    `final` is a client that confirms once, the way the two-step importer
+    worked: the list moves to asking and then ends, and whatever it did not
+    tick is left. Otherwise it can be called as often as somebody likes,
+    while the lookup is still running too, and the list ends by itself once
+    every row is looked up and nothing is left to decide.
     """
     # Read and moved on under one lock. Without it a double-tap on the button
-    # -- or a client retrying a request it thought had timed out -- passes the
-    # `READY` check twice and starts two threads asking for the same rows:
-    # `wants.want` would refuse the second of each as a repeat, but both would
-    # write a report and one of them would be the truth.
+    # -- or a client retrying a request it thought had timed out -- could ask
+    # for the same rows twice.
     with store.key_lock("import", import_id):
         batch = get(user, import_id)
         if batch is None:
             return None
-        if batch["state"] != READY:
+        if batch["state"] not in ((READY,) if final else (READING, READY)):
             return batch
-        chosen = [row for row in batch.get("rows", [])
-                  if row["line"] in lines
-                  and row["state"] in (MATCHED, UNCERTAIN) and row.get("hit")
-                  and not row["hit"].get("owned") and not row["hit"].get("requested")]
+        chosen = [row for row in batch["rows"]
+                  if row["line"] in lines and _offerable(row)]
+        if final and not chosen:
+            # Confirming nothing is the common case now that exact matches
+            # are asked for as they are found: it leaves the near misses and
+            # ends the list.
+            store.leave_undecided(import_id)
+            _close(import_id, DONE, {})
+            return get(user, import_id)
         if not chosen:
             return batch
-        _close(import_id, ASKING, {"chosen": len(chosen)})
-        store.touch_import(import_id, 0)
-    log.info("import %s confirmed user=%s rows=%d", import_id, user.key,
-             len(chosen))
-    threading.Thread(target=_ask_for, name=f"import-ask-{import_id[:8]}",
-                     args=(import_id, user, batch["medium"], chosen),
+        if final:
+            _close(import_id, ASKING, {"chosen": len(chosen)})
+            store.touch_import(import_id, 0)
+        else:
+            # Claimed before the thread starts, so a second press cannot pick
+            # the same rows up again while the first is still asking.
+            for row in chosen:
+                store.set_import_outcome(import_id, row["line"], SENDING)
+    log.info("import %s asking for %d ticked row(s) user=%s final=%s",
+             import_id, len(chosen), user.key, final)
+    threading.Thread(target=_ask_chosen, name=f"import-ask-{import_id[:8]}",
+                     args=(import_id, user, batch["medium"], chosen, final),
                      daemon=True).start()
     return get(user, import_id)
 
 
-def _ask_for(import_id: str, user: jellyfin.User, medium: str,
-             chosen: list[dict]) -> None:
-    """Ask for each ticked row, and keep a line about every one of them.
-
-    Music that does not fit in the day's import allowance is not refused. The
-    row it ran out on and every row after it go into this account's queue, in
-    order, and `release_queue` asks for them on later days. So does the whole
-    list when earlier rows are already waiting, so a second list cannot jump
-    ahead of the first.
-    """
-    asked: list[str] = []
-    refused: list[str] = []
-    already: list[str] = []
-    waiting_from: int | None = None
-    if medium == media.MUSIC and store.queued_count(user.key, medium):
-        waiting_from = 0
+def _ask_chosen(import_id: str, user: jellyfin.User, medium: str,
+                chosen: list[dict], final: bool) -> None:
+    """Ask for each ticked row, and write down what became of it."""
     try:
-        for done, row in enumerate(chosen, start=1):
-            if waiting_from is not None:
-                break
-            hit = row["hit"]
-            label = hit_label(hit)
-            try:
-                state, message = wants.want(
-                    user, medium, hit.get("itemKey", ""),
-                    hit.get("unit", ""), dict(hit), imported=True)
-            except (wants.ImportLimitReached, wants.TryLater):
-                # Out of today's allowance, or buskarr is not answering: this
-                # row and the rest wait, and the queue tries them later.
-                waiting_from = done - 1
-                break
-            except wants.Denied as denied:
-                refused.append(f"{label}: {denied}")
-            except Exception as exc:  # noqa: BLE001 - one row's failure is
-                # not the file's, and this runs where nobody is watching.
-                log.warning("import %s could not ask for %r: %s",
-                            import_id, label, exc)
-                refused.append(f"{label}: something went wrong.")
-            else:
-                (already if state == wants.IN_LIBRARY or message.startswith("Already ") else asked).append(
-                    label)
-                log.info("import %s asked for %r state=%s", import_id, label,
-                         state)
-            store.touch_import(import_id, done)
-    except Exception as exc:  # noqa: BLE001 - as above, for the loop itself.
+        for index, row in enumerate(chosen, start=1):
+            outcome, detail = _ask_one(import_id, user, medium, row)
+            # A list stopped while this was on its way: the row is offered
+            # again rather than left claimed.
+            store.set_import_outcome(import_id, row["line"], outcome or "",
+                                     detail)
+            if final:
+                store.touch_import(import_id, index)
+    except Exception as exc:  # noqa: BLE001 - the thread must not die silently.
         log.exception("import %s failed while asking: %s", import_id, exc)
-    waiting: list[str] = []
-    if waiting_from is not None:
-        rest = chosen[waiting_from:]
-        try:
-            store.queue_rows(user.key, medium, import_id,
-                             [(row["line"], hit_label(row["hit"]), row["hit"])
-                              for row in rest])
-            waiting = [hit_label(row["hit"]) for row in rest]
-        except Exception as exc:  # noqa: BLE001 - said in the report.
-            log.exception("import %s could not queue %d rows: %s",
-                          import_id, len(rest), exc)
-            refused.extend(f"{hit_label(row['hit'])}: something went wrong."
-                           for row in rest)
-        store.touch_import(import_id, len(chosen))
-    _close(import_id, DONE, {"report": {"asked": asked, "refused": refused,
-                                        "already": already,
-                                        "waiting": waiting}})
-    log.info("import %s done: asked=%d refused=%d already=%d waiting=%d",
-             import_id, len(asked), len(refused), len(already), len(waiting))
+    if final:
+        store.leave_undecided(import_id)
+        _close(import_id, DONE, {})
+    else:
+        _settle_if_read(import_id)
+
+
+def _settle_if_read(import_id: str) -> None:
+    """End a list whose lookup is over and that has nothing left to decide."""
+    current = store.get_import(import_id)
+    if current is not None and current["state"] == READY:
+        _settle(import_id)
+
+
+def recent(user: jellyfin.User) -> list[dict]:
+    """This account's lists still on the server, newest first, for a way back to them."""
+    found = []
+    for row in store.imports_for(user.key):
+        payload = json.loads(row["payload"])
+        found.append({"id": row["import_id"], "state": row["state"],
+                      "done": row["done"], "total": row["total"],
+                      "medium": row["medium"],
+                      "filename": payload.get("filename") or ""})
+    return found
+
+
+def resume_interrupted() -> int:
+    """Carry on with lists a restart stopped part way. Returns how many.
+
+    A list that says it is reading, has no thread working on it here, and has
+    not moved for a while was interrupted. Its parsed rows were kept, and the
+    rows already done are in the table, so the rest is looked up from where it
+    stopped. The account is resolved through Jellyfin, so it carries its real
+    administrator flag; a list whose account is gone, or from before rows were
+    kept, is marked failed rather than left reading for ever.
+    """
+    now = time.time()
+    with _working_guard:
+        working = set(_working)
+    stalled = [row for row in store.imports_in_state(READING)
+               if row["import_id"] not in working
+               and now - row["touched_at"] > RESUME_AFTER_SECONDS]
+    if not stalled:
+        return 0
+    by_id = {uid: name for name, uid in jellyfin.all_users().items()}
+    resumed = 0
+    for row in stalled:
+        payload = json.loads(row["payload"])
+        if payload.get("stopped"):
+            _settle(row["import_id"])
+            continue
+        items = payload.get("items")
+        name = by_id.get(row["user_key"])
+        if not items or not name:
+            _close(row["import_id"], FAILED, {
+                "error": "This stopped partway through, probably because the "
+                         "server restarted, and could not carry on. Anything "
+                         "asked for before it stopped is listed below."})
+            continue
+        done = store.import_row_lines(row["import_id"])
+        rest = [Row(item["line"], item["title"], item.get("artist", ""),
+                    item.get("year", ""))
+                for item in items if item["line"] not in done]
+        log.info("import %s carries on after a restart: %d of %d rows left",
+                 row["import_id"], len(rest), len(items))
+        _start_working(row["import_id"], jellyfin.user(name), row["medium"],
+                       payload.get("unit") or "", rest)
+        resumed += 1
+    return resumed
+
+
+#: How long a reading list may go without moving before it is taken to have
+#: been interrupted. A working list moves every few seconds, a row at a time.
+RESUME_AFTER_SECONDS = 120
 
 
 # --------------------------------------------------------------------------
@@ -928,12 +1107,45 @@ def queue_lock(user: jellyfin.User):
     return store.key_lock("import-queue", user.key)
 
 
-def clear_queue(user: jellyfin.User) -> int:
-    """Drop everything this account has waiting. Returns how many rows went."""
-    with queue_lock(user):
+def clear_queue(user: jellyfin.User) -> tuple[int, int]:
+    """Drop everything this account has waiting. Returns rows dropped and lists stopped.
+
+    A music list still being looked up would only refill the queue a row
+    later, so those are stopped first.
+    """
+    stopped = sum(1 for row in store.imports_for(user.key, limit=1000)
+                  if row["state"] == READING and row["medium"] == media.MUSIC
+                  and stop_list(user, row["import_id"]))
+    # The ask lock too, so a row a stopped list was in the middle of asking
+    # for is queued before this empties the queue, not after.
+    with ask_lock(user), queue_lock(user):
         dropped = store.clear_queue(user.key)
-    log.info("import queue cleared user=%s rows=%d", user.key, dropped)
-    return dropped
+    log.info("import queue cleared user=%s rows=%d lists_stopped=%d",
+             user.key, dropped, stopped)
+    return dropped, stopped
+
+
+def stop_list(user: jellyfin.User, import_id: str) -> bool:
+    """Stop looking up a list. What it already asked for stays asked for.
+
+    True when there was a lookup to stop. The flag is written down as well as
+    held here, so a restart does not carry on with a list somebody stopped.
+    """
+    with store.key_lock("import", import_id):
+        batch = get(user, import_id)
+        if batch is None or batch["state"] != READING:
+            return False
+        _close(import_id, READING, {"stopped": True})
+        with _working_guard:
+            _stopping.add(import_id)
+            running = import_id in _working
+    log.info("import %s stop asked user=%s", import_id, user.key)
+    if not running:
+        # Nothing here is working on it to see the mark: settle it now.
+        with _working_guard:
+            _stopping.discard(import_id)
+        _settle(import_id)
+    return True
 
 
 def _release_for(user: jellyfin.User) -> int:
@@ -977,13 +1189,31 @@ def _release_for(user: jellyfin.User) -> int:
 
 
 def watch() -> None:
-    """Start the pass that empties the import queue a day's allowance at a time."""
+    """Start the pass that carries on interrupted lists and empties the queue.
+
+    First, what a previous process left half done: a row it had claimed for
+    asking was not necessarily asked for, so it is offered again (asking for
+    one that did get through only finds it already asked for), and lists
+    kept the way the two-step importer kept them cannot be read as these are.
+    """
+    released = store.release_unsent()
+    dropped = store.drop_legacy_imports()
+    if released or dropped:
+        log.info("imports after a restart: %d claimed row(s) offered again, "
+                 "%d list(s) from the old importer dropped", released, dropped)
     threading.Thread(target=_queue_loop, name="import-queue", daemon=True).start()
 
 
 def _queue_loop() -> None:
     time.sleep(QUEUE_FIRST_DELAY_SECONDS)
     while True:
+        try:
+            resumed = resume_interrupted()
+            if resumed:
+                log.info("imports: carried on with %d interrupted list(s)",
+                         resumed)
+        except Exception as exc:  # noqa: BLE001 - as below.
+            log.warning("could not carry on with interrupted lists: %s", exc)
         try:
             went = release_queue()
             if went:

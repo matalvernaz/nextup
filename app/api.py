@@ -243,7 +243,10 @@ def capabilities(protocol: int = 1,
         # that read one number; `maxRowsByMedium` has each. `queue` is music
         # past the day's import allowance waiting for a later day rather than
         # being refused, readable and stoppable at /import/queue.
+        # `automatic`: exact matches are asked for as a list is looked up,
+        # and only near misses are left for a person to confirm.
         "importList": {"supported": bool(offered),
+                       "automatic": True,
                        "maxRows": config.IMPORT_MAX_ROWS,
                        "maxRowsByMedium": {key: imports.max_rows(key)
                                            for key in offered},
@@ -841,15 +844,30 @@ def get_import_queue(user: jellyfin.User = Depends(caller)) -> dict:
 
 @router.delete("/import/queue")
 def delete_import_queue(user: jellyfin.User = Depends(caller)) -> dict:
-    """Stop asking for anything this account's imported lists left waiting."""
-    return {"version": config.API_VERSION,
-            "removed": imports.clear_queue(user)}
+    """Stop asking for anything this account's imported lists left waiting.
+
+    A music list still being looked up is stopped as well, or it would only
+    refill the queue a row later.
+    """
+    removed, stopped = imports.clear_queue(user)
+    return {"version": config.API_VERSION, "removed": removed,
+            "listsStopped": stopped}
 
 
 @router.get("/import/{import_id}")
 def get_import(import_id: str,
                user: jellyfin.User = Depends(caller)) -> dict:
     """How far one list has got, and what each of its rows matched."""
+    return _import_state(user, import_id)
+
+
+@router.post("/import/{import_id}/stop")
+def post_import_stop(import_id: str,
+                     user: jellyfin.User = Depends(caller)) -> dict:
+    """Stop looking up a list. What it already asked for stays asked for."""
+    if imports.get(user, import_id) is None:
+        raise HTTPException(status_code=404, detail="No such list.")
+    imports.stop_list(user, import_id)
     return _import_state(user, import_id)
 
 
@@ -864,7 +882,7 @@ def post_import_confirm(import_id: str,
     to. Sending the key back would let a client ask for something the review
     it was shown never offered.
     """
-    if imports.confirm(user, import_id, set(lines)) is None:
+    if imports.ask_for_lines(user, import_id, set(lines), final=True) is None:
         raise HTTPException(status_code=404, detail="No such list.")
     return _import_state(user, import_id)
 
@@ -876,6 +894,12 @@ def _import_state(user: jellyfin.User, import_id: str) -> dict:
     business -- EchoFin has one screen per section and the web page has four
     headings on one -- and the state on each row is what both are built from.
 
+    Exact matches are asked for while the list is being looked up, so a row
+    that has already been dealt with is sent as `held`, with what became of it
+    as its `detail`: a client written for the two-step importer then offers
+    only the near misses still waiting for a decision, which is what is left
+    to confirm.
+
     A report's `waiting` rows are also in `asked`, marked "(waiting)". A client
     from before the queue reads only asked, already and refused, and would
     otherwise say nothing about most of a long list. A client that reads
@@ -884,9 +908,11 @@ def _import_state(user: jellyfin.User, import_id: str) -> dict:
     batch = imports.get(user, import_id)
     if batch is None:
         raise HTTPException(status_code=404, detail="No such list.")
-    report = batch.get("report")
-    if report and report.get("waiting"):
-        report = dict(report, asked=list(report.get("asked") or []) + [
+    report = imports.report(batch)
+    if not any(report.values()):
+        report = None
+    elif report["waiting"]:
+        report = dict(report, asked=report["asked"] + [
             f"{line} (waiting)" for line in report["waiting"]])
     return {
         "version": config.API_VERSION,
@@ -901,7 +927,7 @@ def _import_state(user: jellyfin.User, import_id: str) -> dict:
         "total": batch["total"],
         "duplicates": batch.get("duplicates", 0),
         "blanks": batch.get("blanks", 0),
-        "rows": batch.get("rows", []),
+        "rows": [_row_for_client(row) for row in batch.get("rows", [])],
         "report": report,
         "error": batch.get("error"),
         "remainingToday": _import_remaining(user, batch),
@@ -914,6 +940,27 @@ def _import_state(user: jellyfin.User, import_id: str) -> dict:
             "artistSongs": config.IMPORT_ARTIST_SONGS,
         } if batch["medium"] == media.MUSIC else None),
     }
+
+
+#: What a row that was acted on says to a client, by its outcome.
+_OUTCOME_DETAIL = {
+    imports.ASKED: "Asked for.",
+    imports.SENDING: "Being asked for.",
+    imports.ALREADY: "Already asked for.",
+    imports.WAITING: "Waiting for a later day.",
+    imports.LEFT: "Left out.",
+}
+
+
+def _row_for_client(row: dict) -> dict:
+    """One row as a client reads it: dealt-with rows as held, saying how."""
+    outcome = row.get("outcome") or ""
+    if not outcome:
+        return row
+    detail = (f"Refused: {row.get('outcomeDetail') or 'no reason given.'}"
+              if outcome == imports.REFUSED
+              else _OUTCOME_DETAIL.get(outcome, outcome))
+    return dict(row, state=imports.HELD, detail=detail)
 
 
 def _import_remaining(user: jellyfin.User, batch: dict) -> int | None:

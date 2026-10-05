@@ -61,14 +61,17 @@ def item_key(unit: str, source: str = "", ref: str = "",
     return f"bk:{unit}:{source}:{ref}"
 
 
-def search(query: str, unit: str, limit: int) -> list[dict]:
-    """Catalogue hits for one unit."""
+def search(query: str, unit: str, limit: int,
+           sources: tuple[str, ...] = ()) -> list[dict]:
+    """Catalogue hits for one unit, from `sources` only when it names any."""
     if not configured():
         return []
+    params = {"q": query, "unit": unit, "limit": limit}
+    if sources:
+        params["sources"] = ",".join(sources)
     try:
         with _client() as c:
-            resp = c.get("/search", params={"q": query, "unit": unit,
-                                            "limit": limit})
+            resp = c.get("/search", params=params)
     except httpx.HTTPError as exc:
         log.warning("search unreachable q=%r unit=%s (%s)", query, unit, exc)
         raise arr.Unavailable("Music search is not answering. Try again later.") from exc

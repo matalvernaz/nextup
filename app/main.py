@@ -927,7 +927,8 @@ def get_import(request: Request, msg: str = ""):
                                for key in offered},
                  "import_limit": _import_limit(user),
                  "import_queue": (imports.queue_status(user)
-                                  if media.MUSIC in offered else None)})
+                                  if media.MUSIC in offered else None),
+                 "recent": imports.recent(user)})
 
 
 def _import_limit(user: jellyfin.User) -> dict:
@@ -954,12 +955,13 @@ def post_import_queue_clear(request: Request, confirm: str = Form("")):
             url="/import?msg=" + quote(
                 "Nothing was dropped. Tick the box to confirm first."),
             status_code=303)
-    dropped = imports.clear_queue(user)
-    return RedirectResponse(
-        url="/import?msg=" + quote(
-            f"Stopped. {dropped:,} waiting row{'' if dropped == 1 else 's'} "
-            f"will not be asked for." if dropped else "Nothing was waiting."),
-        status_code=303)
+    dropped, stopped = imports.clear_queue(user)
+    said = (f"Stopped. {dropped:,} waiting row{'' if dropped == 1 else 's'} "
+            f"will not be asked for." if dropped else "Nothing was waiting.")
+    if stopped:
+        said += (f" {stopped} list{'' if stopped == 1 else 's'} still being "
+                 f"looked up {'was' if stopped == 1 else 'were'} stopped too.")
+    return RedirectResponse(url="/import?msg=" + quote(said), status_code=303)
 
 
 @app.post("/import")
@@ -1010,20 +1012,12 @@ def get_import_batch(request: Request, import_id: str, msg: str = ""):
         return RedirectResponse(
             url="/import?msg=" + quote("That list is no longer here."),
             status_code=303)
-    ready = batch["state"] == imports.READY
-    grouped = imports.groups(batch)
-    lines = {row["line"] for row in grouped[imports.MATCHED]}
     return templates.TemplateResponse(
         request=request, name="import_batch.html",
         context={
-            "user": user, "batch": batch, "groups": grouped,
+            "user": user, "batch": batch, "rows": imports.view(batch),
             "message": msg,
-            # Only worth working out where there is a button to press.
-            "covered": imports.affordable(user, batch, lines) if ready else 0,
-            "ticked": len(lines),
             "hit_label": imports.hit_label,
-            "states": {"matched": imports.MATCHED, "uncertain": imports.UNCERTAIN,
-                       "held": imports.HELD, "missing": imports.MISSING},
             "no_match": imports.NO_MATCH,
             "import_limit": _import_limit(user),
         })
@@ -1031,7 +1025,7 @@ def get_import_batch(request: Request, import_id: str, msg: str = ""):
 
 @app.post("/import/{import_id}/confirm")
 async def post_import_confirm(request: Request, import_id: str):
-    """Ask for the ticked rows.
+    """Ask for the near misses somebody ticked, while the rest is looked up too.
 
     The ticks are read from the raw form rather than declared as a parameter
     because a checkbox that is not ticked sends nothing at all, so the field
@@ -1050,11 +1044,52 @@ async def post_import_confirm(request: Request, import_id: str):
             url=f"/import/{import_id}?msg=" + quote(
                 "Nothing was ticked, so nothing was asked for."),
             status_code=303)
-    if imports.confirm(user, import_id, lines) is None:
+    if imports.ask_for_lines(user, import_id, lines) is None:
         return RedirectResponse(
             url="/import?msg=" + quote("That list is no longer here."),
             status_code=303)
-    return RedirectResponse(url=f"/import/{import_id}", status_code=303)
+    return RedirectResponse(
+        url=f"/import/{import_id}?msg=" + quote("Asking for the ticked ones."),
+        status_code=303)
+
+
+@app.post("/import/{import_id}/leave")
+async def post_import_leave(request: Request, import_id: str):
+    """Ask for whatever is ticked, leave the other near misses, and finish.
+
+    The second button of the near-miss form, so ticks made before pressing it
+    are asked for rather than thrown away.
+    """
+    try:
+        user = viewer(request)
+    except LookupError as exc:
+        return _signin_page(request, detail=str(exc), status=401)
+    form = await request.form()
+    lines = {int(value) for value in form.getlist("line")
+             if str(value).isdigit()}
+    if imports.ask_for_lines(user, import_id, lines, final=True) is None:
+        return RedirectResponse(
+            url="/import?msg=" + quote("That list is no longer here."),
+            status_code=303)
+    return RedirectResponse(
+        url=f"/import/{import_id}?msg=" + quote(
+            "Asking for the ticked ones and leaving the rest." if lines
+            else "Left the rest."), status_code=303)
+
+
+@app.post("/import/{import_id}/stop")
+def post_import_stop(request: Request, import_id: str):
+    """Stop looking up a list. What it already asked for stays asked for."""
+    try:
+        user = viewer(request)
+    except LookupError as exc:
+        return _signin_page(request, detail=str(exc), status=401)
+    stopped = imports.stop_list(user, import_id)
+    return RedirectResponse(
+        url=f"/import/{import_id}?msg=" + quote(
+            "Stopped. Nothing more from this list will be asked for."
+            if stopped else "That list was not being looked up."),
+        status_code=303)
 
 
 BOOK = "book"

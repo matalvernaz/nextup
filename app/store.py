@@ -148,6 +148,21 @@ CREATE TABLE IF NOT EXISTS imports (
 CREATE INDEX IF NOT EXISTS imports_by_user
     ON imports(user_key, created_at);
 
+-- One row of an imported list: what the file said, what the lookup found
+-- (`state`) and what became of it (`outcome`, empty until something did).
+-- Apart from the batch's JSON because rows arrive and are acted on one at a
+-- time while somebody watches: appending to a blob of thousands of rows, or
+-- editing one row inside it, rewrote all of it every time.
+CREATE TABLE IF NOT EXISTS import_rows (
+    import_id      TEXT NOT NULL,
+    line           INTEGER NOT NULL,
+    state          TEXT NOT NULL,
+    data           TEXT NOT NULL,
+    outcome        TEXT NOT NULL DEFAULT '',
+    outcome_detail TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (import_id, line)
+);
+
 -- Rows of imported music lists that were ticked but did not fit in the day's
 -- import allowance. Each is asked for by itself on a later day, oldest first,
 -- and deleted once it has been. Kept apart from `imports` because a list is
@@ -1290,8 +1305,103 @@ def prune_imports(before: float) -> int:
     They are somebody's uploaded file and there is no reason to keep one after
     it has been acted on -- but they are deleted on a clock rather than on
     completion, because the report of what was asked for is the most useful
-    page in the feature and it should survive being closed and reopened.
+    page in the feature and it should survive being closed and reopened. A
+    list still being worked through is kept however old it is.
     """
     with db() as conn:
-        cur = conn.execute("DELETE FROM imports WHERE created_at < ?", (before,))
+        cur = conn.execute(
+            "DELETE FROM imports WHERE created_at < ? AND state <> 'reading'",
+            (before,))
+        conn.execute("DELETE FROM import_rows WHERE import_id NOT IN "
+                     "(SELECT import_id FROM imports)")
     return cur.rowcount
+
+
+#: The fields of a row that live in their own columns rather than in `data`.
+_ROW_COLUMNS = ("line", "state", "outcome", "outcomeDetail")
+
+
+def put_import_row(import_id: str, row: dict, outcome: str = "",
+                   detail: str = "") -> None:
+    """Write down one looked-up row of a list, and what became of it."""
+    data = {key: value for key, value in row.items() if key not in _ROW_COLUMNS}
+    with db() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO import_rows (import_id, line, state, data, "
+            "outcome, outcome_detail) VALUES (?,?,?,?,?,?)",
+            (import_id, row["line"], row["state"], json.dumps(data), outcome,
+             detail))
+
+
+def import_rows(import_id: str) -> list[dict]:
+    """A list's looked-up rows, in file order."""
+    with db() as conn:
+        found = conn.execute(
+            "SELECT line, state, data, outcome, outcome_detail FROM import_rows "
+            "WHERE import_id=? ORDER BY line", (import_id,)).fetchall()
+    return [{**json.loads(row["data"]), "line": row["line"],
+             "state": row["state"], "outcome": row["outcome"],
+             "outcomeDetail": row["outcome_detail"]} for row in found]
+
+
+def import_row_lines(import_id: str) -> set[int]:
+    """Which lines of a list have been looked up so far."""
+    with db() as conn:
+        return {row["line"] for row in conn.execute(
+            "SELECT line FROM import_rows WHERE import_id=?", (import_id,))}
+
+
+def set_import_outcome(import_id: str, line: int, outcome: str,
+                       detail: str = "") -> None:
+    with db() as conn:
+        conn.execute(
+            "UPDATE import_rows SET outcome=?, outcome_detail=? "
+            "WHERE import_id=? AND line=?", (outcome, detail, import_id, line))
+
+
+def leave_undecided(import_id: str) -> int:
+    """Mark every row nobody has decided about yet as left. Returns how many."""
+    with db() as conn:
+        cur = conn.execute(
+            "UPDATE import_rows SET outcome='left' WHERE import_id=? "
+            "AND outcome='' AND state IN ('matched', 'uncertain')",
+            (import_id,))
+    return cur.rowcount
+
+
+def release_unsent() -> int:
+    """Offer again the rows a stopped process had claimed for asking."""
+    with db() as conn:
+        cur = conn.execute(
+            "UPDATE import_rows SET outcome='' WHERE outcome='sending'")
+    return cur.rowcount
+
+
+def drop_legacy_imports() -> int:
+    """Forget lists kept the old way, with their rows inside the batch.
+
+    They come from the importer that asked for nothing until somebody
+    confirmed, and read as this one does they would say exact matches were
+    near misses. They are at most a couple of days old by the retention rule.
+    """
+    with db() as conn:
+        legacy = [row["import_id"] for row in conn.execute(
+            "SELECT import_id, payload FROM imports")
+            if json.loads(row["payload"]).get("rows")]
+        conn.executemany("DELETE FROM imports WHERE import_id=?",
+                         [(import_id,) for import_id in legacy])
+    return len(legacy)
+
+
+def imports_in_state(state: str) -> list[sqlite3.Row]:
+    with db() as conn:
+        return conn.execute("SELECT * FROM imports WHERE state=?",
+                            (state,)).fetchall()
+
+
+def imports_for(user_key: str, limit: int = 10) -> list[sqlite3.Row]:
+    """This account's most recent lists, newest first."""
+    with db() as conn:
+        return conn.execute(
+            "SELECT * FROM imports WHERE user_key=? ORDER BY created_at DESC "
+            "LIMIT ?", (user_key, limit)).fetchall()
