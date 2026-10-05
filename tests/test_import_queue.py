@@ -111,6 +111,11 @@ started = client.post("/api/v1/import", headers=as_("kid-token"),
 ready = until(started["importId"], "ready")
 lines = [row["line"] for row in ready["rows"] if row["state"] == "matched"]
 check.equal(len(lines), 4, "all four albums matched")
+check.that(ready["remainingToday"] >= 4,
+           "a client from before the queue is given enough to cover every "
+           "row, so it does not warn that the rest will be refused")
+check.equal(ready["importAllowance"]["leftToday"], 24,
+            "and the real import allowance is there for a client that reads it")
 done = client.post(f"/api/v1/import/{started['importId']}/confirm",
                    headers=as_("kid-token"), json={"lines": lines}).json()
 done = until(started["importId"], "done")
@@ -181,6 +186,44 @@ with store.db() as conn:
     conn.execute("UPDATE requests SET requested_at = requested_at - 90000")
 check.equal(imports.release_queue(), 1, "the living account's row goes in")
 check.equal(store.queue_owners(), [], "and the departed account's queue is gone")
+
+# --- a restart between asking for a row and taking it out of the queue ------
+store.queue_rows(KID.key, media.MUSIC, "r", [(2, "Record 9 by Band 9", {
+    "itemKey": "bk:album:deezer:a9", "unit": "album", "title": "Record 9",
+    "artist": "Band 9", "ref": "a9", "source": "deezer"})])
+with store.db() as conn:
+    conn.execute("UPDATE requests SET requested_at = requested_at - 90000")
+waiting_during_ask: list[int] = []
+
+
+def watching_add(unit, hit, by, bulk=False):
+    waiting_during_ask.append(store.queued_count(KID.key))
+    return fake_add(unit, hit, by, bulk)
+
+
+def container_stops(row_id):
+    raise RuntimeError("the container stopped here")
+
+
+real_unqueue = store.unqueue
+store.unqueue = container_stops
+buskarr.add = watching_add
+asked.clear()
+try:
+    imports._release_for(KID)
+except RuntimeError:
+    pass
+store.unqueue = real_unqueue
+buskarr.add = fake_add
+check.equal(waiting_during_ask, [1],
+            "a row being asked for is still in the queue, so a list confirmed "
+            "meanwhile waits behind it instead of going first")
+check.equal(store.queued_count(KID.key), 1,
+            "a restart after the ask leaves the row in the queue, not lost")
+check.equal(imports._release_for(KID), 1, "the next pass takes it")
+check.equal(len(asked), 1,
+            "without asking buskarr a second time: the ledger already had it")
+check.equal(store.queued_count(KID.key), 0, "and the queue is empty")
 
 # --- stopping it ------------------------------------------------------------
 store.queue_rows(KID.key, media.MUSIC, "z", [(2, "One", {"unit": "album"}),

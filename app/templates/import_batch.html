@@ -69,9 +69,10 @@
 
 {% if report.waiting %}
 <h4>Waiting</h4>
-<p>These did not fit in today's import limit of {{ import_limit.perDay }}
-   songs. They will be asked for by themselves on the days after, in this
-   order. <a href="/import">See or stop them</a>.</p>
+<p>These did not fit in the import limit of {{ import_limit.perDay }} songs
+   on the day this list was confirmed, so they were queued to be asked for by
+   themselves on the days after, in this order. Some may have gone in, or been
+   stopped, since. <a href="/import">See what is still waiting</a>.</p>
 <details>
   <summary>The {{ report.waiting | length }} waiting</summary>
   <ul>

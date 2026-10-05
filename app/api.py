@@ -904,5 +904,32 @@ def _import_state(user: jellyfin.User, import_id: str) -> dict:
         "rows": batch.get("rows", []),
         "report": report,
         "error": batch.get("error"),
-        "remainingToday": wants.allowance(user, batch["medium"]),
+        "remainingToday": _import_remaining(user, batch),
+        # Music lists have their own allowance, counted in songs; None for an
+        # account it does not limit.
+        "importAllowance": ({
+            "leftToday": wants.import_allowance(user, media.MUSIC),
+            "songsPerDay": config.IMPORT_MUSIC_DAILY_SONGS,
+            "albumSongs": config.IMPORT_ALBUM_SONGS,
+            "artistSongs": config.IMPORT_ARTIST_SONGS,
+        } if batch["medium"] == media.MUSIC else None),
     }
+
+
+def _import_remaining(user: jellyfin.User, batch: dict) -> int | None:
+    """What a client may spend on this list today, in the units it prices by.
+
+    EchoFin walks the ticked rows against this, priced by the ordinary costs,
+    and says that whatever does not fit "will be refused". For a list of music
+    that is no longer true -- the rest waits -- so a capped account is given
+    enough to cover every row it could tick, and a client from before the
+    queue says nothing rather than something false. `importAllowance` has the
+    real numbers.
+    """
+    if batch["medium"] != media.MUSIC:
+        return wants.allowance(user, batch["medium"])
+    if wants.import_allowance(user, media.MUSIC) is None:
+        return None
+    return sum(media.cost(media.MUSIC, (row.get("hit") or {}).get("unit")
+                          or batch.get("unit") or "")
+               for row in batch.get("rows", []))

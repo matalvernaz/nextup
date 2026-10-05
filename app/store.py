@@ -1263,21 +1263,17 @@ def queue_owners() -> list[str]:
             "SELECT DISTINCT user_key FROM import_queue ORDER BY user_key")]
 
 
-def claim_queued(row_id: int) -> bool:
-    """Take one waiting row out of the queue. False if it was already gone."""
+def is_queued(row_id: int) -> bool:
+    """Whether a waiting row is still there, not stopped or already asked for."""
     with db() as conn:
-        cur = conn.execute("DELETE FROM import_queue WHERE id=?", (row_id,))
-    return cur.rowcount > 0
+        return conn.execute("SELECT 1 FROM import_queue WHERE id=?",
+                            (row_id,)).fetchone() is not None
 
 
-def requeue(row: sqlite3.Row) -> None:
-    """Put a claimed row back where it was, under its own id."""
+def unqueue(row_id: int) -> None:
+    """Take one row out of the queue, once it has been asked for or refused."""
     with db() as conn:
-        conn.execute(
-            "INSERT OR IGNORE INTO import_queue (id, user_key, medium, "
-            "import_id, line, label, hit, queued_at) VALUES (?,?,?,?,?,?,?,?)",
-            (row["id"], row["user_key"], row["medium"], row["import_id"],
-             row["line"], row["label"], row["hit"], row["queued_at"]))
+        conn.execute("DELETE FROM import_queue WHERE id=?", (row_id,))
 
 
 def clear_queue(user_key: str) -> int:

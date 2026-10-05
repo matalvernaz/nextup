@@ -923,7 +923,7 @@ def queue_lock(user: jellyfin.User):
     """Held while one of this account's waiting rows is being asked for.
 
     Clearing the queue takes it too, so "stop" cannot land between a row being
-    taken out to be asked for and being put back because it could not be.
+    asked for and being taken out of the queue.
     """
     return store.key_lock("import-queue", user.key)
 
@@ -937,11 +937,18 @@ def clear_queue(user: jellyfin.User) -> int:
 
 
 def _release_for(user: jellyfin.User) -> int:
-    """One account's waiting rows, oldest first, until the allowance runs out."""
+    """One account's waiting rows, oldest first, until the allowance runs out.
+
+    A row leaves the queue only after it has been asked for or refused. Taken
+    out first, a restart in between lost it, and the queue looked empty to a
+    list confirmed while its last row was being asked for, which then went
+    ahead of it. Asking again after a restart costs nothing: the ledger already
+    has the row and `want` answers "Already asked for."
+    """
     went = 0
     for row in store.queued(user.key):
         with queue_lock(user):
-            if not store.claim_queued(row["id"]):
+            if not store.is_queued(row["id"]):
                 continue
             hit = json.loads(row["hit"])
             try:
@@ -949,7 +956,6 @@ def _release_for(user: jellyfin.User) -> int:
                                       hit.get("unit", ""), dict(hit),
                                       imported=True)
             except (wants.ImportLimitReached, wants.TryLater) as later:
-                store.requeue(row)
                 if isinstance(later, wants.TryLater):
                     log.warning("import queue: buskarr unavailable, trying "
                                 "again later user=%s: %s", user.key, later)
@@ -957,12 +963,13 @@ def _release_for(user: jellyfin.User) -> int:
             except wants.Denied as denied:
                 log.info("import queue: refused user=%s line=%d %r: %s",
                          user.key, row["line"], row["label"], denied)
+                store.unqueue(row["id"])
                 continue
             except Exception as exc:  # noqa: BLE001 - tried again next pass.
-                store.requeue(row)
                 log.warning("import queue: could not ask user=%s %r: %s",
                             user.key, row["label"], exc)
                 break
+            store.unqueue(row["id"])
         went += 1
         log.info("import queue: asked user=%s %r state=%s", user.key,
                  row["label"], state)
