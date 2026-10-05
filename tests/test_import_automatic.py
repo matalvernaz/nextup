@@ -160,5 +160,103 @@ store.prune_imports(time.time())
 check.that(store.get_import(import_id) is not None,
            "however old it is, a list still reading is kept")
 
+# --- stopping a list -------------------------------------------------------
+lookup_seconds[0] = 0.02
+asked.clear()
+import_id = imports.start(MATT, media.MUSIC, "album", "stop.csv",
+                          listing("Stop", 80))
+time.sleep(0.3)
+check.equal(imports.stop_list(MATT, import_id), True, "a list being looked up can be stopped")
+stopped = until(MATT, import_id, imports.DONE)
+seen = len(asked)
+time.sleep(0.2)
+check.that(stopped["state"] == imports.DONE and stopped["done"] < 80
+           and stopped.get("stopped"),
+           f"it ends where it was ({stopped['done']} of 80) and says it was stopped")
+check.equal(len(asked), seen, "and nothing more is asked for after")
+with store.db() as conn:
+    conn.execute("UPDATE imports SET state='reading', touched_at=0 "
+                 "WHERE import_id=?", (import_id,))
+jellyfin.all_users = lambda: {"matt": MATT.id, "kid": KID.id}
+jellyfin.user = lambda name: {"matt": MATT, "kid": KID}[name]
+check.equal(imports.resume_interrupted(), 0,
+            "a stopped list is not carried on after a restart")
+check.equal(imports.get(MATT, import_id)["state"], imports.DONE,
+            "it is settled instead")
+
+# Stopping the queue stops a music list still filling it, or the next row
+# would only refill it.
+from app import config  # noqa: E402
+config.IMPORT_MUSIC_DAILY_SONGS = 1
+asked.clear()
+import_id = imports.start(KID, media.MUSIC, "track", "fills.csv",
+                          "Artist,Track\n" + "".join(f"Band,Fill {n}\n"
+                                                     for n in range(80)))
+deadline = time.monotonic() + 10
+while store.queued_count(KID.key) < 3 and time.monotonic() < deadline:
+    time.sleep(0.01)
+dropped, lists_stopped = imports.clear_queue(KID)
+check.equal(lists_stopped, 1, "stopping the queue stops the list feeding it")
+until(KID, import_id, imports.DONE)
+time.sleep(0.2)
+check.equal(store.queued_count(KID.key), 0, "so the queue stays empty")
+config.IMPORT_MUSIC_DAILY_SONGS = 200
+
+# --- what a restart leaves behind -------------------------------------------
+lookup_seconds[0] = 0.0
+import_id = imports.start(MATT, media.MUSIC, "album", "claimed.csv",
+                          listing("Claimed", 1, near={0}))
+batch = until(MATT, import_id, imports.READY)
+line = batch["rows"][0]["line"]
+store.set_import_outcome(import_id, line, imports.SENDING)
+check.equal(store.release_unsent(), 1,
+            "a row a stopped process had claimed for asking is released")
+check.equal(imports.get(MATT, import_id)["rows"][0]["outcome"], "",
+            "and is offered again rather than reported as asked for")
+
+store.put_import("old-style", MATT.id, "music", imports.READY, 1,
+                 {"medium": "music", "unit": "album", "rows": [
+                     {"line": 2, "title": "Old", "state": "matched"}]})
+check.equal(store.drop_legacy_imports(), 1,
+            "a list kept the old way, rows inside the batch, is dropped")
+check.that(store.get_import(import_id) is not None, "and a new one is kept")
+
+# --- finishing with nothing ticked, and with the second button ---------------
+asked.clear()
+check.equal(imports.ask_for_lines(MATT, import_id, set(), final=True)["state"],
+            imports.DONE,
+            "a final confirm with nothing ticked leaves the near misses and "
+            "finishes the list")
+check.equal(imports.get(MATT, import_id)["rows"][0]["outcome"], imports.LEFT,
+            "the near miss is marked left")
+check.equal(asked, [], "and nothing was asked for")
+
+# --- a thread that cannot start ---------------------------------------------
+real_thread = imports.threading.Thread
+
+
+class _NoThread(real_thread):
+    def start(self):
+        raise RuntimeError("can't start new thread")
+
+
+imports.threading.Thread = _NoThread
+try:
+    imports._start_working("never-started", MATT, media.MUSIC, "album", [])
+except RuntimeError:
+    pass
+imports.threading.Thread = real_thread
+check.that("never-started" not in imports._working,
+           "a list whose thread could not start is not left marked as worked on")
+
+# --- an old list part way through being confirmed is pruned like any other ----
+store.put_import("stuck-asking", MATT.id, "music", imports.ASKING, 1,
+                 {"medium": "music", "unit": "album"})
+with store.db() as conn:
+    conn.execute("UPDATE imports SET created_at=0 WHERE import_id='stuck-asking'")
+store.prune_imports(time.time() - 3600)
+check.that(store.get_import("stuck-asking") is None,
+           "an old list left asking is pruned, not kept for ever")
+
 harness.cleanup()
 raise SystemExit(check.report())

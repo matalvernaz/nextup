@@ -22,6 +22,9 @@
 <p>{{ "{:,}".format(batch.done) }} of {{ "{:,}".format(batch.total) }} looked
    up. Exact matches are asked for as they are found, so you can leave this
    page and come back. <a href="/import/{{ batch.id }}">Check again</a></p>
+<form method="post" action="/import/{{ batch.id }}/stop">
+  <p><button type="submit">Stop this list</button></p>
+</form>
 {% elif batch.state == 'asking' %}
 <h3>Asking for these</h3>
 <p>{{ batch.done }} of {{ batch.chosen }} sent so far.</p>
@@ -30,6 +33,11 @@
 <h3>This import stopped</h3>
 <p role="alert">{{ batch.error }}</p>
 <p><a href="/import">Import a list</a></p>
+{% elif batch.stopped %}
+<h3>Stopped</h3>
+<p>Stopped after looking up {{ "{:,}".format(batch.done) }} of
+   {{ "{:,}".format(batch.total) }}. What it asked for before then stays asked
+   for.</p>
 {% else %}
 <h3>All looked up</h3>
 {% endif %}
@@ -83,12 +91,11 @@
   {% endfor %}
 </ul>
 <p><button type="submit">Ask for the ticked ones</button></p>
-</form>
 {% if batch.state == 'ready' %}
-<form method="post" action="/import/{{ batch.id }}/leave">
-  <p><button type="submit">Leave the rest</button></p>
-</form>
+<p><button type="submit" formaction="/import/{{ batch.id }}/leave">Ask for the
+   ticked ones and leave the rest</button></p>
 {% endif %}
+</form>
 {% endif %}
 
 {# ----------------------------------------------------------------- report #}
@@ -96,7 +103,7 @@
 
 {% if rows.asked %}
 <h3>Asked for</h3>
-<details>
+<details{% if rows.asked | length <= 20 %} open{% endif %}>
   <summary>The {{ "{:,}".format(rows.asked | length) }} asked for</summary>
   <ul>
     {% for row in rows.asked %}<li>{{ said(row) }}</li>{% endfor %}
@@ -110,7 +117,7 @@
    songs, so they are queued and asked for by themselves on the days after, in
    this order. Some may have gone in, or been stopped, since.
    <a href="/import">See what is still waiting</a>.</p>
-<details>
+<details{% if rows.waiting | length <= 20 %} open{% endif %}>
   <summary>The {{ "{:,}".format(rows.waiting | length) }} waiting</summary>
   <ul>
     {% for row in rows.waiting %}<li>{{ said(row) }}</li>{% endfor %}
@@ -120,7 +127,7 @@
 
 {% if rows.already %}
 <h3>Already here or already asked for</h3>
-<details>
+<details{% if rows.already | length <= 20 %} open{% endif %}>
   <summary>The {{ "{:,}".format(rows.already | length) }} already here or asked for</summary>
   <ul>
     {% for row in rows.already %}<li>{{ said(row) }}</li>{% endfor %}

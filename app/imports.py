@@ -668,6 +668,8 @@ def start(user: jellyfin.User, medium: str, unit: str, filename: str,
 #: Lists a thread in this process is working through. One that says it is
 #: reading and is not in here was interrupted by a restart.
 _working: set[str] = set()
+#: Lists somebody has stopped, checked by their thread before each row.
+_stopping: set[str] = set()
 _working_guard = threading.Lock()
 
 
@@ -677,9 +679,15 @@ def _start_working(import_id: str, user: jellyfin.User, medium: str, unit: str,
         if import_id in _working:
             return
         _working.add(import_id)
-    threading.Thread(target=_work_through, name=f"import-{import_id[:8]}",
-                     args=(import_id, user, medium, unit, items),
-                     daemon=True).start()
+    try:
+        threading.Thread(target=_work_through, name=f"import-{import_id[:8]}",
+                         args=(import_id, user, medium, unit, items),
+                         daemon=True).start()
+    except Exception:
+        # Left marked, nothing would ever pick this list up again.
+        with _working_guard:
+            _working.discard(import_id)
+        raise
 
 
 def _work_through(import_id: str, user: jellyfin.User, medium: str, unit: str,
@@ -689,10 +697,16 @@ def _work_through(import_id: str, user: jellyfin.User, medium: str, unit: str,
         requested = store.outstanding_keys(user.key, medium)
         done = len(store.import_row_lines(import_id))
         for index, row in enumerate(items, start=1):
+            if import_id in _stopping:
+                log.info("import %s stopped after %d rows", import_id, done)
+                break
             with _turn:
                 found = match(user, medium, unit, row, requested)
             outcome, detail = (_ask_one(import_id, user, medium, found)
                                if found["state"] == MATCHED else ("", ""))
+            if outcome is None:
+                log.info("import %s stopped after %d rows", import_id, done)
+                break
             store.put_import_row(import_id, found, outcome, detail)
             done += 1
             store.touch_import(import_id, done)
@@ -711,14 +725,20 @@ def _work_through(import_id: str, user: jellyfin.User, medium: str, unit: str,
     finally:
         with _working_guard:
             _working.discard(import_id)
+            _stopping.discard(import_id)
     _settle(import_id)
     log.info("import %s read: %s", import_id,
              _tally(store.import_rows(import_id)))
 
 
 def _ask_one(import_id: str, user: jellyfin.User, medium: str,
-             row: dict) -> tuple[str, str]:
+             row: dict) -> tuple[str | None, str]:
     """Ask for one row's match. Returns its outcome and, for a refusal, why.
+
+    The outcome is None for a list that has been stopped: the row is not
+    asked for. That is decided under the same lock clearing the queue takes,
+    so a row cannot be queued after somebody has stopped the list and emptied
+    the queue.
 
     Music that does not fit in the day's import allowance, or that buskarr is
     not answering for, waits in this account's queue and goes in on a later
@@ -729,6 +749,9 @@ def _ask_one(import_id: str, user: jellyfin.User, medium: str,
     hit = row["hit"]
     label = hit_label(hit)
     with ask_lock(user):
+        with _working_guard:
+            if import_id in _stopping:
+                return None, ""
         if medium == media.MUSIC and store.queued_count(user.key, medium):
             store.queue_rows(user.key, medium, import_id, [(row["line"], label, hit)])
             return WAITING, ""
@@ -772,7 +795,10 @@ def _settle(import_id: str) -> None:
         current = store.get_import(import_id)
         if current is None or current["state"] not in (READING, READY):
             return
-        undecided = any(_offerable(row) for row in store.import_rows(import_id))
+        # A ticked row still being asked for is not decided yet: the ask
+        # settles the list itself when it is done.
+        undecided = any(_offerable(row) or row.get("outcome") == SENDING
+                        for row in store.import_rows(import_id))
         _close(import_id, READY if undecided else DONE, {})
 
 
@@ -907,6 +933,13 @@ def ask_for_lines(user: jellyfin.User, import_id: str, lines: set[int],
             return batch
         chosen = [row for row in batch["rows"]
                   if row["line"] in lines and _offerable(row)]
+        if final and not chosen:
+            # Confirming nothing is the common case now that exact matches
+            # are asked for as they are found: it leaves the near misses and
+            # ends the list.
+            store.leave_undecided(import_id)
+            _close(import_id, DONE, {})
+            return get(user, import_id)
         if not chosen:
             return batch
         if final:
@@ -931,7 +964,10 @@ def _ask_chosen(import_id: str, user: jellyfin.User, medium: str,
     try:
         for index, row in enumerate(chosen, start=1):
             outcome, detail = _ask_one(import_id, user, medium, row)
-            store.set_import_outcome(import_id, row["line"], outcome, detail)
+            # A list stopped while this was on its way: the row is offered
+            # again rather than left claimed.
+            store.set_import_outcome(import_id, row["line"], outcome or "",
+                                     detail)
             if final:
                 store.touch_import(import_id, index)
     except Exception as exc:  # noqa: BLE001 - the thread must not die silently.
@@ -948,18 +984,6 @@ def _settle_if_read(import_id: str) -> None:
     current = store.get_import(import_id)
     if current is not None and current["state"] == READY:
         _settle(import_id)
-
-
-def leave_rest(user: jellyfin.User, import_id: str) -> dict | None:
-    """Leave every near miss on this list unasked. Returns the batch, or None."""
-    with store.key_lock("import", import_id):
-        batch = get(user, import_id)
-        if batch is None:
-            return None
-        left = store.leave_undecided(import_id)
-    log.info("import %s left %d near miss(es) user=%s", import_id, left, user.key)
-    _settle_if_read(import_id)
-    return get(user, import_id)
 
 
 def recent(user: jellyfin.User) -> list[dict]:
@@ -996,6 +1020,9 @@ def resume_interrupted() -> int:
     resumed = 0
     for row in stalled:
         payload = json.loads(row["payload"])
+        if payload.get("stopped"):
+            _settle(row["import_id"])
+            continue
         items = payload.get("items")
         name = by_id.get(row["user_key"])
         if not items or not name:
@@ -1080,12 +1107,45 @@ def queue_lock(user: jellyfin.User):
     return store.key_lock("import-queue", user.key)
 
 
-def clear_queue(user: jellyfin.User) -> int:
-    """Drop everything this account has waiting. Returns how many rows went."""
-    with queue_lock(user):
+def clear_queue(user: jellyfin.User) -> tuple[int, int]:
+    """Drop everything this account has waiting. Returns rows dropped and lists stopped.
+
+    A music list still being looked up would only refill the queue a row
+    later, so those are stopped first.
+    """
+    stopped = sum(1 for row in store.imports_for(user.key, limit=1000)
+                  if row["state"] == READING and row["medium"] == media.MUSIC
+                  and stop_list(user, row["import_id"]))
+    # The ask lock too, so a row a stopped list was in the middle of asking
+    # for is queued before this empties the queue, not after.
+    with ask_lock(user), queue_lock(user):
         dropped = store.clear_queue(user.key)
-    log.info("import queue cleared user=%s rows=%d", user.key, dropped)
-    return dropped
+    log.info("import queue cleared user=%s rows=%d lists_stopped=%d",
+             user.key, dropped, stopped)
+    return dropped, stopped
+
+
+def stop_list(user: jellyfin.User, import_id: str) -> bool:
+    """Stop looking up a list. What it already asked for stays asked for.
+
+    True when there was a lookup to stop. The flag is written down as well as
+    held here, so a restart does not carry on with a list somebody stopped.
+    """
+    with store.key_lock("import", import_id):
+        batch = get(user, import_id)
+        if batch is None or batch["state"] != READING:
+            return False
+        _close(import_id, READING, {"stopped": True})
+        with _working_guard:
+            _stopping.add(import_id)
+            running = import_id in _working
+    log.info("import %s stop asked user=%s", import_id, user.key)
+    if not running:
+        # Nothing here is working on it to see the mark: settle it now.
+        with _working_guard:
+            _stopping.discard(import_id)
+        _settle(import_id)
+    return True
 
 
 def _release_for(user: jellyfin.User) -> int:
@@ -1129,7 +1189,18 @@ def _release_for(user: jellyfin.User) -> int:
 
 
 def watch() -> None:
-    """Start the pass that carries on interrupted lists and empties the queue."""
+    """Start the pass that carries on interrupted lists and empties the queue.
+
+    First, what a previous process left half done: a row it had claimed for
+    asking was not necessarily asked for, so it is offered again (asking for
+    one that did get through only finds it already asked for), and lists
+    kept the way the two-step importer kept them cannot be read as these are.
+    """
+    released = store.release_unsent()
+    dropped = store.drop_legacy_imports()
+    if released or dropped:
+        log.info("imports after a restart: %d claimed row(s) offered again, "
+                 "%d list(s) from the old importer dropped", released, dropped)
     threading.Thread(target=_queue_loop, name="import-queue", daemon=True).start()
 
 

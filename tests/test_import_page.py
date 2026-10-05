@@ -161,6 +161,10 @@ check.equal(nothing.status_code, 303,
 check.that("Nothing was ticked" in unquote(nothing.headers["location"]),
            "and says so")
 
+check.that('formaction="/import/' in review.text
+           and "Ask for the ticked ones and leave the rest" in " ".join(review.text.split()),
+           "leaving the rest is a second button on the same form, so ticks "
+           "made first are asked for rather than thrown away")
 left = client.post(where + "/leave")
 check.equal(left.status_code, 303, "leaving the rest redirects back")
 done = settle(where, "Close matches left out")

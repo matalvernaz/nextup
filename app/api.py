@@ -844,15 +844,30 @@ def get_import_queue(user: jellyfin.User = Depends(caller)) -> dict:
 
 @router.delete("/import/queue")
 def delete_import_queue(user: jellyfin.User = Depends(caller)) -> dict:
-    """Stop asking for anything this account's imported lists left waiting."""
-    return {"version": config.API_VERSION,
-            "removed": imports.clear_queue(user)}
+    """Stop asking for anything this account's imported lists left waiting.
+
+    A music list still being looked up is stopped as well, or it would only
+    refill the queue a row later.
+    """
+    removed, stopped = imports.clear_queue(user)
+    return {"version": config.API_VERSION, "removed": removed,
+            "listsStopped": stopped}
 
 
 @router.get("/import/{import_id}")
 def get_import(import_id: str,
                user: jellyfin.User = Depends(caller)) -> dict:
     """How far one list has got, and what each of its rows matched."""
+    return _import_state(user, import_id)
+
+
+@router.post("/import/{import_id}/stop")
+def post_import_stop(import_id: str,
+                     user: jellyfin.User = Depends(caller)) -> dict:
+    """Stop looking up a list. What it already asked for stays asked for."""
+    if imports.get(user, import_id) is None:
+        raise HTTPException(status_code=404, detail="No such list.")
+    imports.stop_list(user, import_id)
     return _import_state(user, import_id)
 
 

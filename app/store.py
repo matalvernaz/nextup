@@ -1310,8 +1310,8 @@ def prune_imports(before: float) -> int:
     """
     with db() as conn:
         cur = conn.execute(
-            "DELETE FROM imports WHERE created_at < ? "
-            "AND state NOT IN ('reading', 'asking')", (before,))
+            "DELETE FROM imports WHERE created_at < ? AND state <> 'reading'",
+            (before,))
         conn.execute("DELETE FROM import_rows WHERE import_id NOT IN "
                      "(SELECT import_id FROM imports)")
     return cur.rowcount
@@ -1367,6 +1367,30 @@ def leave_undecided(import_id: str) -> int:
             "AND outcome='' AND state IN ('matched', 'uncertain')",
             (import_id,))
     return cur.rowcount
+
+
+def release_unsent() -> int:
+    """Offer again the rows a stopped process had claimed for asking."""
+    with db() as conn:
+        cur = conn.execute(
+            "UPDATE import_rows SET outcome='' WHERE outcome='sending'")
+    return cur.rowcount
+
+
+def drop_legacy_imports() -> int:
+    """Forget lists kept the old way, with their rows inside the batch.
+
+    They come from the importer that asked for nothing until somebody
+    confirmed, and read as this one does they would say exact matches were
+    near misses. They are at most a couple of days old by the retention rule.
+    """
+    with db() as conn:
+        legacy = [row["import_id"] for row in conn.execute(
+            "SELECT import_id, payload FROM imports")
+            if json.loads(row["payload"]).get("rows")]
+        conn.executemany("DELETE FROM imports WHERE import_id=?",
+                         [(import_id,) for import_id in legacy])
+    return len(legacy)
 
 
 def imports_in_state(state: str) -> list[sqlite3.Row]:

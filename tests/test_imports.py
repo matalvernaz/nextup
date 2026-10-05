@@ -546,7 +546,7 @@ check.equal(asked, [], "a list behind waiting rows asks for nothing yet")
 check.equal([row["label"] for row in store.queued(KID.key)],
             ["Earlier", "Rumours Live by Fleetwood Mac"],
             "and queues behind them, in order")
-check.equal(imports.clear_queue(KID), 2,
+check.equal(imports.clear_queue(KID), (2, 0),
             "stopping the queue drops every waiting row")
 check.equal(store.queued_count(KID.key), 0, "so nothing is left to ask for")
 config.IMPORT_MUSIC_DAILY_SONGS = 200

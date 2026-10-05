@@ -955,12 +955,13 @@ def post_import_queue_clear(request: Request, confirm: str = Form("")):
             url="/import?msg=" + quote(
                 "Nothing was dropped. Tick the box to confirm first."),
             status_code=303)
-    dropped = imports.clear_queue(user)
-    return RedirectResponse(
-        url="/import?msg=" + quote(
-            f"Stopped. {dropped:,} waiting row{'' if dropped == 1 else 's'} "
-            f"will not be asked for." if dropped else "Nothing was waiting."),
-        status_code=303)
+    dropped, stopped = imports.clear_queue(user)
+    said = (f"Stopped. {dropped:,} waiting row{'' if dropped == 1 else 's'} "
+            f"will not be asked for." if dropped else "Nothing was waiting.")
+    if stopped:
+        said += (f" {stopped} list{'' if stopped == 1 else 's'} still being "
+                 f"looked up {'was' if stopped == 1 else 'were'} stopped too.")
+    return RedirectResponse(url="/import?msg=" + quote(said), status_code=303)
 
 
 @app.post("/import")
@@ -1048,23 +1049,46 @@ async def post_import_confirm(request: Request, import_id: str):
             url="/import?msg=" + quote("That list is no longer here."),
             status_code=303)
     return RedirectResponse(
-        url=f"/import/{import_id}?msg=" + quote(
-            f"Asking for {len(lines)}."), status_code=303)
+        url=f"/import/{import_id}?msg=" + quote("Asking for the ticked ones."),
+        status_code=303)
 
 
 @app.post("/import/{import_id}/leave")
-def post_import_leave(request: Request, import_id: str):
-    """Leave the near misses on this list unasked."""
+async def post_import_leave(request: Request, import_id: str):
+    """Ask for whatever is ticked, leave the other near misses, and finish.
+
+    The second button of the near-miss form, so ticks made before pressing it
+    are asked for rather than thrown away.
+    """
     try:
         user = viewer(request)
     except LookupError as exc:
         return _signin_page(request, detail=str(exc), status=401)
-    if imports.leave_rest(user, import_id) is None:
+    form = await request.form()
+    lines = {int(value) for value in form.getlist("line")
+             if str(value).isdigit()}
+    if imports.ask_for_lines(user, import_id, lines, final=True) is None:
         return RedirectResponse(
             url="/import?msg=" + quote("That list is no longer here."),
             status_code=303)
     return RedirectResponse(
-        url=f"/import/{import_id}?msg=" + quote("Left them."),
+        url=f"/import/{import_id}?msg=" + quote(
+            "Asking for the ticked ones and leaving the rest." if lines
+            else "Left the rest."), status_code=303)
+
+
+@app.post("/import/{import_id}/stop")
+def post_import_stop(request: Request, import_id: str):
+    """Stop looking up a list. What it already asked for stays asked for."""
+    try:
+        user = viewer(request)
+    except LookupError as exc:
+        return _signin_page(request, detail=str(exc), status=401)
+    stopped = imports.stop_list(user, import_id)
+    return RedirectResponse(
+        url=f"/import/{import_id}?msg=" + quote(
+            "Stopped. Nothing more from this list will be asked for."
+            if stopped else "That list was not being looked up."),
         status_code=303)
 
 
