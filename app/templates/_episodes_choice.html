@@ -16,3 +16,11 @@
     {% endfor %}
   </select>
 </p>
+{% if r.feedUrl %}
+<p>
+  <input type="hidden" name="organize_offered" value="yes">
+  <input type="checkbox" id="organize-{{ r.itemKey | replace(':', '-') }}" name="organize" value="yes" checked>
+  <label for="organize-{{ r.itemKey | replace(':', '-') }}">Sort {{ r.title }} into folders by season and series</label>
+  (<a href="/podcast/folders?feedUrl={{ r.feedUrl | urlencode }}&amp;title={{ r.title | urlencode }}">see the folders it would get</a>)
+</p>
+{% endif %}

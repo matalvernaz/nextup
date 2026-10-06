@@ -97,9 +97,30 @@ def backfill_of(choice: episodes.Episodes | None) -> str:
     return f"latest:{choice.count or episodes.DEFAULT_LATEST_COUNT}"
 
 
+def organize_of(value, default: bool = True) -> bool:
+    """Whether an ask wants its podcast sorted into folders.
+
+    The ask arrives as JSON (a boolean), as a form ("yes" from a ticked box),
+    or from a request kept since before the choice existed (nothing at all),
+    which is sorted, as every new podcast is unless the asker says not.
+    """
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("yes", "true", "1", "on")
+
+
 def add(feed_url: str, title: str = "",
-        choice: episodes.Episodes | None = None) -> arr.AddResult:
-    """Place an order for a feed. The fork makes the folder and starts fetching."""
+        choice: episodes.Episodes | None = None,
+        organize: bool = True) -> arr.AddResult:
+    """Place an order for a feed. The fork makes the folder and starts fetching.
+
+    `organize` asks the fork to sort a podcast new to the library into
+    folders by season and series as its episodes arrive. A fork from before
+    that choice existed ignores the field, and one already here keeps its own
+    folders whatever is asked.
+    """
     if not configured():
         return arr.AddResult(False, "Podcasts are not available on this server.")
     feed_url = (feed_url or "").strip()
@@ -113,7 +134,7 @@ def add(feed_url: str, title: str = "",
         log.info("add refused url=%s: %s", feed_url, problem)
         return arr.AddResult(False, problem)
     backfill = backfill_of(choice)
-    body = {"feedUrl": feed_url, "backfill": backfill}
+    body = {"feedUrl": feed_url, "backfill": backfill, "organize": bool(organize)}
     if title:
         body["title"] = title
     try:
@@ -135,13 +156,15 @@ def add(feed_url: str, title: str = "",
     if not isinstance(status, dict) or not status.get("ItemId"):
         return arr.AddResult(False, "Jellyfin took the order but gave it no id.")
     created = bool(status.get("Created", True))
-    log.info("add url=%s id=%s created=%s backfill=%s", feed_url, status["ItemId"], created, backfill or "-")
+    organized = bool(status.get("Organized", False))
+    log.info("add url=%s id=%s created=%s backfill=%s organized=%s",
+             feed_url, status["ItemId"], created, backfill or "-", organized)
     return arr.AddResult(
-        True, _sentence(backfill, created), str(status["ItemId"]),
+        True, _sentence(backfill, created, organized), str(status["ItemId"]),
         str(status.get("Name") or title), created=created, image_url="", overview="")
 
 
-def _sentence(backfill: str, created: bool) -> str:
+def _sentence(backfill: str, created: bool, organized: bool = False) -> str:
     if backfill == "all":
         fetched = "Every episode is being fetched, and new ones as they come out."
     elif backfill.startswith("latest:"):
@@ -151,7 +174,78 @@ def _sentence(backfill: str, created: bool) -> str:
     else:
         fetched = "New episodes will be fetched as they come out."
     lead = "Subscribed. " if created else "It was already in the library; it is followed from now on. "
-    return lead + fetched
+    sorted_ = " Episodes are sorted into folders by season and series." if organized else ""
+    return lead + fetched + sorted_
+
+
+def folders(feed_url: str) -> tuple[dict | None, str, str]:
+    """The folders a podcast would be sorted into if it were asked for now.
+
+    Returns the preview, a sentence saying why there is none, and what kind of
+    none it is: "" for a preview, "refused" for an address or feed that will
+    not do, "unreachable" and "unsupported" (a fork from before folders). The
+    address is checked as `add` checks it, before the fork is asked: the fork
+    fetches whatever it is handed, with the server's own reach.
+    """
+    if not configured():
+        return None, "Podcasts are not available on this server.", "unsupported"
+    feed_url = (feed_url or "").strip()
+    if not feed_url:
+        return None, "That podcast has no feed address.", "refused"
+    problem = podcastfeed.public_address_problem(feed_url)
+    if problem:
+        log.info("folders refused url=%s: %s", feed_url, problem)
+        return None, problem, "refused"
+    try:
+        with jellyfin._client() as c:
+            resp = c.get("/Podcasts/Organize", params={"feedUrl": feed_url})
+    except httpx.HTTPError as exc:
+        log.error("folders failed url=%s: Jellyfin unreachable (%s)", feed_url, exc)
+        return None, "Jellyfin could not be reached.", "unreachable"
+    if resp.status_code == 404:
+        return None, "This server does not sort podcasts into folders yet.", "unsupported"
+    if resp.status_code >= 400:
+        detail = arr._detail(resp)[:180]
+        log.info("folders rejected url=%s status=%d body=%s", feed_url, resp.status_code, detail)
+        kind = "refused" if resp.status_code == 400 else "unreachable"
+        return None, detail or f"Jellyfin could not preview it: {resp.status_code}", kind
+    try:
+        raw = resp.json()
+    except ValueError:
+        raw = None
+    if not isinstance(raw, dict):
+        return None, "Jellyfin's preview could not be read.", "unreachable"
+    shown = []
+    for folder in raw.get("Folders") or []:
+        if not isinstance(folder, dict):
+            continue
+        shown.append({"folder": str(folder.get("Folder") or ""),
+                      "episodes": int(folder.get("Episodes") or 0),
+                      "first": str(folder.get("First") or ""),
+                      "last": str(folder.get("Last") or ""),
+                      "examples": [str(e) for e in folder.get("Examples") or []]})
+    return {"name": str(raw.get("Name") or ""),
+            "episodes": int(raw.get("Episodes") or 0),
+            "skipped": int(raw.get("Skipped") or 0),
+            "bySeason": bool(raw.get("BySeason")),
+            "series": [str(s) for s in raw.get("Series") or []],
+            "folders": shown}, "", ""
+
+
+def folders_sentence(preview: dict) -> str:
+    """The preview as one sentence a screen reader can say in one go."""
+    parts = []
+    for folder in preview.get("folders") or []:
+        name = folder["folder"] or "the podcast's own folder"
+        count = folder["episodes"]
+        parts.append(f"{name}, {count} episode{'' if count == 1 else 's'}")
+    if not parts:
+        return "Nothing in the feed to sort."
+    sentence = "; ".join(parts) + "."
+    skipped = preview.get("skipped") or 0
+    if skipped:
+        sentence += f" {skipped} trailer{'' if skipped == 1 else 's'} or announcement{'' if skipped == 1 else 's'} left out."
+    return sentence
 
 
 def state(backend_id: str) -> dict | None:

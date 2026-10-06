@@ -19,7 +19,7 @@ from contextlib import asynccontextmanager
 from urllib.parse import quote, urlsplit
 
 import httpx
-from fastapi import FastAPI, File, Form, Request, Response, UploadFile
+from fastapi import FastAPI, File, Form, Query, Request, Response, UploadFile
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -824,6 +824,26 @@ async def post_accounts_reset(request: Request):
         f"{target.name} has today's requests back."), status_code=303)
 
 
+@app.get("/podcast/folders", response_class=HTMLResponse)
+def get_podcast_folders(request: Request, feed_url: str = Query("", alias="feedUrl"),
+                        title: str = ""):
+    """The folders a podcast would be sorted into, before it is asked for."""
+    if setup.needs_setup():
+        return RedirectResponse(url="/setup", status_code=303)
+    try:
+        user = viewer(request)
+    except LookupError as exc:
+        return _signin_page(request, detail=str(exc), status=401)
+    preview, why, kind = podfetch.folders(feed_url)
+    log.info("podcast folders page user=%s url=%s kind=%s", user.key, feed_url, kind or "ok")
+    return templates.TemplateResponse(
+        request=request, name="podcast_folders.html",
+        status_code=200 if preview else {"refused": 400, "unsupported": 501}.get(kind, 503),
+        context={"user": user, "title": title or (preview or {}).get("name") or "This podcast",
+                 "preview": preview, "why": why,
+                 "sentence": podfetch.folders_sentence(preview) if preview else ""})
+
+
 @app.get("/approvals", response_class=HTMLResponse)
 def get_approvals(request: Request, msg: str = ""):
     """What is waiting for a keyholder's yes or no. Keyholders only."""
@@ -1032,6 +1052,7 @@ def post_want(request: Request, medium: str = Form(...),
               feed_url: str = Form("", alias="feedUrl"),
               itunes_id: str = Form("", alias="itunesId"),
               episodes_asked: str = Form("", alias="episodes"),
+              organize: str = Form(""), organize_offered: str = Form(""),
               import_id: str = Form(""), import_line: int = Form(0)):
     """Ask for one thing, then send the browser back to the list.
 
@@ -1048,6 +1069,10 @@ def post_want(request: Request, medium: str = Form(...),
            "durationSeconds": duration_seconds,
            "imageUrl": image_url, "overview": overview,
            "feedUrl": feed_url, "itunesId": itunes_id}
+    if medium == media.PODCAST and organize_offered:
+        # A box left unticked sends nothing, so the form says it offered one:
+        # offered and not ticked is a no.
+        hit["organize"] = organize == "yes"
     if import_id or import_line:
         try:
             message = imports.replace_row(user, import_id, import_line,

@@ -40,8 +40,9 @@ jellyfin.podcast_episode_count = lambda item_id: COUNTS.get(item_id)
 podfetch._presence = (True, time.monotonic())
 
 added: list[tuple] = []
-podfetch.add = lambda feed, title="", choice=None: (
-    added.append((feed, title, choice)) or arr.AddResult(
+organized: list[bool] = []
+podfetch.add = lambda feed, title="", choice=None, organize=True: (
+    organized.append(organize) or added.append((feed, title, choice)) or arr.AddResult(
         True, "Subscribed.", "pg-1", title or "Untitled", image_url="", overview=""))
 PG_STATE = {"pg-1": {"downloaded": 0, "downloading": 0, "pending": 250, "total": 250,
                      "in_feed": 250, "paused": False, "title": "The Magnus Archives",
@@ -79,7 +80,7 @@ check.equal(block["units"], ["podcast"], "one unit")
 check.equal(block["dailyCap"], 2, "with the podcast cap")
 check.equal(block["episodes"], {"choices": ["all", "latest", "new"],
                                 "defaultCount": episodes.DEFAULT_LATEST_COUNT,
-                                "choice": None, "default": None},
+                                "choice": None, "default": None, "folders": True},
             "and the episodes question, unanswered, with no default: the client's cue to ask")
 recs = {r["medium"]: r for r in three["recommendations"]["media"]}
 check.equal(recs["podcast"]["surfaces"], ["owned", "catalogue"],
@@ -190,7 +191,7 @@ check.equal(client.post("/api/v1/want", json=scp, headers=AUTH).json()["state"],
 PG_STATE["pg-2"] = {"downloaded": 0, "downloading": 0, "pending": 0, "total": 0, "in_feed": 10,
                     "paused": False, "title": "Private Show",
                     "url": "https://example.invalid/private.rss", "error": ""}
-podfetch.add = lambda feed, title="", choice=None: arr.AddResult(True, "Subscribed.", "pg-2", title)
+podfetch.add = lambda feed, title="", choice=None, organize=True: arr.AddResult(True, "Subscribed.", "pg-2", title)
 private = {"medium": "podcast", "itemKey": itunes.item_key("https://example.invalid/private.rss"),
            "unit": "podcast", "title": "Private Show",
            "feedUrl": "https://example.invalid/private.rss", "episodes": {"choice": "new"}}

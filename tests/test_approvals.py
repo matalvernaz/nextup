@@ -108,11 +108,13 @@ buskarr.add = lambda unit, hit, by, bulk=False: (
     added.append(("music", unit, hit.get("title"))) or
     arr.AddResult(True, "Sent to buskarr.", f"job:{hit.get('ref')}", hit.get("title", "")))
 podcast_choices: list = []
+podcast_organize: list = []
 
 
-def fake_podfetch_add(feed_url, title="", choice=None):
+def fake_podfetch_add(feed_url, title="", choice=None, organize=True):
     added.append(("podcast", feed_url, title))
     podcast_choices.append(choice)
+    podcast_organize.append(organize)
     return arr.AddResult(True, "Sent to the fetcher.", "p1", title)
 
 
@@ -394,6 +396,15 @@ approvals.approve(MATT, media.PODCAST, "pod:b")
 check.equal((added[-1], podcast_choices[-1]),
             (("podcast", "https://feeds.example/b", "Pod B"), choice),
             "approved, it fetches the feed it was asked for, as much as asked")
+check.equal(podcast_organize[-1], True, "and sorts it into folders, as an ask that did not say otherwise is")
+
+state, _ = wants.want(KID, media.PODCAST, "pod:c", "podcast",
+                      {"title": "Pod C", "feedUrl": "https://feeds.example/c", "organize": False},
+                      episodes_choice=choice, over_limit=True)
+check.equal(state, held.WAITING_FOR_APPROVAL, "a podcast asked for unsorted waits too")
+approvals.approve(MATT, media.PODCAST, "pod:c")
+check.equal((added[-1][1], podcast_organize[-1]), ("https://feeds.example/c", False),
+            "and approved, it is left unsorted, as asked")
 
 # --- an imported list is never held -----------------------------------------
 
