@@ -34,7 +34,7 @@ jellyfin.user_from_token = lambda token: (
     OTHER if token == "token-for-kadija" else
     (_ for _ in ()).throw(jellyfin.TokenRejected("no")))
 main.media.available = lambda: {}
-main.wants.states = lambda user, medium=None: []
+main.wants.states = lambda user, medium=None, **_: []
 
 # --- with nothing at all, the page asks rather than refusing -----------------
 anonymous = client.get("/", follow_redirects=False)

@@ -166,6 +166,9 @@ asked for yet.</p>
   {{ m.label }}: {% if left is none %}no limit{% else %}{{ left }} left today{% endif %}.
   {% endfor %}
 </p>
+{% if approvals_on() %}
+<p>Past a limit, what you ask for waits for {{ who_approves() }} to approve it.</p>
+{% endif %}
 {% endif %}
 {% if import_queue %}
 <p>{{ "{:,}".format(import_queue.waiting) }} music
@@ -187,7 +190,10 @@ for by themselves at {{ import_queue.perDay }} songs a day.
     <p>
       {% if r.state == 'in_library' %}In the library.
       {% elif r.state == 'still_looking' %}Still looking.
+      {% elif r.state == 'waiting_for_approval' %}Past today's limit, so it is waiting for {{ who_approves() }} to approve it.
+      {% elif r.state == 'declined' %}Declined{% if r.decidedBy %} by {{ r.decidedBy }}{% endif %}.{% if r.reason %} {{ r.reason }}{% endif %}
       {% else %}On its way.{% endif %}
+      {% if r.bookCount %}{{ r.bookCount }} book{{ '' if r.bookCount == 1 else 's' }} from the series.{% endif %}
       {% if r.episodesInLibrary is defined and r.episodesTotal is defined %}
       {{ r.episodesInLibrary }} of {{ r.episodesTotal }} aired episodes in the library.
       {% elif r.episodesInLibrary is defined %}
@@ -202,7 +208,12 @@ for by themselves at {{ import_queue.perDay }} songs a day.
     <form method="post" action="/cancel">
       <input type="hidden" name="medium" value="{{ r.medium }}">
       <input type="hidden" name="item_key" value="{{ r.itemKey }}">
-      <button type="submit">Stop looking for {{ r.title or r.itemKey }}</button>
+      {#
+        Named for what it does to this row. Nothing has been handed to
+        anything while a keyholder has not said yes, so there is nothing to
+        stop looking for.
+      #}
+      <button type="submit">{% if r.state == 'waiting_for_approval' %}Withdraw your request for{% elif r.state == 'declined' %}Remove from your list:{% else %}Stop looking for{% endif %} {{ r.title or r.itemKey }}</button>
     </form>
     {% endif %}
     </div>

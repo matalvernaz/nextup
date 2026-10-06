@@ -27,7 +27,7 @@ media._registry = {media.MUSIC: media.Medium(media.MUSIC, "Music", buskarr.UNITS
 media._registry_built_at = time.monotonic()
 media._registry_settled = True
 media.owned = lambda *args, **kwargs: jellyfin.Owned()
-wants.states = lambda user: []
+wants.states = lambda user, **_: []
 imports._library_for = lambda *args: None
 client = TestClient(main.app, follow_redirects=False)
 

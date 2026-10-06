@@ -98,6 +98,13 @@ services:
       MUSIC_ARTIST_COST: "3"
       MUSIC_ALBUM_COST: "1"
       MUSIC_TRACK_COST: "1"
+      # Past their allowance, what somebody asks for waits for a keyholder
+      # instead of being refused. The notice goes to the notification hub's
+      # keyholder-only "approvals" category, over the traefik network.
+      APPROVALS: "on"
+      APPROVAL_NOTIFY_URL: "http://notify:8000/approvals"
+      APPROVAL_NOTIFY_TOKEN: "${NOTIFY_PUBLISH_TOKEN}"
+      PAGES_URL: "https://nextup.thealvernaz.space"
 
       STILL_LOOKING_AFTER_HOURS: "24"
       ARRIVED_VISIBLE_HOURS: "48"

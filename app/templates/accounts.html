@@ -10,8 +10,13 @@
   Every account gets the same allowance unless it is given one of its own.
   Leave a box empty and that account follows the shared figure, so raising the
   shared one later raises it for them too. Type a number and that account keeps
-  it whatever the shared figure does. Zero means the account cannot ask for
-  that at all.
+  it whatever the shared figure does.
+  {% if approvals_on %}
+  Past an account's allowance, what it asks for waits for a keyholder to
+  approve, so zero means everything it asks for of that kind waits.
+  {% else %}
+  Zero means the account cannot ask for that at all.
+  {% endif %}
 </p>
 <p>
   Keyholders are never capped, so they have no boxes here.

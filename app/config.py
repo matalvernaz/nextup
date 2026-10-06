@@ -434,6 +434,32 @@ ARRIVED_VISIBLE_HOURS = _int("ARRIVED_VISIBLE_HOURS", 48)
 # stays monitored and the acquisition tool's own sweep keeps retrying.
 STILL_LOOKING_AFTER_HOURS = _int("STILL_LOOKING_AFTER_HOURS", 24)
 
+# Whether an ask past somebody's daily allowance waits for a keyholder to
+# approve, instead of being refused. Off unless a deployment says otherwise,
+# so an install that has only ever had a hard limit keeps one.
+#
+# Only for a caller that can show somebody a waiting request: the browser
+# pages always, a client when it says so on the ask. Imported lists never;
+# they have their own allowance and queue. A keyholder's approval asks for the
+# thing at no cost, and a decline is shown to the asker for
+# ARRIVED_VISIBLE_HOURS.
+APPROVALS = _flag("APPROVALS")
+
+# Where to say that something is waiting for a keyholder. Optional. Posted in
+# ntfy's form -- the message as the body, `Title` and `Click` headers -- which
+# an ntfy topic URL or anything that speaks the same takes as it is. A failure
+# to deliver is logged and costs the ask nothing.
+APPROVAL_NOTIFY_URL = _text("APPROVAL_NOTIFY_URL")
+# Sent as a bearer token with that post, where the receiver needs one.
+APPROVAL_NOTIFY_TOKEN = _text("APPROVAL_NOTIFY_TOKEN")
+# How long the post may take. It runs beside the ask, never in front of it.
+APPROVAL_NOTIFY_TIMEOUT_SECONDS = _int("APPROVAL_NOTIFY_TIMEOUT_SECONDS", 10)
+
+# Where the browser pages are reached, e.g. "https://nextup.example.com".
+# Optional; it is what a notice links to. Not PUBLIC_URL, which is where
+# clients reach the API at the Jellyfin origin and has no pages behind it.
+PAGES_URL = _text("PAGES_URL").rstrip("/")
+
 # How long an introspected access token is trusted without re-asking Jellyfin.
 # Short on purpose: expiry is the only thing that makes a token revoked in
 # Jellyfin stop working here.

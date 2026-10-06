@@ -8,7 +8,8 @@ later that quietly skips half of it.
 import re
 import time
 
-from .. import artwork, config, jellyfin, listenarr, logs
+from .. import artwork, config, held, jellyfin, listenarr, logs
+from .. import store as ledger
 from . import engine, store
 
 log = logs.get("wants")
@@ -65,8 +66,14 @@ def want(
     title: str = "",
     recommendation_id: str | None = None,
     metadata: dict | None = None,
+    over_limit: bool = False,
+    approved: bool = False,
 ) -> tuple[str, str]:
     """Ask for one book. Returns (state, message). Raises Denied if refused.
+
+    `over_limit` and `approved` mean what they do on the shared path: past the
+    allowance the ask waits for a keyholder instead of being refused, and a
+    keyholder's yes is asked again on the asker's behalf, free.
 
     Ordered so that nothing is charged against the allowance until Listenarr
     has actually accepted the book, and so that a repeated tap is free: the
@@ -89,15 +96,20 @@ def want(
     # no opposite ordering and no cycle.
     with store.key_lock(user.key, store.MEDIUM):
         with store.key_lock("item", store.MEDIUM, asin):
-            return _admit(user, asin, title, recommendation_id, metadata)
+            return _admit(user, asin, title, recommendation_id, metadata,
+                          over_limit, approved)
 
 
-def _admit(user, asin, title, recommendation_id, metadata):
+def _admit(user, asin, title, recommendation_id, metadata,
+           over_limit=False, approved=False):
     """The guarded half of `want`. Never called without its lock held."""
     already = _request_row(user.key, asin)
     if already is not None:
         if already["fulfilled_at"] is None:
             state = _state(already)
+            if approved:
+                # Already on its way for them, so there is nothing to approve.
+                ledger.drop_held(user.key, store.MEDIUM, asin)
             log.info("want repeat user=%s asin=%s state=%s "
                      "(no allowance spent)", user.key, asin, state)
             return state, "Already on its way"
@@ -115,18 +127,40 @@ def _admit(user, asin, title, recommendation_id, metadata):
     from . import shelves
     asins, _ = shelves.owned_index(user)
     if asin.upper() in {value.upper() for value in asins}:
+        held.settle_owned(store.MEDIUM, asin)
         return IN_LIBRARY, "Already in the library."
 
-    remaining = allowance(user)
-    if remaining is not None and remaining <= 0:
+    cost, pool = 1, ""
+    remaining = None if approved else allowance(user)
+    if approved:
+        # A keyholder's yes: past the allowance by definition, and free.
+        cost, pool = 0, ledger.APPROVED_POOL
+    elif remaining is not None and remaining <= 0:
         cap = daily_cap(user)
-        log.warning("want denied user=%s asin=%s reason=daily-cap cap=%d",
-                    user.key, asin, cap)
-        raise AllowanceExhausted(
-            "This account cannot ask for books. A keyholder can give it an "
-            "allowance." if cap <= 0 else
-            f"That is {cap} books today. "
-            "The allowance frees up again as the day rolls on.")
+        if not (over_limit and held.enabled()):
+            log.warning("want denied user=%s asin=%s reason=daily-cap cap=%d",
+                        user.key, asin, cap)
+            raise AllowanceExhausted(
+                "This account cannot ask for books. A keyholder can give it "
+                "an allowance." if cap <= 0 else
+                f"That is {cap} books today. "
+                "The allowance frees up again as the day rolls on.")
+        waiting = ledger.held(user.key, store.MEDIUM, asin)
+        if waiting is not None and waiting["state"] == ledger.HELD_WAITING:
+            # Within the allowance a waiting ask simply goes through, so this
+            # is only a repeat while the allowance is still short.
+            log.info("want repeat user=%s asin=%s state=held "
+                     "(no allowance spent)", user.key, asin)
+            return held.WAITING_FOR_APPROVAL, held.repeat_message()
+        if not ledger.waiting(store.MEDIUM, asin):
+            hit = {"title": title}
+            if metadata is not None:
+                hit["metadata"] = metadata
+            return held.hold(user, store.MEDIUM, asin, store.UNIT, hit, "",
+                             "Books", cap, "a book")
+        # Already on order for somebody else in the household, so it costs
+        # nothing more and there is nothing for a keyholder to decide.
+        cost = 0
 
     log.info("want user=%s asin=%s title=%r remaining=%s",
              user.key, asin, title, "uncapped" if remaining is None else remaining)
@@ -141,7 +175,15 @@ def _admit(user, asin, title, recommendation_id, metadata):
     # What Listenarr resolved the ASIN to, preferred over what the caller typed:
     # it is the spelling the tagger will use when the book lands, and the
     # arrival check has to recognise it.
-    store.record_request(user.key, asin, result.title or title, result.authors)
+    recorded_title = result.title or title
+    store.record_request(user.key, asin, recorded_title, result.authors,
+                         cost=cost, allowance=pool)
+    # Their own held ask, if any, is answered now: the approved one, or one
+    # declined earlier and asked for again within the allowance.
+    ledger.drop_held(user.key, store.MEDIUM, asin)
+    held.ride_along(store.MEDIUM, asin, lambda row: store.record_request(
+        row["user_key"], asin, recorded_title, result.authors, cost=0,
+        allowance=ledger.APPROVED_POOL), except_user_key=user.key)
     store.record_feedback(user.key, asin, "want", recommendation_id)
     log.info("want accepted user=%s asin=%s audiobook_id=%s listenarr=%r",
              user.key, asin, result.audiobook_id, result.message)
@@ -185,6 +227,8 @@ def cancel(user: jellyfin.User, asin: str) -> tuple[bool, str]:
     # but the Listenarr delete ran after its transaction closed, and a request
     # admitted in that gap was called off by this cancellation while its ledger
     # row and its spent allowance survived.
+    if (withdrawn := held.withdraw(user, store.MEDIUM, asin)) is not None:
+        return withdrawn
     with store.key_lock("item", store.MEDIUM, asin):
         existed, others = store.release_request(user.key, asin)
         if not existed:

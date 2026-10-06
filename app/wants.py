@@ -7,7 +7,7 @@ quietly skips half of it.
 """
 import time
 
-from . import (artwork, buskarr, config, jellyfin, logs, media, podcasts,
+from . import (artwork, buskarr, config, held, jellyfin, logs, media, podcasts,
                podfetch, radarr, seasons, sonarr, store)
 # Under another name: three functions here already take an `episodes`
 # argument, the per-series episode counts.
@@ -177,13 +177,20 @@ def want(user: jellyfin.User, medium: str, item_key: str, unit: str = "",
          hit: dict | None = None, choice: seasons.Seasons | None = None,
          remember: bool = False,
          episodes_choice: episode_choice.Episodes | None = None,
-         imported: bool = False) -> tuple[str, str]:
+         imported: bool = False, over_limit: bool = False,
+         approved: bool = False) -> tuple[str, str]:
     """Ask for one thing. Returns (state, message). Raises Denied if refused.
 
     `imported` is a row of an imported list. Music charges those to the import
     allowance instead of the ordinary one, raises ImportLimitReached rather
     than a plain refusal when it is spent, and tells buskarr they came in
     bulk. Every other medium treats an imported row like any other ask.
+
+    `over_limit` is a caller that can show somebody a waiting request: past
+    the allowance, where the server holds asks, the ask waits for a keyholder
+    (`held.WAITING_FOR_APPROVAL`) instead of being refused. `approved` is a
+    keyholder saying yes to one of those, asked again on the asker's behalf:
+    no allowance is checked and nothing is charged.
 
     `choice` is which seasons of a series to ask for this once, and `remember`
     keeps it as this account's usual choice as well. `episodes_choice` is the
@@ -206,7 +213,8 @@ def want(user: jellyfin.User, medium: str, item_key: str, unit: str = "",
         # already -- reimplementing them here as four more `if medium ==` arms
         # would be a second chance to get them wrong.
         try:
-            return books.want(user, item_key, unit or "book", hit or {})
+            return books.want(user, item_key, unit or "book", hit or {},
+                              over_limit=over_limit, approved=approved)
         except books.Denied as denied:
             # The adapter cannot import this module -- that is the cycle -- so
             # it raises its own refusal and this is where the two names meet.
@@ -254,7 +262,7 @@ def want(user: jellyfin.User, medium: str, item_key: str, unit: str = "",
     with store.key_lock(user.key, medium):
         with store.key_lock("item", medium, item_key):
             return _admit(user, found, medium, item_key, unit, hit or {},
-                          choice, imported)
+                          choice, imported, over_limit, approved)
 
 
 def usual_seasons(user: jellyfin.User) -> seasons.Seasons | None:
@@ -280,11 +288,15 @@ def usual_episodes(user: jellyfin.User) -> episode_choice.Episodes | None:
 def _admit(user: jellyfin.User, found: media.Medium, medium: str,
            item_key: str, unit: str, hit: dict,
            choice: seasons.Seasons | None = None,
-           imported: bool = False) -> tuple[str, str]:
+           imported: bool = False, over_limit: bool = False,
+           approved: bool = False) -> tuple[str, str]:
     """The guarded half of `want`. Never called without its lock held."""
     if (existing := store.get(user.key, medium, item_key)) is not None:
         if existing["fulfilled_at"] is None or _still_held(existing, medium):
             state = _state(existing, medium)
+            if approved:
+                # They have it already, so there is nothing left to approve.
+                store.drop_held(user.key, medium, item_key)
             log.info("want repeat user=%s medium=%s key=%s state=%s "
                      "(no allowance spent)", user.key, medium, item_key, state)
             return state, "Already asked for."
@@ -298,18 +310,10 @@ def _admit(user: jellyfin.User, found: media.Medium, medium: str,
         log.info("want reopened user=%s medium=%s key=%s: it arrived once and "
                  "is no longer in the library", user.key, medium, item_key)
 
-    if medium in (media.MOVIE, media.SERIES):
-        index = media.owned()
-        owned = index.movie_tmdb if medium == media.MOVIE else index.series_tvdb
-        if _provider_id(item_key) in owned:
-            return IN_LIBRARY, "Already in the library."
-    elif medium == media.PODCAST:
-        try:
-            candidates = podcasts.owned()
-        except jellyfin.JellyfinUnavailable:
-            candidates = []
-        if podcasts.match_hit(candidates, {**hit, "itemKey": item_key}) is not None:
-            return IN_LIBRARY, "Already in the library."
+    if _owned_now(medium, item_key, hit):
+        # Anybody still waiting for a keyholder on it can stop: it is here.
+        held.settle_owned(medium, item_key)
+        return IN_LIBRARY, "Already in the library."
 
     pool = IMPORT if imported and medium == media.MUSIC else ""
     if pool:
@@ -321,21 +325,43 @@ def _admit(user: jellyfin.User, found: media.Medium, medium: str,
                      price, remaining)
             raise ImportLimitReached(
                 "Today's import limit is used up, so this waits for tomorrow.")
+    elif approved:
+        # A keyholder's yes: past the allowance by definition, and free.
+        price, remaining, pool = 0, None, store.APPROVED_POOL
     else:
         price = media.cost(medium, unit)
         remaining = allowance(user, medium)
         if remaining is not None and remaining < price:
             cap = daily_cap(user, medium)
-            log.warning("want denied user=%s medium=%s key=%s reason=daily-cap "
-                        "cost=%d remaining=%d cap=%d", user.key, medium,
-                        item_key, price, remaining, cap)
-            raise Denied(_cap_message(found, unit, price, remaining, cap))
+            if not (over_limit and held.enabled()):
+                log.warning("want denied user=%s medium=%s key=%s "
+                            "reason=daily-cap cost=%d remaining=%d cap=%d",
+                            user.key, medium, item_key, price, remaining, cap)
+                raise Denied(_cap_message(found, unit, price, remaining, cap))
+            waiting = store.held(user.key, medium, item_key)
+            if waiting is not None and waiting["state"] == store.HELD_WAITING:
+                # Within the allowance a waiting ask simply goes through, so
+                # this is only a repeat while the allowance is still short.
+                log.info("want repeat user=%s medium=%s key=%s state=held "
+                         "(no allowance spent)", user.key, medium, item_key)
+                return held.WAITING_FOR_APPROVAL, held.repeat_message()
+            if not store.waiting(medium, item_key):
+                return held.hold(
+                    user, medium, item_key, unit, hit,
+                    choice.encode() if choice is not None else "",
+                    found.label, cap, _held_detail(medium, unit, choice))
+            # Already coming for somebody else in the household, so it costs
+            # nothing more and there is nothing for a keyholder to decide.
+            # Within the allowance a second asker is charged nothing for the
+            # same reason (see `created` below).
+            price = 0
 
     log.info("want user=%s medium=%s unit=%s key=%s cost=%d remaining=%s%s",
              user.key, medium, unit, item_key, price,
              "uncapped" if remaining is None else remaining,
-             " pool=import" if pool else "")
-    result = _add(medium, unit, item_key, hit, user, choice, bulk=bool(pool))
+             f" pool={pool}" if pool else "")
+    result = _add(medium, unit, item_key, hit, user, choice,
+                  bulk=pool == IMPORT)
     if not result.ok:
         log.warning("want refused user=%s key=%s reason=%s",
                     user.key, item_key, result.message)
@@ -347,6 +373,9 @@ def _admit(user: jellyfin.User, found: media.Medium, medium: str,
         backend_id = store.backend_for(medium, item_key)
         price = 0
 
+    image_url = (artwork.https_url(result.image_url)
+                 or artwork.https_url(hit.get("imageUrl")) or "")
+    overview = (result.overview or str(hit.get("overview") or "")).strip()
     store.record(
         user.key, medium, item_key, unit,
         # What the backend resolved it to is preferred over what the caller
@@ -357,15 +386,55 @@ def _admit(user: jellyfin.User, found: media.Medium, medium: str,
         # The same preference. Radarr and Sonarr answer with their own poster
         # and blurb; music has only what the search hit carried, which came
         # from this server in the first place.
-        image_url=(artwork.https_url(result.image_url)
-                   or artwork.https_url(hit.get("imageUrl")) or ""),
-        overview=(result.overview or str(hit.get("overview") or "")).strip(),
+        image_url=image_url, overview=overview,
         episodes=(choice.encode()
                   if medium == media.PODCAST and choice is not None else ""),
         allowance=pool)
-    log.info("want accepted user=%s key=%s backend_id=%s message=%r",
-             user.key, item_key, result.backend_id, result.message)
+    # Their own held ask, if any, is answered now: the approved one, or one
+    # declined earlier and asked for again within the allowance.
+    store.drop_held(user.key, medium, item_key)
+    held.ride_along(medium, item_key, lambda row: store.record(
+        row["user_key"], medium, item_key, row["unit"], row["title"],
+        row["year"], 0, backend_id, seasons=result.seasons,
+        image_url=row["image_url"] or image_url,
+        overview=row["overview"] or overview,
+        episodes=row["choice"] if medium == media.PODCAST else "",
+        allowance=store.APPROVED_POOL), except_user_key=user.key)
+    log.info("want accepted user=%s key=%s backend_id=%s message=%r%s",
+             user.key, item_key, result.backend_id, result.message,
+             " (approved)" if approved else "")
     return ON_ITS_WAY, result.message
+
+
+def _owned_now(medium: str, item_key: str, hit: dict) -> bool:
+    """Whether the library already holds this, where that can be told by id.
+
+    Music is left to buskarr, which holds the identity a file was placed
+    under; there is no id to match a track against here.
+    """
+    if medium in (media.MOVIE, media.SERIES):
+        index = media.owned()
+        owned = index.movie_tmdb if medium == media.MOVIE else index.series_tvdb
+        return _provider_id(item_key) in owned
+    if medium == media.PODCAST:
+        try:
+            candidates = podcasts.owned()
+        except jellyfin.JellyfinUnavailable:
+            candidates = []
+        return podcasts.match_hit(
+            candidates, {**hit, "itemKey": item_key}) is not None
+    return False
+
+
+def _held_detail(medium: str, unit: str, choice) -> str:
+    """What a notice says about a held ask beyond its title."""
+    if medium == media.SERIES:
+        if isinstance(choice, seasons.Seasons):
+            return f"a series, {choice.phrase()}"
+        return "a series"
+    if medium == media.MUSIC:
+        return f"an {unit}" if unit[:1] in "aeiou" else f"a {unit}"
+    return {media.MOVIE: "a film", media.PODCAST: "a podcast"}.get(medium, "")
 
 
 def _still_held(row, medium: str) -> bool:
@@ -445,8 +514,27 @@ def _cap_message(found: media.Medium, unit: str, price: int,
             f"today's allowance and {remaining} is left.")
 
 
-def states(user: jellyfin.User, medium: str | None = None) -> list[dict]:
+def states(user: jellyfin.User, medium: str | None = None,
+           include_held: bool = False) -> list[dict]:
     """This account's requests and what has become of each.
+
+    `include_held` adds the asks waiting for a keyholder, and the ones a
+    keyholder said no to, in their own two states. Only for a caller that
+    knows them: a client that predates them decodes three states, and the
+    browser pages always do.
+    """
+    found = _ledger_states(user, medium)
+    if not include_held:
+        return found
+    waiting = held.described_for(user, medium)
+    if not waiting:
+        return found
+    return sorted(found + waiting, key=lambda entry: entry["requestedAt"],
+                  reverse=True)
+
+
+def _ledger_states(user: jellyfin.User, medium: str | None = None) -> list[dict]:
+    """The requests handed to an acquisition tool, and what became of each.
 
     Arrival is settled here rather than polled by the client. Jellyfin remains
     authoritative for playable media; Sonarr contributes the aired total and
@@ -657,9 +745,15 @@ def cancel(user: jellyfin.User, medium: str, item_key: str) -> tuple[bool, str]:
       refusing would strand it on screen for as long as that tool is down;
     * the day's allowance is refunded, which does mean a capped account can
       cancel and re-ask around the cap. That is the cheaper mistake.
+
+    An ask still waiting for a keyholder, or one they said no to, is simply
+    taken away: nothing was handed to anything, so there is nothing to call
+    off.
     """
     if medium == media.BOOK:
         return books.cancel(user, item_key)
+    if (withdrawn := held.withdraw(user, medium, item_key)) is not None:
+        return withdrawn
     row = store.get(user.key, medium, item_key)
     if row is None:
         return False, "That is not on your list."

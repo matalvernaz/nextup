@@ -24,10 +24,10 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import (api, arr, artwork, backends, compat_nextread, config,
-               episodes, imports, jellyfin, listenarr, logs, media, playlists,
-               podcasts, podfetch, recommendations, seasons, selfcheck, sessions,
-               settings, setup, store, throttle, wants)
+from . import (api, approvals, arr, artwork, backends, compat_nextread,
+               config, episodes, held, imports, jellyfin, listenarr, logs,
+               media, playlists, podcasts, podfetch, recommendations, seasons,
+               selfcheck, sessions, settings, setup, store, throttle, wants)
 from .books import audible as book_audible
 from .books import hardcover_shelf
 from .books import search as book_search
@@ -149,6 +149,16 @@ templates.env.globals["discover_media"] = lambda: discover_media()
 # A row's picture in its two sizes, for a template holding a bare address --
 # a stored shelf keeps the catalogue's own. See `artwork.art`.
 templates.env.globals["cover"] = lambda url: artwork.art(url)
+
+# How many things are waiting for a keyholder, for the link to them. None
+# where the server does not hold asks, which draws no link at all.
+templates.env.globals["approvals_waiting"] = (
+    lambda: store.waiting_count() if held.enabled() else None)
+# Whether an ask past the allowance waits rather than being refused, for the
+# sentence beside the allowance figures.
+templates.env.globals["approvals_on"] = lambda: held.enabled()
+# Who a waiting ask goes to, by name where Jellyfin can say: "Matt".
+templates.env.globals["who_approves"] = lambda: held.who_approves()
 
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
@@ -648,6 +658,7 @@ def get_accounts(request: Request, msg: str = ""):
         request=request, name="accounts.html",
         context={"user": user, "accounts": accounts, "message": msg,
                  "readonly": False, "detail": "",
+                 "approvals_on": held.enabled(),
                  "series_served": series_served,
                  "season_counts": _season_counts(accounts, chosen),
                  "season_default": _seasons_phrase(
@@ -813,6 +824,141 @@ async def post_accounts_reset(request: Request):
         f"{target.name} has today's requests back."), status_code=303)
 
 
+@app.get("/approvals", response_class=HTMLResponse)
+def get_approvals(request: Request, msg: str = ""):
+    """What is waiting for a keyholder's yes or no. Keyholders only."""
+    if setup.needs_setup():
+        return RedirectResponse(url="/setup", status_code=303)
+    try:
+        user = viewer(request)
+    except LookupError as exc:
+        return _signin_page(request, detail=str(exc), status=401)
+    if not user.is_admin:
+        # Said rather than bare: somebody who followed a link here should be
+        # told what the page is, not just refused it.
+        return templates.TemplateResponse(
+            request=request, name="approvals.html", status_code=403,
+            context={"user": user, "waiting": (), "readonly": True,
+                     "message": "", "enabled": held.enabled(),
+                     "detail": "Approving requests needs a Jellyfin "
+                               "administrator account."})
+    return templates.TemplateResponse(
+        request=request, name="approvals.html",
+        context={"user": user, "waiting": _approval_rows(approvals.waiting()),
+                 "readonly": False, "message": msg, "detail": "",
+                 "enabled": held.enabled(),
+                 "season_options": _APPROVE_SEASON_OPTIONS})
+
+
+def _approval_rows(entries: list[dict]) -> list[dict]:
+    """Waiting asks with the sentences the approvals page reads out."""
+    rows = []
+    for entry in entries:
+        row = dict(entry)
+        row["kind"] = _kind_phrase(entry)
+        row["asked"] = _asked_phrase(entry)
+        row["askedBy"] = [dict(who, when=_asked_when(who["askedAt"]))
+                          for who in entry["askedBy"]]
+        rows.append(row)
+    return rows
+
+
+def _kind_phrase(entry: dict) -> str:
+    """What sort of thing is waiting: "A film", "Music: an album"."""
+    medium, unit = entry["medium"], entry["unit"]
+    if medium == BOOK:
+        if unit == "series":
+            count = entry.get("bookCount")
+            return (f"{count} book{'' if count == 1 else 's'} from a series"
+                    if count else "Books from a series")
+        return "A book"
+    if medium == media.MUSIC:
+        return f"Music: {'an' if unit[:1] in 'aeiou' else 'a'} {unit}"
+    return {media.MOVIE: "A film", media.SERIES: "A TV series",
+            media.PODCAST: "A podcast"}.get(medium, medium.capitalize())
+
+
+def _asked_phrase(entry: dict) -> str:
+    """Which seasons or episodes it was asked with, as a sentence, or ""."""
+    try:
+        if "seasons" in entry:
+            return f"Asked for {seasons.from_body(entry['seasons']).phrase()}."
+        if "episodes" in entry:
+            return f"Asked for {episodes.from_body(entry['episodes']).phrase()}."
+    except ValueError:
+        return ""
+    return ""
+
+
+def _asked_when(at: float) -> str:
+    """When somebody asked, as the page says it: "today at 14:05"."""
+    asked = time.localtime(at)
+    today = time.localtime()
+    if asked[:3] == today[:3]:
+        return time.strftime("today at %H:%M", asked)
+    return time.strftime("on %d %B at %H:%M", asked).replace("on 0", "on ")
+
+
+#: What a keyholder may approve a series with instead of what it was asked
+#: for, on the page. A stretch of seasons is left to the asker: the page
+#: offers the three that need no numbers.
+_APPROVE_SEASON_OPTIONS = (
+    ("", "As asked"),
+    (seasons.ALL, "Every season"),
+    (seasons.LATEST, "Only the latest season"),
+    (seasons.NEW, "Only new episodes as they air"),
+)
+
+
+def _keyholder_or_back(request: Request):
+    """The signed-in keyholder, or the page to send anybody else to."""
+    try:
+        user = viewer(request)
+    except LookupError as exc:
+        return None, _signin_page(request, detail=str(exc), status=401)
+    if not user.is_admin:
+        return None, RedirectResponse(url="/approvals?msg=" + quote(
+            "Approving requests needs a Jellyfin administrator account."),
+            status_code=303)
+    return user, None
+
+
+@app.post("/approvals/approve")
+def post_approvals_approve(request: Request, medium: str = Form(...),
+                           item_key: str = Form(...),
+                           seasons_choice: str = Form("", alias="seasons")):
+    """Say yes to one waiting thing, then back to the list."""
+    user, elsewhere = _keyholder_or_back(request)
+    if elsewhere is not None:
+        return elsewhere
+    choice = seasons.decode(seasons_choice) if seasons_choice else None
+    try:
+        message = approvals.approve(user, medium, item_key, choice)["message"]
+    except approvals.NothingWaiting as gone_already:
+        message = str(gone_already)
+    except wants.Denied as denied:
+        message = f"Not approved, because it was refused: {denied}"
+    except (arr.Unavailable, jellyfin.JellyfinUnavailable) as exc:
+        message = f"Not approved yet, because something did not answer: {exc}"
+    return RedirectResponse(url="/approvals?msg=" + quote(message),
+                            status_code=303)
+
+
+@app.post("/approvals/decline")
+def post_approvals_decline(request: Request, medium: str = Form(...),
+                           item_key: str = Form(...), reason: str = Form("")):
+    """Say no to one waiting thing, then back to the list."""
+    user, elsewhere = _keyholder_or_back(request)
+    if elsewhere is not None:
+        return elsewhere
+    try:
+        message = approvals.decline(user, medium, item_key, reason)["message"]
+    except approvals.NothingWaiting as gone_already:
+        message = str(gone_already)
+    return RedirectResponse(url="/approvals?msg=" + quote(message),
+                            status_code=303)
+
+
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request, q: str = "", medium: str = "", unit: str = "",
           msg: str = "", import_id: str = "", import_line: int = 0):
@@ -864,7 +1010,7 @@ def index(request: Request, q: str = "", medium: str = "", unit: str = "",
             "import_context": import_context,
             "import_limit": _import_limit(user) if import_context else None,
             "results": results,
-            "requests": wants.states(user),
+            "requests": wants.states(user, include_held=True),
             "message": msg,
             "allowance": {key: wants.allowance(user, key) for key in offered},
             "import_queue": (imports.queue_status(user)
@@ -919,7 +1065,10 @@ def post_want(request: Request, medium: str = Form(...),
             episodes_choice=episodes.decode(episodes_asked),
             # A choice made on the page is kept as usual: the page offers it
             # on every podcast, so the next one is prefilled with it.
-            remember=bool(episodes_asked))
+            remember=bool(episodes_asked),
+            # The page shows a waiting request, so past the allowance an ask
+            # waits for a keyholder where the server allows it.
+            over_limit=True)
     except wants.Denied as denied:
         message = str(denied)
     return _back(medium, message)
@@ -1341,7 +1490,8 @@ def post_book_want(request: Request, asin: str = Form(...),
     except LookupError as exc:
         return _back_to_books(f"Nextup could not work out who you are. {exc}")
     try:
-        _, message = wants.want(user, BOOK, asin, BOOK, {"title": title})
+        _, message = wants.want(user, BOOK, asin, BOOK, {"title": title},
+                                over_limit=True)
     except wants.Denied as denied:
         message = str(denied)
     book_shelves.forget_asin(asin)

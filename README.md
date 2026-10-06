@@ -219,9 +219,15 @@ arriving.
   is free and spends nothing. Asking again for something that arrived and has
   since left the library is a new request, because otherwise a film deleted
   from Jellyfin could never be asked for again by whoever had it.
+- **Holds** what somebody asks for past their allowance for a keyholder to
+  approve, where `APPROVALS=on`, instead of refusing it. Up to the limit an ask
+  goes straight through; past it, it waits, and an approval asks for it at no
+  cost to the asker's allowance. A limit of 0 means everything that account
+  asks for of that kind waits.
 - **Reports** what became of each request: `on_its_way`, `still_looking` or
   `in_library`, with aired, queued and in-library episode counts for
-  television.
+  television. A client that asks for them also gets `waiting_for_approval` and
+  `declined`.
 - **Cancels** a request, calling the acquisition off — unless somebody else in
   the household is still waiting for the same thing.
 
@@ -304,7 +310,10 @@ it placed it under.
 | `GET` | `/api/v1/recommendations?medium=&libraryId=` | Unstarted items from this account's library, ranked |
 | `POST` | `/api/v1/want` | Ask for one thing |
 | `PUT` | `/api/v1/seasons` | Which seasons of a series this account usually asks for |
-| `POST` | `/api/v1/cancel` | Take one back |
+| `POST` | `/api/v1/cancel` | Take one back, or withdraw one waiting for approval |
+| `GET` | `/api/v1/approvals` | Keyholders: everything waiting for approval, with who asked |
+| `POST` | `/api/v1/approvals/approve` | Keyholders: say yes to one, for everybody who asked |
+| `POST` | `/api/v1/approvals/decline` | Keyholders: say no to one, with an optional reason |
 | `POST` | `/api/v1/deleted` | Something was deleted from the library; clear what was still acquiring it |
 | `POST` | `/api/v1/import` | Hand over a whole list as text; exact matches are asked for as it is looked up |
 | `GET` | `/api/v1/import/{id}` | How far that list has got, and what became of each row |
@@ -313,6 +322,22 @@ it placed it under.
 | `POST` | `/api/v1/import/{id}/replace` | Choose a replacement hit for one source line, using the import allowance |
 | `GET` | `/api/v1/import/queue` | Music from imported lists still waiting for a later day |
 | `DELETE` | `/api/v1/import/queue` | Stop asking for it |
+
+Asks past the allowance wait for a keyholder only where the server says so
+(`APPROVALS=on`) and only for a caller that can show a waiting request: the
+pages always, and a client that sends `"overLimit": "request"` with `want`
+(and with the book routes' `want` and `series/want`). Anything else is refused
+at the limit as it always was, and an imported list never waits. The
+`approvals` block of `capabilities` says whether asks are held, who approves
+them, and, for a keyholder, how many are waiting. `requests?held=true` adds a
+person's own waiting and declined asks to their list. Approving asks for the
+thing on the asker's behalf, through the same path as any request, and
+`seasons` on `approvals/approve` replaces the seasons a series was asked with.
+Somebody else asking for the same thing within their allowance settles a
+waiting ask for it, and something already on its way for the household is
+never held. `APPROVAL_NOTIFY_URL` (ntfy's publish form, with
+`APPROVAL_NOTIFY_TOKEN` as a bearer token) is told when something starts
+waiting, linking to `PAGES_URL/approvals`.
 
 `deleted` is a report rather than an instruction. A client knows a file has
 gone; what that means — a Radarr row to remove so the next sweep does not

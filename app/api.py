@@ -20,9 +20,9 @@ from threading import Lock
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query
 
-from . import (arr, config, describarr, episodes, gone, imports, jellyfin,
-               logs, media, playlists, podcasts, recommendations, seasons, store,
-               wants)
+from . import (approvals, arr, config, describarr, episodes, gone, held,
+               imports, jellyfin, logs, media, playlists, podcasts,
+               recommendations, seasons, store, wants)
 
 log = logs.get("api")
 
@@ -259,6 +259,11 @@ def capabilities(protocol: int = 1,
         "recommendations": {
             "media": recommendation_media,
         },
+        # Whether an ask past the day's allowance waits for a keyholder rather
+        # than being refused, for a client that says it can show that (see
+        # `/want`'s `overLimit`). Additive: a client that predates it never
+        # says so, and is refused at the limit as before.
+        "approvals": held.capability(user),
     }
 
 
@@ -299,11 +304,17 @@ def get_search(medium: str, q: str = "", unit: str = "",
 
 
 @router.get("/requests")
-def get_requests(medium: str | None = None,
+def get_requests(medium: str | None = None, held_asks: bool = Query(
+                     False, alias="held"),
                  user: jellyfin.User = Depends(caller)) -> dict:
-    """This account's requests and what has become of each."""
+    """This account's requests and what has become of each.
+
+    `held=true` adds the asks waiting for a keyholder and the ones a keyholder
+    said no to, in states `capabilities.approvals.states` names. Without it
+    the list is what it always was, for a client that knows three states.
+    """
     try:
-        rows = wants.states(user, medium)
+        rows = wants.states(user, medium, include_held=held_asks)
     except jellyfin.JellyfinUnavailable as exc:
         raise HTTPException(
             status_code=503,
@@ -392,8 +403,13 @@ def post_want(user: jellyfin.User = Depends(caller),
               feed_url: str = Body("", embed=True, alias="feedUrl"),
               itunes_id: str = Body("", embed=True, alias="itunesId"),
               episodes_asked: dict | None = Body(
-                  None, embed=True, alias="episodes")) -> dict:
+                  None, embed=True, alias="episodes"),
+              over_limit: str = Body("", embed=True, alias="overLimit")) -> dict:
     """Ask for one thing. Repeating it is free and spends no allowance.
+
+    `overLimit: "request"` is a client that can show a waiting request: past
+    the day's allowance, on a server that holds asks, this one waits for a
+    keyholder (state `waiting_for_approval`) instead of being refused.
 
     `seasons` (series only) is which of them to ask for this once, as in
     `/capabilities`; absent, the account's usual choice applies. `remember`
@@ -441,7 +457,8 @@ def post_want(user: jellyfin.User = Depends(caller),
     try:
         state, message = wants.want(user, medium, item_key, unit, hit,
                                     choice=choice, remember=remember,
-                                    episodes_choice=episodes_choice)
+                                    episodes_choice=episodes_choice,
+                                    over_limit=over_limit == OVER_LIMIT_REQUEST)
     except wants.Denied as denied:
         raise HTTPException(status_code=409, detail=str(denied)) from denied
     except (arr.Unavailable, jellyfin.JellyfinUnavailable) as exc:
@@ -789,6 +806,73 @@ def _seasons_block(user: jellyfin.User) -> dict:
     return {"choices": list(seasons.CHOICES),
             "choice": own.as_json() if own else None,
             "default": default.as_json() if default else None}
+
+
+#: What a client sends as `overLimit` to have an ask past the allowance wait
+#: for a keyholder. A word rather than a boolean, so a later client can ask
+#: for something else past the limit without a second field.
+OVER_LIMIT_REQUEST = "request"
+
+
+def _keyholder(user: jellyfin.User) -> None:
+    if not user.is_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="Approving requests needs a Jellyfin administrator account.")
+
+
+@router.get("/approvals")
+def get_approvals(user: jellyfin.User = Depends(caller)) -> dict:
+    """Everything waiting for a keyholder, the longest waiting first."""
+    _keyholder(user)
+    return {"version": config.API_VERSION, "approvals": approvals.waiting()}
+
+
+@router.post("/approvals/approve")
+def post_approve(user: jellyfin.User = Depends(caller),
+                 medium: str = Body(..., embed=True),
+                 item_key: str = Body(..., embed=True, alias="itemKey"),
+                 seasons_asked: dict | None = Body(
+                     None, embed=True, alias="seasons")) -> dict:
+    """Say yes to one waiting thing, for everybody who asked for it.
+
+    `seasons` (series only) replaces the seasons it was asked for with, in
+    `/want`'s form. 409 when the acquisition tool refuses it, and it goes on
+    waiting; 404 when nothing is waiting under that key any more.
+    """
+    _keyholder(user)
+    choice = None
+    if seasons_asked is not None and medium == media.SERIES:
+        try:
+            choice = seasons.from_body(seasons_asked)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        return approvals.approve(user, medium, item_key, choice)
+    except approvals.NothingWaiting as gone_already:
+        raise HTTPException(status_code=404,
+                            detail=str(gone_already)) from gone_already
+    except wants.Denied as denied:
+        raise HTTPException(status_code=409, detail=str(denied)) from denied
+    except (arr.Unavailable, jellyfin.JellyfinUnavailable) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/approvals/decline")
+def post_decline(user: jellyfin.User = Depends(caller),
+                 medium: str = Body(..., embed=True),
+                 item_key: str = Body(..., embed=True, alias="itemKey"),
+                 reason: str = Body("", embed=True)) -> dict:
+    """Say no to one waiting thing, for everybody who asked for it.
+
+    `reason` is optional, and shown to them on their list with the no.
+    """
+    _keyholder(user)
+    try:
+        return approvals.decline(user, medium, item_key, reason)
+    except approvals.NothingWaiting as gone_already:
+        raise HTTPException(status_code=404,
+                            detail=str(gone_already)) from gone_already
 
 
 @router.post("/cancel")
