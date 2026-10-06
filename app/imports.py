@@ -699,7 +699,7 @@ def match(user: jellyfin.User, medium: str, unit: str, row: Row,
 #: track into a request that any two-second file satisfies.
 _KEPT = ("itemKey", "medium", "unit", "title", "year", "artist", "album",
          "source", "ref", "durationSeconds", "overview", "authors", "owned", "requested",
-         "imageUrl", "thumbnailUrl")
+         "imageUrl", "thumbnailUrl", "trackCount")
 
 
 def _keep(hit: dict) -> dict:
@@ -1375,15 +1375,15 @@ QUEUE_FIRST_DELAY_SECONDS = 120
 def queue_status(user: jellyfin.User, medium: str = media.MUSIC) -> dict | None:
     """What this account has waiting, for a page or a client to show. None if nothing.
 
-    `songs` counts an album and an artist at what they cost the allowance, so
-    `days` is how long the queue takes at today's rate, give or take the day
-    already under way.
+    `songs` counts an album and an artist at what they are held at when asked
+    for, so `days` is how long the queue takes at today's rate, give or take
+    the day already under way and what the holds turn out to be.
     """
     rows = store.queued(user.key, medium)
     if not rows:
         return None
-    songs = sum(wants.import_cost(json.loads(row["hit"]).get("unit") or "")
-                for row in rows)
+    hits = [json.loads(row["hit"]) for row in rows]
+    songs = sum(wants.import_cost(hit.get("unit") or "", hit) for hit in hits)
     per_day = config.IMPORT_MUSIC_DAILY_SONGS
     return {"waiting": len(rows), "songs": songs, "perDay": per_day,
             "days": -(-songs // per_day) if per_day else None,
@@ -1530,6 +1530,12 @@ def _queue_loop() -> None:
                          resumed)
         except Exception as exc:  # noqa: BLE001 - as below.
             log.warning("could not carry on with interrupted lists: %s", exc)
+        try:
+            # Before the queue, so allowance a settled album or artist gave
+            # back is used in this pass rather than the next.
+            wants.settle_import_charges()
+        except Exception as exc:  # noqa: BLE001 - as below.
+            log.warning("could not settle import charges: %s", exc)
         try:
             went = release_queue()
             if went:

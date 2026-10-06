@@ -61,16 +61,69 @@ class ImportLimitReached(Denied):
 IMPORT = store.IMPORT_POOL
 
 
-def import_cost(unit: str) -> int:
-    """What one imported music row counts as against the import allowance.
+def import_cost(unit: str, hit: dict | None = None) -> int:
+    """What one imported music row is charged up front against the import allowance.
 
     In songs, because that is what the allowance is a number of. Never more
     than a whole day's worth, or a row that costs more than the allowance
     would wait for ever.
+
+    For an album or an artist this is only a hold. An album is held at the
+    number of tracks the catalogue lists, an artist at IMPORT_ARTIST_SONGS,
+    because nobody knows an artist's count until buskarr has walked their
+    discography. `settle_import_charges` replaces the hold with the songs
+    buskarr actually added once it knows.
     """
     cost = {"album": config.IMPORT_ALBUM_SONGS,
             "artist": config.IMPORT_ARTIST_SONGS}.get(unit, 1)
+    if unit == "album":
+        try:
+            listed = int((hit or {}).get("trackCount") or 0)
+        except (TypeError, ValueError):
+            listed = 0
+        if listed > 0:
+            cost = listed
     return max(1, min(cost, config.IMPORT_MUSIC_DAILY_SONGS))
+
+
+#: The units whose import charge is a hold until buskarr reports a count.
+SETTLED_LATER = ("album", "artist")
+
+
+def settle_import_charges() -> int:
+    """Replace held album and artist import charges with what buskarr added.
+
+    buskarr counts only the songs an add put on its list, so songs already in
+    the library or already asked for cost nothing. A job still running has no
+    count yet and stays held. A count past a whole day's allowance is charged
+    as a day, for the same reason `import_cost` stops there. Returns how many
+    charges were settled.
+    """
+    rows = store.provisional_charges(time.time() - DAY_SECONDS)
+    references = [row["backend_id"] for row in rows if row["backend_id"]]
+    if not references:
+        return 0
+    answers = buskarr.states(references)
+    if answers is None:
+        answers = {ref: found for ref in dict.fromkeys(references)
+                   if (found := buskarr.state(ref)) is not None}
+    settled = 0
+    for row in rows:
+        total = (answers.get(row["backend_id"]) or {}).get("total")
+        if not isinstance(total, int):
+            continue
+        cost = max(0, min(total, config.IMPORT_MUSIC_DAILY_SONGS))
+        # The allowance arithmetic in `want` holds this lock, so a charge
+        # never changes under somebody's ask halfway through deciding it.
+        with store.key_lock(row["user_key"], row["medium"]):
+            if not store.settle_charge(row["user_key"], row["medium"],
+                                       row["item_key"], cost):
+                continue
+        settled += 1
+        log.info("import charge settled user=%s key=%s unit=%s held=%d "
+                 "songs=%d charged=%d", row["user_key"], row["item_key"],
+                 row["unit"], row["cost"], total, cost)
+    return settled
 
 
 def import_allowance(user: jellyfin.User, medium: str) -> int | None:
@@ -317,7 +370,7 @@ def _admit(user: jellyfin.User, found: media.Medium, medium: str,
 
     pool = IMPORT if imported and medium == media.MUSIC else ""
     if pool:
-        price = import_cost(unit)
+        price = import_cost(unit, hit)
         remaining = import_allowance(user, medium)
         if remaining is not None and remaining < price:
             log.info("want waits user=%s medium=%s key=%s reason=import-limit "
@@ -389,7 +442,11 @@ def _admit(user: jellyfin.User, found: media.Medium, medium: str,
         image_url=image_url, overview=overview,
         episodes=(choice.encode()
                   if medium == media.PODCAST and choice is not None else ""),
-        allowance=pool)
+        allowance=pool,
+        # Decided on the final price: a household repeat costs nothing, and
+        # its backend id is somebody else's add, which this account must not
+        # be charged for when that one settles.
+        provisional=pool == IMPORT and unit in SETTLED_LATER and price > 0)
     # Their own held ask, if any, is answered now: the approved one, or one
     # declined earlier and asked for again within the allowance.
     store.drop_held(user.key, medium, item_key)

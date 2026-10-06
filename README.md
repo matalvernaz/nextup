@@ -96,8 +96,12 @@ else's playlist is refused rather than added to.
 Music is the exception, because music lists are the long ones. A list of
 music takes up to 5,000 rows (500 for anything else) and has its own daily
 allowance of 200 songs, so it does not use up the requests somebody has for
-searching. An album counts as 12 songs and an artist as 100. Whatever does not
-fit waits in a queue and is asked for by itself on later days, oldest first,
+searching. An album or an artist counts as the songs buskarr actually adds
+for it, so songs already in the library or already asked for are free, and
+never as more than a day's 200. Until buskarr has counted, an album is held at
+the number of tracks the catalogue lists and an artist at 100; the difference
+comes back on the queue's next pass. Whatever does not fit waits in a queue
+and is asked for by itself on later days, oldest first,
 and the import page shows the queue and can stop it. Imported songs reach
 buskarr marked as bulk, and buskarr takes turns between people, so one long
 list never holds up anybody else's requests.

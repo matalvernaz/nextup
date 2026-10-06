@@ -491,7 +491,11 @@ _LATER_COLUMNS = (("authors", "TEXT NOT NULL DEFAULT ''"),
                   # Which daily allowance this request was charged to: empty
                   # for the ordinary one, IMPORT_POOL for an imported list.
                   # Its `cost` is counted against that one and no other.
-                  ("allowance", "TEXT NOT NULL DEFAULT ''"))
+                  ("allowance", "TEXT NOT NULL DEFAULT ''"),
+                  # 1 while `cost` is a hold: an imported album or artist is
+                  # charged an estimate until buskarr has said how many songs
+                  # it added, and then that number. 0 on everything else.
+                  ("provisional", "INTEGER NOT NULL DEFAULT 0"))
 
 #: The `allowance` of a request that came from an imported list.
 IMPORT_POOL = "import"
@@ -612,24 +616,45 @@ def rekey_users(name_to_id: dict[str, str]) -> int:
 def record(user_key: str, medium: str, item_key: str, unit: str,
            title: str, year: str, cost: int, backend_id: str,
            authors: str = "", seasons: str = "", image_url: str = "",
-           overview: str = "", episodes: str = "", allowance: str = "") -> bool:
+           overview: str = "", episodes: str = "", allowance: str = "",
+           provisional: bool = False) -> bool:
     """Write down that this account asked for this thing. True when it is new.
 
     An existing row is left alone rather than refreshed. Asking twice must not
     restart the clock that decides when "on its way" becomes "still looking",
     or a request could be kept looking new indefinitely by tapping it again --
     nor spend a second day's allowance on the same thing.
+
+    `provisional` says `cost` is a hold, to be replaced by `settle_charge`.
     """
     with db() as conn:
         cur = conn.execute(
             "INSERT INTO requests (user_key, medium, item_key, unit, title, "
             "year, cost, backend_id, authors, seasons, image_url, overview, "
-            "episodes, allowance, requested_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+            "episodes, allowance, provisional, requested_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT (user_key, medium, item_key) DO NOTHING",
             (user_key, medium, item_key, unit, title, year, cost, backend_id,
              authors, seasons, image_url, overview[:MAX_OVERVIEW_LENGTH],
-             episodes, allowance, time.time()))
+             episodes, allowance, int(provisional), time.time()))
+    return cur.rowcount > 0
+
+
+def provisional_charges(since: float) -> list[sqlite3.Row]:
+    """Charges still held at an estimate, asked for since `since`."""
+    with db() as conn:
+        return conn.execute(
+            "SELECT * FROM requests WHERE provisional=1 AND requested_at >= ? "
+            "ORDER BY requested_at", (since,)).fetchall()
+
+
+def settle_charge(user_key: str, medium: str, item_key: str, cost: int) -> bool:
+    """Replace a held charge with what the request really cost. True if it was held."""
+    with db() as conn:
+        cur = conn.execute(
+            "UPDATE requests SET cost=?, provisional=0 WHERE user_key=? AND "
+            "medium=? AND item_key=? AND provisional=1",
+            (cost, user_key, medium, item_key))
     return cur.rowcount > 0
 
 
