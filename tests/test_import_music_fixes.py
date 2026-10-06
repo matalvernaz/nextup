@@ -59,14 +59,16 @@ csv = ('Track name,Artist name,Album,Type\n'
        'Song,Example Artist,An Album,track\n'
        'Unknown,Somebody,,unrecognized\n')
 skipped = []
-rows, duplicates, blanks = imports.rows(imports.read(csv), media.MUSIC, "track", skipped)
-check.equal([r.title for r in rows], ["Song", "Song (Live)", "Song (Acoustic)"],
-            "albums/artists are excluded and distinct versions survive")
-check.equal([r.source_row for r in rows], [2, 6, 7], "spreadsheet record numbers count empty rows once")
-check.equal([(r.line_start, r.line) for r in rows], [(2, 3), (7, 7), (8, 8)],
+unknown = {}
+rows, duplicates, blanks = imports.rows(imports.read(csv), media.MUSIC, "track", skipped, unknown)
+check.equal([r.title for r in rows], ["Song", "Song (Live)", "Song (Acoustic)", "Unknown"],
+            "albums/artists are excluded, distinct versions survive, an unknown type is read as chosen")
+check.equal([r.source_row for r in rows], [2, 6, 7, 9], "spreadsheet record numbers count empty rows once")
+check.equal([(r.line_start, r.line) for r in rows], [(2, 3), (7, 7), (8, 8), (10, 10)],
             "physical line ranges remain separate and stable")
 check.equal(duplicates, 1, "only the repeat recording is discarded")
-check.equal(len(skipped), 3, "other and unknown types are reported")
+check.equal(len(skipped), 2, "other types are reported")
+check.equal(unknown, {"unrecognized": 1}, "unknown types are counted, not dropped")
 check.equal(rows[0].album, "Album\nwith a newline", "album metadata is retained")
 check.equal(imports.source_label(dict(line=3, line_start=2, source_row=2)),
             "Row 2 of your file (physical lines 2–3)", "the visible reference explains both numbers")
