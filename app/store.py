@@ -1,10 +1,10 @@
-"""The request ledger and the audiobook caches. One SQLite file, and nothing
-in it that cannot be rebuilt.
+"""The request ledger, imported lists and audiobook caches in one SQLite file.
 
 Delete this database and you lose the record of who asked for what, plus a
 similarity graph and a taste model that cost requests to build: the films and
 series themselves stay in Radarr and Sonarr, the books stay in Listenarr, and
-the library stays in Jellyfin. Nothing here is the only copy of anything.
+the library stays in Jellyfin. Import reports and their original uploads are
+also kept here, so back this file up before maintenance.
 
 The ledger is keyed `(user_key, medium, item_key)` rather than on an
 identifier alone. Two media can hand out the same number -- TMDB 1399 is a
@@ -147,6 +147,13 @@ CREATE TABLE IF NOT EXISTS imports (
 );
 CREATE INDEX IF NOT EXISTS imports_by_user
     ON imports(user_key, created_at);
+
+-- Original uploads are kept apart from progress payloads, so polling a list
+-- does not load or send the whole file. They expire with the import report.
+CREATE TABLE IF NOT EXISTS import_sources (
+    import_id TEXT PRIMARY KEY,
+    data BLOB NOT NULL
+);
 
 -- One row of an imported list: what the file said, what the lookup found
 -- (`state`) and what became of it (`outcome`, empty until something did).
@@ -1229,7 +1236,7 @@ def accounts_with_setting(name: str) -> int:
 # --------------------------------------------------------------------------
 
 def put_import(import_id: str, user_key: str, medium: str, state: str,
-               total: int, payload) -> None:
+               total: int, payload, source: bytes | None = None) -> None:
     """Write down a list somebody has just uploaded."""
     now = time.time()
     with db() as conn:
@@ -1238,6 +1245,16 @@ def put_import(import_id: str, user_key: str, medium: str, state: str,
             "total, payload, created_at, touched_at) VALUES (?,?,?,?,0,?,?,?,?)",
             (import_id, user_key, medium, state, total,
              json.dumps(payload), now, now))
+        if source is not None:
+            conn.execute("INSERT INTO import_sources(import_id, data) VALUES (?,?)",
+                         (import_id, source))
+
+
+def import_source(import_id: str) -> bytes | None:
+    with db() as conn:
+        row = conn.execute("SELECT data FROM import_sources WHERE import_id=?",
+                           (import_id,)).fetchone()
+    return bytes(row["data"]) if row is not None else None
 
 
 def get_import(import_id: str) -> sqlite3.Row | None:
@@ -1323,9 +1340,14 @@ def is_queued(row_id: int) -> bool:
                             (row_id,)).fetchone() is not None
 
 
-def unqueue(row_id: int) -> None:
-    """Take one row out of the queue, once it has been asked for or refused."""
+def unqueue(row_id: int, outcome: str = "", detail: str = "") -> None:
+    """Remove a completed queue entry and record its outcome in one transaction."""
     with db() as conn:
+        if outcome:
+            conn.execute(
+                "UPDATE import_rows SET outcome=?,outcome_detail=? "
+                "WHERE (import_id,line) IN (SELECT import_id,line FROM import_queue WHERE id=?)",
+                (outcome, detail, row_id))
         conn.execute("DELETE FROM import_queue WHERE id=?", (row_id,))
 
 
@@ -1351,6 +1373,8 @@ def prune_imports(before: float) -> int:
             "DELETE FROM imports WHERE created_at < ? AND state <> 'reading'",
             (before,))
         conn.execute("DELETE FROM import_rows WHERE import_id NOT IN "
+                     "(SELECT import_id FROM imports)")
+        conn.execute("DELETE FROM import_sources WHERE import_id NOT IN "
                      "(SELECT import_id FROM imports)")
     return cur.rowcount
 

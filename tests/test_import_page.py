@@ -123,7 +123,7 @@ check.that("First line read as column headings: Artist, Album." in review.text,
 # The label is the assertion. A column of forty tick boxes each labelled only
 # with a title is unreadable; what has to be in the one string is what the
 # file said and what it was matched to.
-check.that("Kind of Blue by Miles Davis. Line 5 of your file: "
+check.that("Kind of Blue by Miles Davis. Row 5 of your file: "
            "Kind of Blue by Bill Evans</label>" in review.text,
            "the near miss is offered with both what was matched and which "
            "line of the file it came from")

@@ -9,12 +9,25 @@
 {% set noun = nouns.get(batch.unit, (batch.unit, batch.unit ~ 's')) %}
 
 <h2>{{ batch.filename or 'Pasted list' }}</h2>
+{% if batch.review_notice %}<p role="status">{{ batch.review_notice }}</p>{% endif %}
 <p>{{ "{:,}".format(batch.total) }} {{ noun[0] if batch.total == 1 else noun[1] }}.
    {%- if batch.duplicates %} Skipped {{ batch.duplicates }} duplicate
    row{{ '' if batch.duplicates == 1 else 's' }}.{% endif %}
    {%- if batch.blanks %} Skipped {{ batch.blanks }}
    row{{ '' if batch.blanks == 1 else 's' }} with no title.{% endif %}
    {%- if batch.headings %} First line read as column headings: {{ batch.headings | join(', ') }}.{% endif %}</p>
+{% if batch.has_source %}
+<p><a href="/import/{{ batch.id }}/source">Download the original file</a>.
+   Row numbers include the headings and empty rows, as in a spreadsheet.</p>
+{% endif %}
+{% if batch.skipped %}
+<details>
+  <summary>Skipped {{ batch.skipped | length }} rows of another or unknown type</summary>
+  <ul>{% for row in batch.skipped %}
+    <li>{{ source_label(row) }}: {{ row.title }}. {{ row.reason }}</li>
+  {% endfor %}</ul>
+</details>
+{% endif %}
 
 {# --------------------------------------------------------------- progress #}
 {% if batch.state == 'reading' %}
@@ -72,6 +85,17 @@
    will go in when {{ 'it arrives' if playlist.pending == 1 else 'they arrive' }}{% endif %}.</p>
 {% endif %}
 
+{% if rows.review %}
+<h3>Earlier requests to review</h3>
+<ul>
+{% for row in rows.review %}
+  <li>{{ source_label(row) }}: {{ row.label }}.
+    Earlier selection: {{ hit_label(row.hit) }}. {{ row.reviewNote }}
+    <a href="{{ search_url(batch, row) }}">Search for {{ row.label }}</a></li>
+{% endfor %}
+</ul>
+{% endif %}
+
 {# ---------------------------------------------------------- close matches #}
 {% if rows.close and batch.state in ('reading', 'ready') %}
 <h3>Close matches</h3>
@@ -89,15 +113,17 @@
     #}
     <input type="checkbox" id="row-{{ row.line }}" name="line"
            value="{{ row.line }}">
-    <label for="row-{{ row.line }}">{{ hit_label(row.hit) }}. Line {{ row.line }} of your file: {{ row.label }}</label>
+    <label for="row-{{ row.line }}">{{ hit_label(row.hit) }}. {{ source_label(row) }}: {{ row.label }}</label>
     {% if row.others %}
     <p>{{ row.others }} other result{{ '' if row.others == 1 else 's' }}.
-       <a href="/?medium={{ batch.medium }}&amp;unit={{ batch.unit }}&amp;q={{ row.title | urlencode }}">Search for {{ row.label }}</a></p>
+       </p>
     {% endif %}
+    <p><a href="{{ search_url(batch, row) }}">Search for {{ row.label }}</a></p>
   </li>
   {% endfor %}
 </ul>
-<p><button type="submit">Ask for the ticked ones</button></p>
+<p><button type="submit">Request selected {{ noun[1] }}</button></p>
+<p><button type="submit" formaction="/import/{{ batch.id }}/ignore">Ignore selected {{ noun[1] }}</button></p>
 {% if batch.state == 'ready' %}
 <p><button type="submit" formaction="/import/{{ batch.id }}/leave">Ask for the
    ticked ones and leave the rest</button></p>
@@ -155,7 +181,7 @@
 <h3>Close matches left out</h3>
 <ul class="results">
   {% for row in rows.left %}
-  <li><a href="/?medium={{ batch.medium }}&amp;unit={{ batch.unit }}&amp;q={{ row.title | urlencode }}">Search for {{ row.label }}</a></li>
+  <li>{{ source_label(row) }}: <a href="{{ search_url(batch, row) }}">Search for {{ row.label }}</a></li>
   {% endfor %}
 </ul>
 {% endif %}
@@ -165,7 +191,7 @@
 <p>These may be listed under a different spelling.</p>
 <ul class="results">
   {% for row in rows.missing %}
-  <li><a href="/?medium={{ batch.medium }}&amp;unit={{ batch.unit }}&amp;q={{ row.title | urlencode }}">Search for {{ row.label }}</a>{% if row.detail and row.detail != no_match %}. {{ row.detail }}{% endif %}</li>
+  <li>{{ source_label(row) }}: <a href="{{ search_url(batch, row) }}">Search for {{ row.label }}</a>{% if row.detail and row.detail != no_match %}. {{ row.detail }}{% endif %}</li>
   {% endfor %}
 </ul>
 {% endif %}

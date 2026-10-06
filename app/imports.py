@@ -29,7 +29,9 @@ import threading
 import time
 import unicodedata
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from difflib import SequenceMatcher
+from urllib.parse import urlencode
 
 from . import config, jellyfin, logs, media, playlists, songs, store, wants
 
@@ -47,6 +49,7 @@ READY = "ready"
 ASKING = "asking"
 DONE = "done"
 FAILED = "failed"
+MATCHING_VERSION = 2
 
 #: What became of one row. `matched` is ticked for the reader, `uncertain` is
 #: shown unticked, and neither `held` nor `missing` is offered at all.
@@ -92,6 +95,7 @@ _turn = threading.Semaphore(1)
 #: Discogs calls a release's column Title -- and it is used wherever the
 #: medium's own heading is absent.
 _ROLES = {
+    "type": ("type", "itemtype", "recordtype", "mediatype"),
     "artist": ("artist", "artists", "artistname", "artistnames", "albumartist",
                "author", "authors", "performer", "performers", "band",
                "composer", "credit", "creator"),
@@ -148,6 +152,8 @@ class Sheet:
     #: role -> column index, for the roles this file turned out to carry.
     roles: dict[str, int]
     delimiter: str
+    record_numbers: tuple[int, ...] = ()
+    starts: tuple[int, ...] = ()
 
     @property
     def width(self) -> int:
@@ -233,17 +239,18 @@ def read(data: bytes | str) -> Sheet:
     # Mac files end every line with one.
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     delimiter = _sniff(text[:4096])
-    reader = csv.reader(io.StringIO(text), delimiter=delimiter)
-    parsed: list[tuple[int, tuple[str, ...]]] = []
+    reader = csv.reader(io.StringIO(text), delimiter=delimiter, strict=True)
+    parsed: list[tuple[int, tuple[str, ...], int, int]] = []
     ended = 0
     try:
-        for record in reader:
+        for number, record in enumerate(reader, start=1):
+            started = ended + 1
             ended = reader.line_num
             cells = tuple(cell.strip() for cell in record)
             if any(cells):
                 # `line_num` is the physical line the record ended on, which
                 # is the one a person counting down their file will land on.
-                parsed.append((ended, cells))
+                parsed.append((ended, cells, number, started))
     except csv.Error as exc:
         # An opening quote that never closes swallows the rest of the file
         # into one field, and past the field size limit that is an error
@@ -268,7 +275,7 @@ def read(data: bytes | str) -> Sheet:
                     decoded = next(csv.reader([value]))
                     if len(decoded) == 1:
                         value = decoded[0]
-                parsed.append((line, (value,)))
+                parsed.append((line, (value,), line, line))
         first = parsed[0][1]
     folded = [_fold_heading(cell) for cell in first]
     roles: dict[str, int] = {}
@@ -292,8 +299,15 @@ def read(data: bytes | str) -> Sheet:
         headings, body = (), parsed
     if not body:
         raise Unreadable("That file has headings but no rows under them.")
-    return Sheet(tuple(headings), tuple(cells for _, cells in body),
-                 tuple(line for line, _ in body), roles, delimiter)
+    if headings:
+        for _, cells, number, _ in body:
+            if len(cells) > len(headings):
+                raise Unreadable(
+                    f"Row {number} has {len(cells)} columns, but the headings "
+                    f"have {len(headings)}. Check commas and quotation marks in that row.")
+    return Sheet(tuple(headings), tuple(r[1] for r in body),
+                 tuple(r[0] for r in body), roles, delimiter,
+                 tuple(r[2] for r in body), tuple(r[3] for r in body))
 
 
 @dataclass(frozen=True, slots=True)
@@ -305,6 +319,10 @@ class Row:
     title: str
     artist: str = ""
     year: str = ""
+    source_row: int = 0
+    line_start: int = 0
+    album: str = ""
+    record_type: str = ""
 
     @property
     def label(self) -> str:
@@ -322,9 +340,9 @@ class Row:
 #: everything else takes the generic heading and falls back to the one a
 #: music export would have used, because "Name" and "Title" are shared.
 _TITLE_ROLES = {
-    "artist": ("artist",),
+    "artist": ("artist", "title", "track"),
     "album": ("album", "title", "track"),
-    "track": ("track", "title", "album"),
+    "track": ("track", "title"),
 }
 _DEFAULT_TITLE_ROLES = ("title", "track", "album")
 
@@ -351,7 +369,8 @@ def _year_of(cell: str) -> str:
     return found.group(1) if found else ""
 
 
-def rows(sheet: Sheet, medium: str, unit: str) -> tuple[list[Row], int, int]:
+def rows(sheet: Sheet, medium: str, unit: str,
+         skipped: list[dict] | None = None) -> tuple[list[Row], int, int]:
     """The sheet as things to ask for: the rows, duplicates, and blanks.
 
     Duplicates are dropped rather than asked for twice. `wants.want` is free
@@ -380,9 +399,10 @@ def rows(sheet: Sheet, medium: str, unit: str) -> tuple[list[Row], int, int]:
     if artist_at == title_at:
         artist_at = None
     year_at = sheet.roles.get("year")
+    type_at = sheet.roles.get("type") if medium == media.MUSIC else None
 
     found: list[Row] = []
-    seen: set[tuple[str, str, str]] = set()
+    seen: set[tuple] = set()
     duplicates = 0
     blanks = 0
     for index, row in enumerate(sheet.rows):
@@ -391,6 +411,18 @@ def rows(sheet: Sheet, medium: str, unit: str) -> tuple[list[Row], int, int]:
 
         title = cell(title_at)
         artist = cell(artist_at)
+        record_type = cell(type_at)
+        source_row = sheet.record_numbers[index] if sheet.record_numbers else sheet.lines[index]
+        kind = _record_unit(record_type)
+        if type_at is not None and kind != unit:
+            if skipped is not None:
+                skipped.append({"line": sheet.lines[index], "source_row": source_row,
+                                "title": title, "artist": artist, "type": record_type,
+                                "reason": (f"This row is {record_type or 'of an unknown type'}, "
+                                           f"not {unit}.")})
+            continue
+        if not title and type_at is not None and kind in ("artist", "album"):
+            title = cell(sheet.roles.get("track")) or cell(sheet.roles.get("title"))
         if not title:
             blanks += 1
             continue
@@ -403,7 +435,7 @@ def rows(sheet: Sheet, medium: str, unit: str) -> tuple[list[Row], int, int]:
         # for as a film called "Dead Reckoning Part One" by somebody called
         # "Mission: Impossible", and films are matched without a credit, so a
         # same-named hit would tick itself.
-        if (medium == media.MUSIC and not artist and unit != "artist"
+        if (medium == media.MUSIC and artist_at is None and not artist and unit != "artist"
                 and _PLAIN_SPLIT in title):
             artist, _, title = title.partition(_PLAIN_SPLIT)
             artist, title = artist.strip(), title.strip()
@@ -412,14 +444,25 @@ def rows(sheet: Sheet, medium: str, unit: str) -> tuple[list[Row], int, int]:
         # one of them: a film list holding Dune 1984 and Dune 2021 is two
         # films, and a key without the year keeps one of them and reports the
         # other as a duplicate somebody never sees again.
-        key = (_key(artist), _key(title), year)
+        key = ((songs.name_key(artist), songs.song_key(title), songs.name_key(songs.guests(title)), year)
+               if medium == media.MUSIC else (_key(artist), _key(title), year))
         if key in seen:
             duplicates += 1
             continue
         seen.add(key)
-        found.append(Row(sheet.lines[index], title, artist,
-                         _year_of(cell(year_at))))
+        found.append(Row(sheet.lines[index], title, artist, year, source_row,
+                         sheet.starts[index] if sheet.starts else sheet.lines[index],
+                         cell(sheet.roles.get("album")), record_type))
     return found, duplicates, blanks
+
+
+def _record_unit(value: str) -> str:
+    """Named record types used by music exports; unknown types are reported."""
+    key = _fold_heading(value)
+    return {"track": "track", "tracks": "track", "song": "track", "songs": "track",
+            "recording": "track", "librarysongs": "track", "musicsong": "track",
+            "album": "album", "albums": "album", "libraryalbums": "album",
+            "artist": "artist", "artists": "artist", "libraryartists": "artist"}.get(key, "")
 
 
 #: How a role's heading is written when telling somebody what to call it.
@@ -479,6 +522,14 @@ def is_strict(row: Row, hit: dict, medium: str) -> bool:
     match is one tick, and the cost of accepting a false one is a download
     nobody wanted and an allowance spent on it.
     """
+    if medium == media.MUSIC:
+        if hit.get("unit") == "artist":
+            exact = songs.same_credit(row.title, hit.get("title") or "")
+        else:
+            exact = songs.recording_matches(row.title, row.artist,
+                                             hit.get("title") or "", hit.get("artist") or "")
+        hit_year = str(hit.get("year") or "").strip()
+        return exact and not (row.year and hit_year and row.year != hit_year)
     if _key(row.title) != _key(hit.get("title") or ""):
         return False
     if _numbers(row.title) != _numbers(hit.get("title") or ""):
@@ -505,9 +556,36 @@ def _query(row: Row, medium: str, unit: str) -> str:
     and series, whose catalogues match a title and treat extra words as a
     title that does not exist.
     """
+    title = songs.search_title(row.title) if medium == media.MUSIC else row.title
     if medium in (media.MUSIC, media.BOOK) and row.artist and unit != "artist":
-        return f"{row.artist} {row.title}".strip()
-    return row.title
+        return f"{row.artist} {title}".strip()
+    return title
+
+
+def _close_score(row: Row, hit: dict, medium: str) -> float:
+    if medium == media.MUSIC and hit.get("unit") == "track":
+        return songs.close_score(row.title, row.artist, hit.get("title") or "",
+                                 hit.get("artist") or "")
+    return SequenceMatcher(None, _key(row.title), _key(hit.get("title") or "")).ratio()
+
+
+def source_label(row: dict) -> str:
+    number = row.get("source_row")
+    if not number:
+        return f"Line {row['line']} of your file"
+    label = f"Row {number} of your file"
+    first = row.get("line_start") or row["line"]
+    if first != number or row["line"] != number:
+        label += (f" (physical line {first})" if first == row["line"]
+                  else f" (physical lines {first}–{row['line']})")
+    return label
+
+
+def search_url(batch: dict, row: dict) -> str:
+    source = Row(row["line"], row["title"], row.get("artist") or "")
+    return "/?" + urlencode({"medium": batch["medium"], "unit": batch["unit"],
+                             "q": _query(source, batch["medium"], batch["unit"]),
+                             "import_id": batch["id"], "import_line": row["line"]})
 
 
 #: The catalogue a music row is looked up in first, and the units that do it.
@@ -529,8 +607,7 @@ def match(user: jellyfin.User, medium: str, unit: str, row: Row,
     file to it -- after the other four hundred and ninety-nine have already
     been paid for -- is the wrong answer to a network blip.
     """
-    found: dict = {"line": row.line, "title": row.title, "artist": row.artist,
-                   "year": row.year, "label": row.label, "state": MISSING,
+    found: dict = {**asdict(row), "label": row.label, "state": MISSING,
                    "detail": "", "hit": None, "others": 0}
     query = _query(row, medium, unit)
     try:
@@ -550,14 +627,20 @@ def match(user: jellyfin.User, medium: str, unit: str, row: Row,
         return found
 
     exact = [hit for hit in hits if is_strict(row, hit, medium)]
-    chosen = exact[0] if exact else hits[0]
+    plausible = sorted(((hit, _close_score(row, hit, medium)) for hit in hits),
+                       key=lambda pair: pair[1], reverse=True)
+    if not exact and (not plausible or plausible[0][1] < 0.7):
+        found["detail"] = NO_MATCH
+        return found
+    chosen = exact[0] if exact else plausible[0][0]
     found["hit"] = _keep(chosen)
     found["others"] = len(hits) - 1
-    if chosen.get("owned"):
+    identity_known = bool(exact) or medium != media.MUSIC
+    if identity_known and chosen.get("owned"):
         found["state"] = HELD
         found["detail"] = "Already in the library."
         return found
-    if chosen.get("requested") or chosen.get("itemKey") in requested:
+    if identity_known and (chosen.get("requested") or chosen.get("itemKey") in requested):
         found["state"] = HELD
         found["detail"] = "Already asked for."
         return found
@@ -632,10 +715,11 @@ def start(user: jellyfin.User, medium: str, unit: str, filename: str,
         if unit not in found.units:
             unit = (suggest_unit(sheet) if medium == media.MUSIC
                     else found.units[0])
-        items, duplicates, blanks = rows(sheet, medium, unit)
+        skipped: list[dict] = []
+        items, duplicates, blanks = rows(sheet, medium, unit, skipped)
         if not items:
             raise Unreadable(
-                "Every row in that file has an empty title column.")
+                "No rows of the selected type have a title. Check the Type and title columns.")
         if len(items) > max_rows(medium):
             raise Unreadable(
                 f"That file has {len(items):,} rows. The limit is "
@@ -668,17 +752,18 @@ def start(user: jellyfin.User, medium: str, unit: str, filename: str,
     payload = {
         "medium": medium, "unit": unit, "filename": filename,
         "duplicates": duplicates, "blanks": blanks,
+        "skipped": skipped, "has_source": True, "matching_version": MATCHING_VERSION,
         "headings": list(sheet.headings),
         # The parsed rows, so a list a restart interrupted carries on from
         # where it got to instead of being looked up again from the top.
-        "items": [{"line": r.line, "title": r.title, "artist": r.artist,
-                   "year": r.year} for r in items],
+        "items": [asdict(r) for r in items],
     }
     if playlist_id:
         payload["playlist"] = {"name": playlists.clean_name(playlist),
                                "id": playlist_id}
     store.prune_imports(time.time() - config.IMPORT_RETENTION_HOURS * 3600)
-    store.put_import(import_id, user.key, medium, READING, len(items), payload)
+    store.put_import(import_id, user.key, medium, READING, len(items), payload,
+                     source=data.encode("utf-8") if isinstance(data, str) else data)
     log.info("import %s started user=%s medium=%s unit=%s rows=%d file=%r",
              import_id, user.key, medium, unit, len(items), filename)
     _start_working(import_id, user, medium, unit, items)
@@ -729,7 +814,7 @@ def _work_through(import_id: str, user: jellyfin.User, medium: str, unit: str,
             if import_id in _stopping:
                 log.info("import %s stopped after %d rows", import_id, done)
                 break
-            item_id = library.find(row.title, row.artist) if library else None
+            item_id = library.find(row.title, row.artist, row.album) if library else None
             if item_id:
                 store.put_import_row(import_id, _in_library(row, item_id))
                 done += 1
@@ -804,8 +889,7 @@ def _library_for(medium: str, unit: str) -> songs.LibraryIndex | None:
 
 def _in_library(row: Row, item_id: str) -> dict:
     """A row whose song the library already holds."""
-    return {"line": row.line, "title": row.title, "artist": row.artist,
-            "year": row.year, "label": row.label, "state": HELD,
+    return {**asdict(row), "label": row.label, "state": HELD,
             "detail": "Already in the library.", "hit": None, "others": 0,
             "itemId": item_id}
 
@@ -863,7 +947,12 @@ def _ask_one(import_id: str, user: jellyfin.User, medium: str,
         with _working_guard:
             if import_id in _stopping:
                 return None, ""
-        if medium == media.MUSIC and store.queued_count(user.key, medium):
+        current = store.get_import(import_id)
+        if current is not None and json.loads(current["payload"]).get("stopped"):
+            return None, ""
+        existing = store.get(user.key, medium, hit.get("itemKey", ""))
+        already_pending = existing is not None and existing["fulfilled_at"] is None
+        if medium == media.MUSIC and not already_pending and store.queued_count(user.key, medium):
             store.queue_rows(user.key, medium, import_id, [(row["line"], label, hit)])
             return WAITING, ""
         try:
@@ -896,8 +985,7 @@ def _offerable(row: dict) -> bool:
     """Whether a row is still waiting for somebody to decide about it."""
     hit = row.get("hit") or {}
     return (row["state"] in (MATCHED, UNCERTAIN) and bool(hit)
-            and not row.get("outcome")
-            and not hit.get("owned") and not hit.get("requested"))
+            and not row.get("outcome"))
 
 
 def _settle(import_id: str) -> None:
@@ -984,9 +1072,11 @@ def view(batch: dict) -> dict[str, list[dict]]:
     """
     out: dict[str, list[dict]] = {"asked": [], "already": [], "waiting": [],
                                   "refused": [], "close": [], "left": [],
-                                  "missing": []}
+                                  "missing": [], "review": []}
     for row in batch.get("rows", []):
         outcome = row.get("outcome") or ""
+        if row.get("reviewNote") and outcome in (ASKED, ALREADY):
+            out["review"].append(row)
         if outcome in (ASKED, SENDING):
             out["asked"].append(row)
         elif outcome == WAITING:
@@ -1100,6 +1190,78 @@ def _settle_if_read(import_id: str) -> None:
         _settle(import_id)
 
 
+def ignore_lines(user: jellyfin.User, import_id: str, lines: set[int]) -> dict | None:
+    """Ignore only the selected undecided rows; never request them."""
+    with store.key_lock("import", import_id):
+        batch = get(user, import_id)
+        if batch is None:
+            return None
+        if batch["state"] not in (READING, READY):
+            return batch
+        for row in batch["rows"]:
+            if row["line"] in lines and _offerable(row):
+                store.set_import_outcome(import_id, row["line"], LEFT)
+    _settle_if_read(import_id)
+    return get(user, import_id)
+
+
+def correction_context(user: jellyfin.User, import_id: str, line: int) -> tuple[dict, dict]:
+    """Resolve a correction to this user's still-editable source row."""
+    batch = get(user, import_id)
+    if batch is None:
+        raise wants.Denied("That list is no longer here.")
+    if batch.get("stopped") or batch["state"] == ASKING:
+        raise wants.Denied("This list is stopped or is already sending its selections.")
+    row = next((r for r in batch["rows"] if r["line"] == line), None)
+    reviewing = row is not None and row.get("reviewNote") and row.get("outcome") in (ASKED, ALREADY)
+    if (row is None or (not reviewing and row.get("outcome") not in ("", LEFT, REFUSED))
+            or row["state"] not in (MATCHED, UNCERTAIN, MISSING)):
+        raise wants.Denied("That row has already been handled or is no longer available.")
+    return batch, row
+
+
+def replace_row(user: jellyfin.User, import_id: str, line: int, hit: dict) -> str:
+    """Submit a manually chosen replacement using its list's accounting and ordering."""
+    with store.key_lock("import", import_id):
+        batch, original = correction_context(user, import_id, line)
+        if (hit.get("medium") != batch["medium"] or hit.get("unit") != batch["unit"]
+                or not hit.get("itemKey") or not str(hit.get("title") or "").strip()):
+            raise wants.Denied("Choose a result of the same kind as this imported row.")
+        row = dict(original, hit=_keep(hit), state=UNCERTAIN, manual=True)
+        if row.pop("reviewNote", None):
+            row["previousHit"] = original.get("hit")
+        # Claim before network work, so correction/ignore/confirm races cannot
+        # submit different candidates for the same source row.
+        store.put_import_row(import_id, row, SENDING)
+    try:
+        library = _library_for(batch["medium"], batch["unit"])
+        item_id = library.find(hit["title"], hit.get("artist") or "",
+                               hit.get("album") or "") if library else None
+        if item_id:
+            row.update(state=HELD, itemId=item_id)
+            outcome, detail = ALREADY, ""
+            store.put_import_row(import_id, row, outcome)
+            if batch.get("playlist"):
+                _add_found(user, batch["playlist"], import_id, [(line, item_id)])
+        else:
+            outcome, detail = _ask_one(import_id, user, batch["medium"], row)
+            if outcome in (None, REFUSED):
+                raise wants.Denied(detail or "This list was stopped before the request was sent.")
+            store.put_import_row(import_id, row, outcome, detail)
+            if batch.get("playlist"):
+                _wait_for(user, batch["playlist"], import_id, row, outcome)
+    except Exception:
+        # Do not erase an accepted request if playlist bookkeeping failed.
+        current = next((r for r in store.import_rows(import_id) if r["line"] == line), {})
+        if current.get("outcome") == SENDING:
+            store.put_import_row(import_id, original, original.get("outcome") or "",
+                                 original.get("outcomeDetail") or "")
+        raise
+    _settle_if_read(import_id)
+    return {ASKED: "Requested the selected track.", WAITING: "Queued the selected track for the import allowance.",
+            ALREADY: "The selected track is already here or already requested."}[outcome]
+
+
 def recent(user: jellyfin.User) -> list[dict]:
     """This account's lists still on the server, newest first, for a way back to them."""
     found = []
@@ -1146,8 +1308,7 @@ def resume_interrupted() -> int:
                          "asked for before it stopped is listed below."})
             continue
         done = store.import_row_lines(row["import_id"])
-        rest = [Row(item["line"], item["title"], item.get("artist", ""),
-                    item.get("year", ""))
+        rest = [Row(**{k: v for k, v in item.items() if k in Row.__dataclass_fields__})
                 for item in items if item["line"] not in done]
         log.info("import %s carries on after a restart: %d of %d rows left",
                  row["import_id"], len(rest), len(items))
@@ -1278,7 +1439,7 @@ def _release_for(user: jellyfin.User) -> int:
                 continue
             hit = json.loads(row["hit"])
             try:
-                state, _ = wants.want(user, row["medium"], hit.get("itemKey", ""),
+                state, message = wants.want(user, row["medium"], hit.get("itemKey", ""),
                                       hit.get("unit", ""), dict(hit),
                                       imported=True)
             except (wants.ImportLimitReached, wants.TryLater) as later:
@@ -1289,13 +1450,14 @@ def _release_for(user: jellyfin.User) -> int:
             except wants.Denied as denied:
                 log.info("import queue: refused user=%s line=%d %r: %s",
                          user.key, row["line"], row["label"], denied)
-                store.unqueue(row["id"])
+                store.unqueue(row["id"], REFUSED, str(denied))
                 continue
             except Exception as exc:  # noqa: BLE001 - tried again next pass.
                 log.warning("import queue: could not ask user=%s %r: %s",
                             user.key, row["label"], exc)
                 break
-            store.unqueue(row["id"])
+            outcome = ALREADY if state == wants.IN_LIBRARY or message.startswith("Already ") else ASKED
+            store.unqueue(row["id"], outcome)
         went += 1
         log.info("import queue: asked user=%s %r state=%s", user.key,
                  row["label"], state)

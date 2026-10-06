@@ -893,6 +893,26 @@ def post_import_confirm(import_id: str,
     return _import_state(user, import_id)
 
 
+@router.post("/import/{import_id}/ignore")
+def post_import_ignore(import_id: str, lines: list[int] = Body(default=[], embed=True),
+                       user: jellyfin.User = Depends(caller)) -> dict:
+    if imports.ignore_lines(user, import_id, set(lines)) is None:
+        raise HTTPException(status_code=404, detail="No such list.")
+    return _import_state(user, import_id)
+
+
+@router.post("/import/{import_id}/replace")
+def post_import_replace(import_id: str, line: int = Body(...), hit: dict = Body(...),
+                        user: jellyfin.User = Depends(caller)) -> dict:
+    if imports.get(user, import_id) is None:
+        raise HTTPException(status_code=404, detail="No such list.")
+    try:
+        imports.replace_row(user, import_id, line, hit)
+    except wants.Denied as denied:
+        raise HTTPException(status_code=400, detail=str(denied)) from denied
+    return _import_state(user, import_id)
+
+
 def _import_state(user: jellyfin.User, import_id: str) -> dict:
     """One list, in the shape a client reads.
 
@@ -933,6 +953,8 @@ def _import_state(user: jellyfin.User, import_id: str) -> dict:
         "total": batch["total"],
         "duplicates": batch.get("duplicates", 0),
         "blanks": batch.get("blanks", 0),
+        "skipped": batch.get("skipped", []),
+        "hasOriginalFile": batch.get("has_source", False),
         "rows": [_row_for_client(row) for row in batch.get("rows", [])],
         "report": report,
         # The Jellyfin playlist this list fills, when it was given one: its

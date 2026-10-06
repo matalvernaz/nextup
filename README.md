@@ -76,6 +76,12 @@ list does not hold up somebody else's short one. Music rows are looked up on
 Deezer first and in buskarr's other catalogues only when Deezer has nothing
 certain.
 
+Use **Request selected tracks** to confirm close matches or **Ignore selected
+tracks** to leave only the selected rows out. Search links keep the source row
+attached while you change the query and choose another result. The replacement
+uses the import allowance, updates that row and returns to its list; an item
+that exceeds today's allowance waits in the same queue as the other imports.
+
 A list of songs is checked against the Jellyfin music library first, so a song
 already here is not asked for again or counted against anybody's allowance.
 The match keeps versions apart: "Song (Live)" in the library is not "Song" in
@@ -106,6 +112,31 @@ data, such as a year. The review page says which line it took for headings.
 A list with no headings is read as one title per line, and for music
 `Artist - Title` is split into the two. A file with headings but no title
 column is refused with the headings that would work.
+
+Music exports with a `Type` column can contain tracks, albums and artists in
+one file. Only rows of the chosen kind are imported; other or unknown types
+are listed as skipped. A track import requires a track/title column and never
+substitutes the album column. The original upload is available to its owner
+from **Download the original file**, including skipped rows and duplicates,
+until the import report expires. Older imports that did not save it cannot
+recover those discarded fields. Row references use spreadsheet record numbers;
+physical line ranges are also shown for multiline records.
+
+Music comparisons accept encoded spaces, underscores, punctuation, joined
+title words, `and`/`N`/`N'`, first/last-name inversion and release labels such
+as `- Single`. They retain recording qualifiers such as Live, Remix, Acoustic,
+Demo and Single Edit, both when matching and when removing duplicate rows.
+Catalogue results need a plausible title and artist before they are offered
+as close matches. A different recording already in the library does not
+resolve the original row.
+
+To review saved music matches from older versions, stop NextUp and back up its
+database, then run `python -m app.import_review --database /data/nextup.db` in
+the image. It reports a plan without changing anything. Add `--apply` to move
+questionable automatic queue entries back to review and flag earlier requests
+that selected another recording. Explicit selections and accepted requests
+are preserved; this does not acquire music or delete library files. Lost
+record types and duplicate rows require the original CSV to recover.
 
 A shelf is never built while you wait. The first film shelf on a large library
 is around twelve seconds of Jellyfin, so the page says it is working on it and
@@ -276,6 +307,8 @@ it placed it under.
 | `POST` | `/api/v1/import` | Hand over a whole list as text; exact matches are asked for as it is looked up |
 | `GET` | `/api/v1/import/{id}` | How far that list has got, and what became of each row |
 | `POST` | `/api/v1/import/{id}/confirm` | Ask for the near misses somebody chose, and finish the list |
+| `POST` | `/api/v1/import/{id}/ignore` | Leave out only the selected undecided lines |
+| `POST` | `/api/v1/import/{id}/replace` | Choose a replacement hit for one source line, using the import allowance |
 | `GET` | `/api/v1/import/queue` | Music from imported lists still waiting for a later day |
 | `DELETE` | `/api/v1/import/queue` | Stop asking for it |
 

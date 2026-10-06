@@ -815,7 +815,7 @@ async def post_accounts_reset(request: Request):
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request, q: str = "", medium: str = "", unit: str = "",
-          msg: str = ""):
+          msg: str = "", import_id: str = "", import_line: int = 0):
     """Search, and everything this account is currently waiting for."""
     if setup.needs_setup():
         # Nothing can be asked of a Jellyfin this service has no credential
@@ -827,7 +827,20 @@ def index(request: Request, q: str = "", medium: str = "", unit: str = "",
     except LookupError as exc:
         return _signin_page(request, detail=str(exc), status=401)
 
+    import_context = None
+    if import_id or import_line:
+        try:
+            batch, row = imports.correction_context(user, import_id, import_line)
+        except wants.Denied as denied:
+            return RedirectResponse("/import?msg=" + quote(str(denied)), status_code=303)
+        medium, unit = batch["medium"], batch["unit"]
+        import_context = {"id": import_id, "line": import_line,
+                          "label": row["label"], "source": imports.source_label(row),
+                          "filename": batch["filename"] or "Pasted list"}
     offered = media.available()
+    if import_context and medium not in offered:
+        return RedirectResponse(f"/import/{quote(import_id, safe='')}?msg=" + quote(
+            "Requests for this kind of item are currently unavailable."), status_code=303)
     medium = medium if medium in offered else (next(iter(offered), ""))
     found = offered.get(medium)
     unit = unit if found and unit in found.units else (
@@ -836,7 +849,7 @@ def index(request: Request, q: str = "", medium: str = "", unit: str = "",
     try:
         results = (wants.search(q.strip(), medium, unit, user)
                    if q.strip() and found else [])
-    except podcasts.Unreadable as exc:
+    except (podcasts.Unreadable, arr.Unavailable) as exc:
         results = []
         msg = msg or str(exc)
     usual = wants.usual_episodes(user) if medium == media.PODCAST else None
@@ -848,6 +861,8 @@ def index(request: Request, q: str = "", medium: str = "", unit: str = "",
             "medium": medium,
             "unit": unit,
             "query": q,
+            "import_context": import_context,
+            "import_limit": _import_limit(user) if import_context else None,
             "results": results,
             "requests": wants.states(user),
             "message": msg,
@@ -870,7 +885,8 @@ def post_want(request: Request, medium: str = Form(...),
               overview: str = Form(""),
               feed_url: str = Form("", alias="feedUrl"),
               itunes_id: str = Form("", alias="itunesId"),
-              episodes_asked: str = Form("", alias="episodes")):
+              episodes_asked: str = Form("", alias="episodes"),
+              import_id: str = Form(""), import_line: int = Form(0)):
     """Ask for one thing, then send the browser back to the list.
 
     A redirect rather than a rendered response so that a reload does not
@@ -886,6 +902,17 @@ def post_want(request: Request, medium: str = Form(...),
            "durationSeconds": duration_seconds,
            "imageUrl": image_url, "overview": overview,
            "feedUrl": feed_url, "itunesId": itunes_id}
+    if import_id or import_line:
+        try:
+            message = imports.replace_row(user, import_id, import_line,
+                                          dict(hit, itemKey=item_key, medium=medium, unit=unit))
+        except wants.Denied as denied:
+            message = str(denied)
+        except (arr.Unavailable, jellyfin.JellyfinUnavailable) as exc:
+            log.warning("import correction unavailable: %s", exc)
+            message = "The selected track could not be requested. Try again in a moment."
+        return RedirectResponse(f"/import/{quote(import_id, safe='')}?msg=" + quote(message),
+                                status_code=303)
     try:
         _, message = wants.want(
             user, medium, item_key, unit, hit,
@@ -1021,9 +1048,44 @@ def get_import_batch(request: Request, import_id: str, msg: str = ""):
             "playlist": playlists.summary(import_id, batch.get("playlist")),
             "message": msg,
             "hit_label": imports.hit_label,
+            "source_label": imports.source_label,
+            "search_url": imports.search_url,
             "no_match": imports.NO_MATCH,
             "import_limit": _import_limit(user),
         })
+
+
+@app.get("/import/{import_id}/source")
+def get_import_source(request: Request, import_id: str):
+    try:
+        user = viewer(request)
+    except LookupError as exc:
+        return _signin_page(request, detail=str(exc), status=401)
+    batch = imports.get(user, import_id)
+    if batch is None:
+        return PlainTextResponse("No such list.", status_code=404)
+    source = store.import_source(import_id)
+    if source is None:
+        return PlainTextResponse("The original file was not saved for this older import.", status_code=404)
+    filename = batch.get("filename") or "pasted-list.txt"
+    return Response(source, media_type="application/octet-stream", headers={
+        "Content-Disposition": "attachment; filename*=UTF-8''" + quote(filename, safe=""),
+        "Cache-Control": "private, no-store",
+    })
+
+
+@app.post("/import/{import_id}/ignore")
+async def post_import_ignore(request: Request, import_id: str):
+    try:
+        user = viewer(request)
+    except LookupError as exc:
+        return _signin_page(request, detail=str(exc), status=401)
+    form = await request.form()
+    lines = {int(value) for value in form.getlist("line") if str(value).isdigit()}
+    if imports.ignore_lines(user, import_id, lines) is None:
+        return RedirectResponse("/import?msg=" + quote("That list is no longer here."), status_code=303)
+    message = "Ignored the selected tracks." if lines else "Nothing was selected."
+    return RedirectResponse(f"/import/{quote(import_id, safe='')}?msg=" + quote(message), status_code=303)
 
 
 @app.post("/import/{import_id}/confirm")
@@ -1052,7 +1114,7 @@ async def post_import_confirm(request: Request, import_id: str):
             url="/import?msg=" + quote("That list is no longer here."),
             status_code=303)
     return RedirectResponse(
-        url=f"/import/{import_id}?msg=" + quote("Asking for the ticked ones."),
+        url=f"/import/{import_id}?msg=" + quote("Requesting the selected tracks."),
         status_code=303)
 
 
