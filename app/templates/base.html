@@ -63,6 +63,15 @@
         does not exist -- which is why the allowances went unset until now.
       #}
       {% if user.is_admin %}
+      {#
+        Only where the server holds asks past the allowance, and with the
+        count in the link's own name, so it can be heard from the list of
+        links without opening the page.
+      #}
+      {% set nav_approvals = approvals_waiting() %}
+      {% if nav_approvals is not none %}
+      <li><a href="/approvals">Requests to approve{% if nav_approvals %}, {{ nav_approvals }} waiting{% endif %}</a></li>
+      {% endif %}
       <li><a href="/accounts">Accounts and allowances</a></li>
       <li><a href="/backends">What this connects to</a></li>
       {% endif %}

@@ -103,6 +103,41 @@ CREATE TABLE IF NOT EXISTS account_caps (
     PRIMARY KEY (user_key, medium)
 );
 
+-- An ask past somebody's daily allowance, waiting for a keyholder to say yes
+-- or no.
+--
+-- Its own table and not a state on `requests`, because a row there means the
+-- acquisition tool has the thing: arrival, cancel, the household waiting
+-- counts and the deletion guard all read it that way. Nothing here has been
+-- handed to anything. Approving one asks for it the ordinary way, which is
+-- what writes the `requests` row, and the row here goes.
+--
+-- `hit` is what the ask carried, as JSON, so approving it later hands the
+-- acquisition tool exactly what it would have had at the time. `choice` is
+-- a series' seasons or a podcast's episodes, in their short forms.
+-- `state` is 'waiting' or 'declined'; a declined row stays for the asker to
+-- read for a while and then goes.
+CREATE TABLE IF NOT EXISTS held_requests (
+    user_key   TEXT NOT NULL,
+    medium     TEXT NOT NULL,
+    item_key   TEXT NOT NULL,
+    unit       TEXT NOT NULL,
+    title      TEXT NOT NULL DEFAULT '',
+    year       TEXT NOT NULL DEFAULT '',
+    image_url  TEXT NOT NULL DEFAULT '',
+    overview   TEXT NOT NULL DEFAULT '',
+    hit        TEXT NOT NULL DEFAULT '{}',
+    choice     TEXT NOT NULL DEFAULT '',
+    state      TEXT NOT NULL,
+    reason     TEXT NOT NULL DEFAULT '',
+    asked_at   REAL NOT NULL,
+    decided_at REAL,
+    decided_by TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (user_key, medium, item_key)
+);
+CREATE INDEX IF NOT EXISTS held_by_item
+    ON held_requests(medium, item_key, state);
+
 -- What one account has told this service about itself, as opposed to what the
 -- household has told it about its wiring. Today that is one thing: a personal
 -- Hardcover token, which names a person -- `me` answers with the account that
@@ -460,10 +495,18 @@ _LATER_COLUMNS = (("authors", "TEXT NOT NULL DEFAULT ''"),
 
 #: The `allowance` of a request that came from an imported list.
 IMPORT_POOL = "import"
+#: The `allowance` of a request a keyholder approved past the asker's limit.
+#: Recorded at no cost: it was somebody's decision to allow it, and charging it
+#: would quietly shrink the asker's next day.
+APPROVED_POOL = "approved"
 
 #: Longest blurb kept on a request. A catalogue blurb runs to a paragraph or
 #: two; this bounds what a client-supplied one can cost the ledger.
 MAX_OVERVIEW_LENGTH = 4000
+
+#: Longest reason a keyholder's no is kept with. A sentence or two; this
+#: bounds what a client-supplied one can cost the table.
+MAX_REASON_LENGTH = 500
 
 
 def _add_missing_columns(conn: sqlite3.Connection) -> None:
@@ -518,7 +561,8 @@ def nothing_to_rekey() -> bool:
 #: stayed put -- a half-migrated account is harder to notice than an
 #: unmigrated one.
 USER_SCOPED_TABLES = ("requests", "submitted", "dismissed", "runs",
-                      "recommendation_items", "feedback_events", "shelves")
+                      "recommendation_items", "feedback_events", "shelves",
+                      "held_requests")
 
 
 def rekey_users(name_to_id: dict[str, str]) -> int:
@@ -899,6 +943,123 @@ def others_waiting(user_key: str, medium: str, item_key: str) -> set[str]:
             "AND user_key<>? AND fulfilled_at IS NULL",
             (medium, item_key, user_key)).fetchall()
     return {row["user_key"] for row in rows}
+
+
+# --- Asks waiting for a keyholder ---------------------------------------------
+
+#: A held ask nobody has answered yet.
+HELD_WAITING = "waiting"
+#: A held ask a keyholder said no to. Kept for the asker to read, then pruned.
+HELD_DECLINED = "declined"
+
+
+def hold(user_key: str, medium: str, item_key: str, unit: str, title: str,
+         year: str, image_url: str, overview: str, hit: dict,
+         choice: str) -> bool:
+    """Keep an ask past the allowance for a keyholder. True when it is new.
+
+    Asking again for something already waiting leaves it as it is, so the
+    clock that orders the keyholder's list is not restarted by a second tap.
+    A declined one asked for again is waiting again, from now, with the old
+    answer cleared: somebody asking twice is somebody who still wants it.
+    """
+    with db() as conn:
+        cur = conn.execute(
+            "INSERT INTO held_requests (user_key, medium, item_key, unit, "
+            "title, year, image_url, overview, hit, choice, state, asked_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT (user_key, medium, item_key) DO UPDATE SET "
+            "unit=excluded.unit, title=excluded.title, year=excluded.year, "
+            "image_url=excluded.image_url, overview=excluded.overview, "
+            "hit=excluded.hit, choice=excluded.choice, state=excluded.state, "
+            "asked_at=excluded.asked_at, reason='', decided_at=NULL, "
+            "decided_by='' WHERE held_requests.state<>?",
+            (user_key, medium, item_key, unit, title, year, image_url,
+             overview[:MAX_OVERVIEW_LENGTH], json.dumps(hit), choice,
+             HELD_WAITING, time.time(), HELD_WAITING))
+    return cur.rowcount > 0
+
+
+def held(user_key: str, medium: str, item_key: str) -> sqlite3.Row | None:
+    """This account's held ask for one thing, waiting or declined, or None."""
+    with db() as conn:
+        return conn.execute(
+            "SELECT * FROM held_requests "
+            "WHERE user_key=? AND medium=? AND item_key=?",
+            (user_key, medium, item_key)).fetchone()
+
+
+def held_for(user_key: str, medium: str | None = None,
+             declined_since: float = 0.0) -> list[sqlite3.Row]:
+    """This account's held asks worth showing it: waiting, plus recent noes."""
+    sql = ("SELECT * FROM held_requests WHERE user_key=? AND "
+           "(state=? OR (state=? AND decided_at >= ?))")
+    args: list = [user_key, HELD_WAITING, HELD_DECLINED, declined_since]
+    if medium:
+        sql += " AND medium=?"
+        args.append(medium)
+    with db() as conn:
+        return list(conn.execute(sql + " ORDER BY asked_at DESC", args))
+
+
+def waiting_on(medium: str, item_key: str) -> list[sqlite3.Row]:
+    """Every account's waiting ask for one thing, the earliest first."""
+    with db() as conn:
+        return list(conn.execute(
+            "SELECT * FROM held_requests WHERE medium=? AND item_key=? "
+            "AND state=? ORDER BY asked_at", (medium, item_key, HELD_WAITING)))
+
+
+def all_waiting() -> list[sqlite3.Row]:
+    """Every waiting ask in the household, the earliest first."""
+    with db() as conn:
+        return list(conn.execute(
+            "SELECT * FROM held_requests WHERE state=? ORDER BY asked_at",
+            (HELD_WAITING,)))
+
+
+def waiting_count() -> int:
+    """How many different things are waiting for a keyholder."""
+    with db() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM (SELECT DISTINCT medium, item_key "
+            "FROM held_requests WHERE state=?)", (HELD_WAITING,)).fetchone()
+    return int(row["n"] or 0)
+
+
+def drop_held(user_key: str, medium: str, item_key: str) -> bool:
+    """Take one held ask away, whatever its state. True if there was one."""
+    with db() as conn:
+        return conn.execute(
+            "DELETE FROM held_requests "
+            "WHERE user_key=? AND medium=? AND item_key=?",
+            (user_key, medium, item_key)).rowcount > 0
+
+
+def decline_held(medium: str, item_key: str, reason: str,
+                 decided_by: str) -> list[str]:
+    """Say no to every waiting ask for one thing. Returns whose they were."""
+    with db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        keys = [row["user_key"] for row in conn.execute(
+            "SELECT user_key FROM held_requests "
+            "WHERE medium=? AND item_key=? AND state=?",
+            (medium, item_key, HELD_WAITING))]
+        conn.execute(
+            "UPDATE held_requests SET state=?, reason=?, decided_at=?, "
+            "decided_by=? WHERE medium=? AND item_key=? AND state=?",
+            (HELD_DECLINED, reason[:MAX_REASON_LENGTH], time.time(),
+             decided_by, medium, item_key, HELD_WAITING))
+    return keys
+
+
+def prune_declined(before: float) -> int:
+    """Forget the noes nobody needs to read any more. Returns how many went."""
+    with db() as conn:
+        return conn.execute(
+            "DELETE FROM held_requests WHERE state=? AND decided_at < ?",
+            (HELD_DECLINED, before)).rowcount
+
 
 
 # --- The audiobook engine's caches -------------------------------------------

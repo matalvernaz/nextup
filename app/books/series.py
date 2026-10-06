@@ -18,7 +18,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
 from typing import NamedTuple
 
-from .. import config, jellyfin, listenarr, logs
+from .. import config, held, jellyfin, listenarr, logs
+from .. import store as ledger
 from . import audible, engine, shelves, store, wants
 
 log = logs.get("series")
@@ -910,7 +911,8 @@ def _search_row(planned: dict) -> dict:
 
 
 def want_series(user: jellyfin.User, name: str,
-                anchor_item_id: str | None = None) -> dict:
+                anchor_item_id: str | None = None, over_limit: bool = False,
+                approved: bool = False, limit: int | None = None) -> dict:
     """Ask for the books of one series the library does not hold, bounded.
 
     Only what Audible has actually published: an unreleased volume is counted
@@ -922,24 +924,32 @@ def want_series(user: jellyfin.User, name: str,
     so one activation cannot become forty acquisitions, and for a capped
     account by what is left of the day. What was not asked for is counted,
     and the sentence says why.
+
+    `over_limit`: what this tap would still have asked for once the day's
+    allowance ran out waits for a keyholder, as one ask, instead of being left
+    for tomorrow. `approved` is a keyholder's yes to that ask, made again on
+    the asker's behalf: the allowance no longer bounds it, `limit` (how many
+    books were waiting) does, and the books are free.
     """
     planned = plan(user, name, anchor_item_id)
     missing = planned["missing"]
-    limit = config.SERIES_WANT_LIMIT
+    limit = (min(config.SERIES_WANT_LIMIT, limit) if limit
+             else config.SERIES_WANT_LIMIT)
     cap_hit = False
     requested: list[dict] = []
     failed: list[dict] = []
     for candidate in missing:
         if len(requested) + len(failed) >= limit:
             break
-        remaining = wants.allowance(user)
+        remaining = None if approved else wants.allowance(user)
         if remaining is not None and remaining <= 0:
             cap_hit = True
             break
         metadata = listenarr.metadata_from_search_row(
             planned["rows"][candidate["asin"]], region=planned["region"])
         try:
-            wants.want(user, candidate["asin"], candidate["title"], metadata=metadata)
+            wants.want(user, candidate["asin"], candidate["title"],
+                       metadata=metadata, **({"approved": True} if approved else {}))
         except wants.AllowanceExhausted:
             # Another request on this account landed between the check above
             # and the attempt. The cap held; only the accounting is owed.
@@ -954,11 +964,28 @@ def want_series(user: jellyfin.User, name: str,
         shelves.forget_asin(candidate["asin"])
 
     held_back = len(missing) - len(requested) - len(failed)
-    if cap_hit and not requested and not failed:
+    waiting = 0
+    if approved:
+        ledger.drop_held(user.key, store.MEDIUM, name)
+    elif cap_hit and held_back and over_limit and held.enabled():
+        # The rest of this tap waits for a keyholder as one ask, not one per
+        # book: it is one decision about one series.
+        asked = {c["asin"] for c in requested + failed}
+        left = [c for c in missing if c["asin"] not in asked]
+        waiting = min(len(left), limit - len(requested) - len(failed))
+        held.hold(user, store.MEDIUM, name, "series", {
+            "title": planned.get("catalogueName") or name,
+            "anchorItemId": anchor_item_id or "",
+            "count": waiting,
+            "titles": [c["title"] for c in left[:waiting]],
+        }, "", "Books", wants.daily_cap(user),
+            f"{_plural(waiting, 'more book')} of the series")
+    if cap_hit and not requested and not failed and not waiting:
         log.warning("series want denied user=%s series=%r reason=daily-cap",
                     user.key, name)
-    log.info("series want user=%s series=%r requested=%d failed=%d held_back=%d cap_hit=%s",
-             user.key, name, len(requested), len(failed), held_back, cap_hit)
+    log.info("series want user=%s series=%r requested=%d failed=%d held_back=%d "
+             "cap_hit=%s waiting=%d approved=%s", user.key, name, len(requested),
+             len(failed), held_back, cap_hit, waiting, approved)
     owned_count = _distinct_books(planned["have"])
     on_order_count = _distinct_books(planned["onOrder"])
     left_out_count = _distinct_books(planned["leftOut"])
@@ -976,13 +1003,16 @@ def want_series(user: jellyfin.User, name: str,
         "failed": [{"asin": c["asin"], "title": c["title"], "reason": c["reason"]}
                    for c in failed],
         "heldBackCount": held_back,
+        # How many of those wait for a keyholder rather than for tomorrow.
+        "waitingForApprovalCount": waiting,
         "message": sentence(
             name, owned_count=owned_count, on_order=on_order_count,
             left_out=left_out_count, not_out=not_out_count,
             requested=[c["title"] for c in requested],
             failed=[c["title"] for c in failed],
             held_back=held_back, cap_hit=cap_hit, missing=len(missing),
-            other_version=other_version, other_reason=planned["otherVersionReason"]),
+            other_version=other_version, other_reason=planned["otherVersionReason"],
+            waiting=waiting),
     }
 
 
@@ -1017,7 +1047,8 @@ def sentence(name: str, *, owned_count: int, on_order: int, left_out: int,
              requested: list[str], failed: list[str], held_back: int,
              cap_hit: bool, missing: int, not_out: int = 0,
              other_version: list[str] | None = None,
-             other_reason: str = OTHER_VERSION_REASON) -> str:
+             other_reason: str = OTHER_VERSION_REASON,
+             waiting: int = 0) -> str:
     """What to say about the outcome, in full, because the row that would have
     carried it is on another screen and the tap has nothing else to show for
     itself."""
@@ -1050,7 +1081,18 @@ def sentence(name: str, *, owned_count: int, on_order: int, left_out: int,
                      f"{_named(requested)}.")
     if failed:
         parts.append(f"Could not ask for {_named(failed)}.")
-    if held_back:
+    if held_back and waiting:
+        # Past the allowance, the rest of the tap went to a keyholder.
+        others = "the other" if requested or failed else "the next"
+        parts.append(f"That is past today's limit for books, so {others} "
+                     f"{_plural(waiting, 'book')} "
+                     f"{'has' if waiting == 1 else 'have'} gone to "
+                     f"{held.who_approves()} to approve.")
+        if held_back > waiting:
+            more = held_back - waiting
+            parts.append(f"{more} more {'book' if more == 1 else 'books'} "
+                         "not asked for yet. Use this again for the next batch.")
+    elif held_back:
         if cap_hit:
             if requested or failed:
                 parts.append(f"That is today's allowance; {_plural(held_back, 'book')} "

@@ -70,7 +70,8 @@ def _authors_of(payload) -> list[str]:
 
 
 def record_request(user_key: str, asin: str, title: str,
-                   authors: list | tuple = ()) -> bool:
+                   authors: list | tuple = (), cost: int = 1,
+                   allowance: str = "") -> bool:
     """Log that this account asked for a book. True when it is a new request.
 
     Idempotent on purpose: a second tap on the same book must not restart the
@@ -80,9 +81,12 @@ def record_request(user_key: str, asin: str, title: str,
     the book when it lands. It arrives tagged with whichever ASIN the other
     marketplace issued for the same edition, so arrival is decided on the title
     with an author to agree with it.
+
+    `cost` and `allowance` are for a book a keyholder approved past the
+    asker's limit, which is recorded free under its own pool.
     """
-    return store.record(user_key, MEDIUM, asin, UNIT, title, "", 1, "",
-                        authors=json.dumps(list(authors)))
+    return store.record(user_key, MEDIUM, asin, UNIT, title, "", cost, "",
+                        authors=json.dumps(list(authors)), allowance=allowance)
 
 
 def _as_request(row) -> dict:

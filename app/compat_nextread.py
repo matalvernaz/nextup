@@ -18,10 +18,10 @@ Retired when the last build that needs it is gone. Nothing new should be added
 here: the shape it serves is frozen by what is already installed on somebody's
 phone.
 """
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 
-from . import arr, artwork, config, jellyfin, listenarr, logs
-from .api import caller
+from . import arr, artwork, config, held, jellyfin, listenarr, logs
+from .api import OVER_LIMIT_REQUEST, caller
 from .books import search, series, shelves, wants
 
 log = logs.get("compat.nextread")
@@ -95,11 +95,16 @@ def capabilities(user: jellyfin.User = Depends(caller)) -> dict:
             "days": config.DISMISS_TTL_DAYS,
         },
         "seriesWant": {"supported": can_request, "limit": config.SERIES_WANT_LIMIT},
+        # The same block as the main capabilities: whether a book asked for
+        # past the day's allowance waits for a keyholder, for a client that
+        # says `overLimit: "request"` on `/want` and `/series/want`.
+        "approvals": held.capability(user),
     }
 
 
 @router.get("/shelves")
 def get_shelves(force: bool = False,
+                held_asks: bool = Query(False, alias="held"),
                 user: jellyfin.User = Depends(caller)) -> dict:
     """Both shelves, plus this account's outstanding requests and their state.
 
@@ -132,6 +137,15 @@ def get_shelves(force: bool = False,
     data = shelves.result(user, force=force, update_playlist=True)
     log.info("shelves served user=%s owned=%d suggestions=%d force=%s",
              user.key, len(data["own"]), len(data["discover"]), force)
+    requests = wants.states(user.key, shelves.owned_index(user))
+    if held_asks:
+        # Books waiting for a keyholder, and the ones a keyholder said no to,
+        # for a client that asked for them; their states are the ones
+        # `capabilities.approvals.states` names.
+        requests = sorted(
+            requests + [_held_request(row)
+                        for row in held.described_for(user, "book")],
+            key=lambda row: row.get("requested_at") or 0, reverse=True)
     return {
         "version": LEGACY_PROTOCOL,
         "runId": data.get("run_id"),
@@ -148,8 +162,24 @@ def get_shelves(force: bool = False,
         # The index rather than the shelf's own view of what is owned: a book
         # arrives under the ASIN the other marketplace issued for it, so
         # arrival is decided on title and author too.
-        "requests": wants.states(user.key, shelves.owned_index(user)),
+        "requests": requests,
     }
+
+
+def _held_request(described: dict) -> dict:
+    """A held book ask in this route's request shape: `asin`, not `itemKey`.
+
+    A book series waiting as one ask carries its name where a book carries
+    an ASIN, and `unit` says which.
+    """
+    out = {"asin": described["itemKey"], "title": described["title"],
+           "requested_at": described["requestedAt"],
+           "state": described["state"], "unit": described["unit"]}
+    for key in ("imageUrl", "thumbnailUrl", "reason", "decidedBy",
+                "decidedAt", "bookCount"):
+        if key in described:
+            out[key] = described[key]
+    return out
 
 
 @router.get("/search")
@@ -209,11 +239,18 @@ def post_want(user: jellyfin.User = Depends(caller),
               asin: str = Body(..., embed=True),
               title: str = Body("", embed=True),
               recommendation_id: str | None = Body(
-                  None, embed=True, alias="recommendationId")) -> dict:
-    """Ask for one book. Repeating it is free and does not spend the allowance."""
+                  None, embed=True, alias="recommendationId"),
+              over_limit: str = Body("", embed=True, alias="overLimit")) -> dict:
+    """Ask for one book. Repeating it is free and does not spend the allowance.
+
+    `overLimit: "request"`: past the day's allowance, on a server that holds
+    asks, it waits for a keyholder instead of being refused.
+    """
     log.info("api want user=%s asin=%s", user.key, asin)
     try:
-        state, message = wants.want(user, asin, title, recommendation_id)
+        state, message = wants.want(
+            user, asin, title, recommendation_id,
+            over_limit=over_limit == OVER_LIMIT_REQUEST)
     except wants.Denied as denied:
         raise HTTPException(status_code=409, detail=str(denied)) from denied
     shelves.forget_asin(asin)
@@ -266,7 +303,9 @@ def post_restore(user: jellyfin.User = Depends(caller),
 def post_series_want(user: jellyfin.User = Depends(caller),
                      name: str = Body(..., embed=True, alias="series"),
                      anchor_item_id: str | None = Body(
-                         None, embed=True, alias="anchorItemId")) -> dict:
+                         None, embed=True, alias="anchorItemId"),
+                     over_limit: str = Body("", embed=True,
+                                            alias="overLimit")) -> dict:
     """Ask for the books of one series the library does not hold yet.
 
     Decided against the library, not against Listenarr: whatever is already on
@@ -278,7 +317,9 @@ def post_series_want(user: jellyfin.User = Depends(caller),
     log.info("api series want user=%s series=%r anchor=%s",
              user.key, name, anchor_item_id)
     try:
-        outcome = series.want_series(user, name.strip(), anchor_item_id)
+        outcome = series.want_series(
+            user, name.strip(), anchor_item_id,
+            over_limit=over_limit == OVER_LIMIT_REQUEST)
     except series.NotASeries as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except series.Unresolvable as exc:

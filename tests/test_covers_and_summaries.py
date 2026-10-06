@@ -363,7 +363,7 @@ HITS = {
               **artwork.art(AMAZON)}],
 }
 wants.search = lambda q, medium, unit, user: HITS[medium]
-wants.states = lambda user, medium=None: []
+wants.states = lambda user, medium=None, **_: []
 
 page = client.get("/", params={"q": "dune", "medium": "movie"}).text
 check.that('src="https://image.tmdb.org/t/p/w154/v1tRXZ4JtD2Iv6fjkPvT4GiwslV.jpg"'

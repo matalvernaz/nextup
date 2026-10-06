@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}Nextup — requests to approve{% endblock %}
+{% block main %}
+<h2>Requests to approve</h2>
+
+{% if readonly %}
+<p>{{ detail }}</p>
+{% else %}
+<p>
+  Each account asks for what it likes up to its daily allowance. Past that, an
+  ask waits here for a keyholder. Approving it asks for it at once and does not
+  count against the account's allowance. Declining it tells them, with your
+  reason if you give one.
+</p>
+{% if not enabled %}
+<p>
+  This server is not holding asks past the allowance at the moment, so nothing
+  new will wait here. Anything already waiting can still be answered.
+</p>
+{% endif %}
+
+{% if not waiting %}
+<p>Nothing is waiting for approval.</p>
+{% else %}
+<ul class="requests">
+  {% for r in waiting %}
+  {% set name = r.title or r.itemKey %}
+  <li{% if r.thumbnailUrl %} class="with-cover"{% endif %}>
+    {% include "_cover.html" %}
+    <div>
+    <h3>{{ name }}{% if r.year %} ({{ r.year }}){% endif %}</h3>
+    <p>{{ r.kind }}.</p>
+    <p>
+      Asked for by
+      {% for who in r.askedBy -%}
+      {{ who.name }} {{ who.when }}{% if not loop.last %}{% if loop.revindex == 2 %} and {% else %}, {% endif %}{% endif %}
+      {%- endfor %}.
+    </p>
+    {% if r.asked %}<p>{{ r.asked }}</p>{% endif %}
+    {% if r.bookTitles %}
+    <p>The books that would be asked for: {{ r.bookTitles | join(', ') }}.</p>
+    {% endif %}
+    {% if r.overview %}<p>{{ r.overview }}</p>{% endif %}
+    <form method="post" action="/approvals/approve">
+      <input type="hidden" name="medium" value="{{ r.medium }}">
+      <input type="hidden" name="item_key" value="{{ r.itemKey }}">
+      {% if r.medium == 'series' %}
+      <p>
+        <label for="seasons-{{ loop.index }}">Seasons to approve for {{ name }}</label><br>
+        <select id="seasons-{{ loop.index }}" name="seasons">
+          {% for value, label in season_options %}
+          <option value="{{ value }}">{{ label }}</option>
+          {% endfor %}
+        </select>
+      </p>
+      {% endif %}
+      <p><button type="submit">Approve {{ name }}</button></p>
+    </form>
+    <form method="post" action="/approvals/decline">
+      <input type="hidden" name="medium" value="{{ r.medium }}">
+      <input type="hidden" name="item_key" value="{{ r.itemKey }}">
+      <p>
+        <label for="reason-{{ loop.index }}">Reason for declining {{ name }}, if you want to give one</label><br>
+        <input type="text" id="reason-{{ loop.index }}" name="reason" maxlength="500" autocomplete="off">
+      </p>
+      <p><button type="submit">Decline {{ name }}</button></p>
+    </form>
+    </div>
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
+{% endif %}
+{% endblock %}

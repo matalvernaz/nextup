@@ -15,7 +15,7 @@ Both of those were got right once, in code that is now `app.books.wants` and
 reproducing either as another arm of a `if medium ==` chain in the shared
 request path, where they would be a second chance to get them wrong.
 """
-from .. import jellyfin, logs
+from .. import held, jellyfin, logs
 from . import search as book_search
 from . import series as book_series
 from . import shelves, wants
@@ -129,22 +129,45 @@ def _as_hit(row: dict) -> dict:
     }
 
 
-def want(user: jellyfin.User, item_key: str, unit: str,
-         hit: dict) -> tuple[str, str]:
-    """Ask for one book, or for the rest of one series."""
+def want(user: jellyfin.User, item_key: str, unit: str, hit: dict,
+         over_limit: bool = False, approved: bool = False) -> tuple[str, str]:
+    """Ask for one book, or for the rest of one series.
+
+    `over_limit` and `approved` as on the shared path. A book series held for
+    a keyholder carries its anchor and how many books were waiting in `hit`,
+    which is where approving it finds them again.
+    """
     if unit == SERIES_UNIT:
-        return _want_series(user, item_key)
+        count = hit.get("count")
+        return _want_series(user, item_key, hit.get("anchorItemId") or None,
+                            over_limit, approved,
+                            count if isinstance(count, int) and count > 0 else None)
+    # Only named when set, as `wants.want` itself does for `add`: the
+    # existing callers and their test doubles know this by its short shape.
+    extra: dict = {}
+    if isinstance(hit.get("metadata"), dict):
+        extra["metadata"] = hit["metadata"]
+    if over_limit:
+        extra["over_limit"] = True
+    if approved:
+        extra["approved"] = True
     try:
-        state, message = wants.want(user, item_key, hit.get("title", ""))
+        state, message = wants.want(user, item_key, hit.get("title", ""),
+                                    **extra)
     except wants.Denied as denied:
         raise Denied(str(denied)) from denied
     shelves.forget_asin(item_key)
     return state, message
 
 
-def _want_series(user: jellyfin.User, name: str) -> tuple[str, str]:
+def _want_series(user: jellyfin.User, name: str,
+                 anchor_item_id: str | None = None, over_limit: bool = False,
+                 approved: bool = False,
+                 limit: int | None = None) -> tuple[str, str]:
     try:
-        outcome = book_series.want_series(user, name.strip())
+        outcome = book_series.want_series(
+            user, name.strip(), anchor_item_id, over_limit=over_limit,
+            approved=approved, limit=limit)
     except book_series.NotASeries as exc:
         raise Denied(str(exc)) from exc
     except book_series.Unresolvable as exc:
@@ -155,7 +178,12 @@ def _want_series(user: jellyfin.User, name: str) -> tuple[str, str]:
         raise Denied(str(denied)) from denied
     # The sentence is the answer here, not a row: a series request becomes
     # several ledger rows and none of them is the thing that was asked for.
-    return wants.ON_ITS_WAY, outcome.get("message") or "Asked for."
+    # Waiting only when nothing at all went through; otherwise the sentence
+    # says what is waiting.
+    state = (held.WAITING_FOR_APPROVAL
+             if outcome.get("waitingForApprovalCount") and not outcome.get("requested")
+             else wants.ON_ITS_WAY)
+    return state, outcome.get("message") or "Asked for."
 
 
 def cancel(user: jellyfin.User, item_key: str) -> tuple[bool, str]:
