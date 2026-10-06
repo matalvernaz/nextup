@@ -1038,6 +1038,9 @@ def _import_state(user: jellyfin.User, import_id: str) -> dict:
         "duplicates": batch.get("duplicates", 0),
         "blanks": batch.get("blanks", 0),
         "skipped": batch.get("skipped", []),
+        # Type words this did not know, with how many rows had each. Those
+        # rows were read as the list's unit rather than left out.
+        "unknownTypes": batch.get("unknown_types", {}),
         "hasOriginalFile": batch.get("has_source", False),
         "rows": [_row_for_client(row) for row in batch.get("rows", [])],
         "report": report,
