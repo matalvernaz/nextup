@@ -21,7 +21,7 @@ from threading import Lock
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query
 
 from . import (approvals, arr, config, describarr, episodes, gone, held,
-               imports, jellyfin, logs, media, playlists, podcasts,
+               imports, jellyfin, logs, media, playlists, podcasts, podfetch,
                recommendations, seasons, store, wants)
 
 log = logs.get("api")
@@ -404,6 +404,7 @@ def post_want(user: jellyfin.User = Depends(caller),
               itunes_id: str = Body("", embed=True, alias="itunesId"),
               episodes_asked: dict | None = Body(
                   None, embed=True, alias="episodes"),
+              organize: bool | None = Body(None, embed=True),
               over_limit: str = Body("", embed=True, alias="overLimit")) -> dict:
     """Ask for one thing. Repeating it is free and spends no allowance.
 
@@ -435,6 +436,10 @@ def post_want(user: jellyfin.User = Depends(caller),
     of it -- and `episodes` (podcasts only) is how much of it to fetch, as in
     `/capabilities`; absent, the account's usual choice applies, and with none
     the ask is refused until they choose. `remember` keeps it as usual.
+
+    `organize` (podcasts only) is whether a podcast new to the library is
+    sorted into folders by season and series as its episodes arrive (see
+    `GET /podcast/folders`); absent, it is.
     """
     log.info("api want user=%s medium=%s key=%s", user.key, medium, item_key)
     choice = None
@@ -454,6 +459,10 @@ def post_want(user: jellyfin.User = Depends(caller),
            "durationSeconds": duration_seconds,
            "imageUrl": image_url or "", "overview": overview or "",
            "feedUrl": feed_url or "", "itunesId": itunes_id or ""}
+    if medium == media.PODCAST and organize is not None:
+        # Kept on the hit, so a request held for a keyholder is sorted, or
+        # not, as the asker chose when it is approved.
+        hit["organize"] = organize
     try:
         state, message = wants.want(user, medium, item_key, unit, hit,
                                     choice=choice, remember=remember,
@@ -764,6 +773,25 @@ def put_seasons(user: jellyfin.User = Depends(caller),
     return _seasons_block(user)
 
 
+@router.get("/podcast/folders")
+def get_podcast_folders(user: jellyfin.User = Depends(caller),
+                        feed_url: str = Query(..., alias="feedUrl")) -> dict:
+    """The folders a podcast would be sorted into if it were asked for now.
+
+    Each folder with how many of the feed's episodes it would hold, its first
+    and last episode's titles and the first few file names, in the order a
+    folder listing shows them; `sentence` says it all at once. A 400 is an
+    address or feed that will not do, a 501 a server that does not sort
+    podcasts, a 503 Jellyfin not answering.
+    """
+    preview, why, kind = podfetch.folders(feed_url)
+    log.info("api podcast folders user=%s url=%s kind=%s", user.key, feed_url, kind or "ok")
+    if preview is None:
+        status = {"refused": 400, "unsupported": 501}.get(kind, 503)
+        raise HTTPException(status_code=status, detail=why)
+    return dict(preview, sentence=podfetch.folders_sentence(preview))
+
+
 @router.put("/episodes")
 def put_episodes(user: jellyfin.User = Depends(caller),
                  choice: str | None = Body(None, embed=True),
@@ -797,7 +825,11 @@ def _episodes_block(user: jellyfin.User) -> dict:
     return {"choices": list(episodes.CHOICES),
             "defaultCount": episodes.DEFAULT_LATEST_COUNT,
             "choice": own.as_json() if own else None,
-            "default": default.as_json() if default else None}
+            "default": default.as_json() if default else None,
+            # New podcasts are sorted into folders by season and series
+            # unless an ask says `organize: false`; `GET /podcast/folders`
+            # previews the folders. Additive, so an older client ignores it.
+            "folders": True}
 
 
 def _seasons_block(user: jellyfin.User) -> dict:

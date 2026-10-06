@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Nextup — how {{ title }} would be sorted{% endblock %}
+{% block main %}
+<h2>How {{ title }} would be sorted</h2>
+
+{% if not preview %}
+<p>{{ why }}</p>
+{% else %}
+<p>
+  Asked for with "Sort into folders" ticked, its episodes go into these
+  folders as they arrive. A podcast already in the library keeps the folders
+  it has.
+</p>
+<p>{{ sentence }}</p>
+<ul>
+  {% for f in preview.folders %}
+  <li>
+    <h3>{{ f.folder or "The podcast's own folder" }}</h3>
+    <p>
+      {{ f.episodes }} episode{% if f.episodes != 1 %}s{% endif %},
+      {% if f.episodes == 1 %}{{ f.first }}{% else %}from {{ f.first }} to {{ f.last }}{% endif %}.
+    </p>
+    {% if f.examples %}
+    <p>Files named like: {{ f.examples | join(", ") }}.</p>
+    {% endif %}
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
+<p><a href="/?medium=podcast">Back to podcasts</a></p>
+{% endblock %}

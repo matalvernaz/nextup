@@ -539,7 +539,7 @@ def _add(medium: str, unit: str, item_key: str, hit: dict,
         # The feed is the whole identity; the ledger key is only a digest of
         # it, so the address itself has to travel with the ask.
         return podfetch.add(str(hit.get("feedUrl") or ""), hit.get("title", ""),
-                            choice)
+                            choice, organize=podfetch.organize_of(hit.get("organize")))
     # The name, not the ledger key: buskarr renders `requested_by` in its own
     # queue table for a person to read, and an account id says nothing there.
     return buskarr.add(unit, hit, user.name, bulk=bulk)
