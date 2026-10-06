@@ -393,9 +393,11 @@ IMPORT_MAX_BYTES = _int("IMPORT_MAX_BYTES", 5 * 1024 * 1024)
 # else has to wait for it. Administrators are not limited.
 IMPORT_MUSIC_DAILY_SONGS = _int("IMPORT_MUSIC_DAILY_SONGS", 200)
 
-# What an album and a whole artist count as against that, in songs. Measured
-# in buskarr on 2026-10-05: album adds came to 15 and 16 songs, artist adds to
-# a median of 99 (mean 194, the largest 922).
+# What an album and a whole artist are held at against that, in songs, until
+# buskarr reports how many it actually added (`wants.settle_import_charges`).
+# An album whose catalogue entry lists its tracks is held at that number
+# instead. Measured in buskarr on 2026-10-05: album adds came to 15 and 16
+# songs, artist adds to a median of 99 (mean 194, the largest 922).
 IMPORT_ALBUM_SONGS = _int("IMPORT_ALBUM_SONGS", 12)
 IMPORT_ARTIST_SONGS = _int("IMPORT_ARTIST_SONGS", 100)
 

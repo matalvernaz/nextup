@@ -131,10 +131,12 @@ They are asked for by themselves.</p>
 
 {% if has_music %}
 <p>Music from a list has its own limit of {{ import_limit.perDay }} songs a
-day, so it does not use up what you have for searching. An album counts as
-{{ import_limit.albumSongs }} songs and an artist as
-{{ import_limit.artistSongs }}. Anything past the limit waits, and is asked for
-by itself on later days.</p>
+day, so it does not use up what you have for searching. An album or an artist
+counts as the songs it actually adds, so songs already here or already asked
+for cost nothing. While those songs are being counted, an artist counts as
+{{ import_limit.artistSongs }} and an album as the number of tracks it lists.
+One album or artist never counts as more than {{ import_limit.perDay }}.
+Anything past the limit waits, and is asked for by itself on later days.</p>
 {% endif %}
 
 <p>Anything else from a list counts against your daily limit, the same as
