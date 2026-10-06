@@ -20,9 +20,13 @@
 <p><a href="/import/{{ batch.id }}/source">Download the original file</a>.
    Row numbers include the headings and empty rows, as in a spreadsheet.</p>
 {% endif %}
+{% if batch.unknown_types %}
+<p>Rows whose type this did not recognise were read as {{ noun[1] }}:
+   {% for name, count in batch.unknown_types.items() %}{{ name }} ({{ "{:,}".format(count) }}){{ ', ' if not loop.last else '.' }}{% endfor %}</p>
+{% endif %}
 {% if batch.skipped %}
 <details>
-  <summary>Skipped {{ batch.skipped | length }} rows of another or unknown type</summary>
+  <summary>Skipped {{ batch.skipped | length }} rows of another type</summary>
   <ul>{% for row in batch.skipped %}
     <li>{{ source_label(row) }}: {{ row.title }}. {{ row.reason }}</li>
   {% endfor %}</ul>

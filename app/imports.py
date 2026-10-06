@@ -29,6 +29,7 @@ import threading
 import time
 import unicodedata
 import uuid
+from collections import Counter
 from dataclasses import asdict, dataclass
 from difflib import SequenceMatcher
 from urllib.parse import urlencode
@@ -370,7 +371,8 @@ def _year_of(cell: str) -> str:
 
 
 def rows(sheet: Sheet, medium: str, unit: str,
-         skipped: list[dict] | None = None) -> tuple[list[Row], int, int]:
+         skipped: list[dict] | None = None,
+         unknown: dict[str, int] | None = None) -> tuple[list[Row], int, int]:
     """The sheet as things to ask for: the rows, duplicates, and blanks.
 
     Duplicates are dropped rather than asked for twice. `wants.want` is free
@@ -378,6 +380,12 @@ def rows(sheet: Sheet, medium: str, unit: str,
     "asked for 400" when the file held 120 distinct albums is a report nobody
     can check, and a music track's ledger key is a digest of its credit and
     title, so the second one was never going to be a second request anyway.
+
+    A music file with a Type column says what each row is. A row is left out,
+    and listed in `skipped`, only when its type is one of the other two units.
+    A type word this does not know is read as the unit chosen and counted in
+    `unknown`: every export has its own words, and leaving out what one of
+    them calls a song once left out every row of a real file.
     """
     order = _TITLE_ROLES.get(unit, _DEFAULT_TITLE_ROLES) if medium == media.MUSIC \
         else _DEFAULT_TITLE_ROLES
@@ -414,13 +422,14 @@ def rows(sheet: Sheet, medium: str, unit: str,
         record_type = cell(type_at)
         source_row = sheet.record_numbers[index] if sheet.record_numbers else sheet.lines[index]
         kind = _record_unit(record_type)
-        if type_at is not None and kind != unit:
+        if type_at is not None and kind and kind != unit:
             if skipped is not None:
                 skipped.append({"line": sheet.lines[index], "source_row": source_row,
                                 "title": title, "artist": artist, "type": record_type,
-                                "reason": (f"This row is {record_type or 'of an unknown type'}, "
-                                           f"not {unit}.")})
+                                "reason": f"Its type is {record_type}, not {_a(unit)}."})
             continue
+        if type_at is not None and record_type and not kind and unknown is not None:
+            unknown[record_type] = unknown.get(record_type, 0) + 1
         if not title and type_at is not None and kind in ("artist", "album"):
             title = cell(sheet.roles.get("track")) or cell(sheet.roles.get("title"))
         if not title:
@@ -457,12 +466,44 @@ def rows(sheet: Sheet, medium: str, unit: str,
 
 
 def _record_unit(value: str) -> str:
-    """Named record types used by music exports; unknown types are reported."""
+    """The unit a music export's Type word names, or "" for a word not known here.
+
+    TuneMyMusic, a common way to get an Apple Music or Spotify library out as
+    a file, calls a library song "Favorite" and a song in one of the person's
+    playlists "Playlist". Both are songs.
+    """
     key = _fold_heading(value)
     return {"track": "track", "tracks": "track", "song": "track", "songs": "track",
             "recording": "track", "librarysongs": "track", "musicsong": "track",
+            "favorite": "track", "favorites": "track", "favourite": "track",
+            "favourites": "track", "playlist": "track",
             "album": "album", "albums": "album", "libraryalbums": "album",
             "artist": "artist", "artists": "artist", "libraryartists": "artist"}.get(key, "")
+
+
+def _a(unit: str) -> str:
+    return ("an " if unit[:1] in ("a", "e", "i", "o", "u") else "a ") + unit
+
+
+#: How the import form names each unit, for saying which one to choose.
+_CHOICES = {"track": "“A track”", "album": "“An album”", "artist": "“An artist”"}
+
+
+def _nothing_of(unit: str, skipped: list[dict]) -> str:
+    """Why a file whose rows are all another type gave nothing to ask for."""
+    types = Counter(row["type"] for row in skipped)
+    said = _series([f"{name} ({count:,})" for name, count in types.most_common()], "and")
+    units = dict.fromkeys(_record_unit(name) for name in types)
+    choose = _series([_CHOICES[other] for other in units if other in _CHOICES], "or")
+    return (f"None of the rows in that file is {_a(unit)}. Its Type column says "
+            f"{said}. Choose {choose} to import those.")
+
+
+def _series(words: list[str], conjunction: str) -> str:
+    """Words as an English list: "A", "A or B", "A, B or C"."""
+    if len(words) < 2:
+        return "".join(words)
+    return ", ".join(words[:-1]) + f" {conjunction} " + words[-1]
 
 
 #: How a role's heading is written when telling somebody what to call it.
@@ -474,10 +515,7 @@ _SHOWN = {"artist": ("Artist",), "album": ("Album",), "track": ("Track",),
 def _understood(order: tuple[str, ...]) -> str:
     """The headings that would have worked, as an English list."""
     names = [name for role in order for name in _SHOWN[role]]
-    quoted = [f"“{name}”" for name in dict.fromkeys(names)]
-    if len(quoted) == 1:
-        return quoted[0]
-    return ", ".join(quoted[:-1]) + " or " + quoted[-1]
+    return _series([f"“{name}”" for name in dict.fromkeys(names)], "or")
 
 
 # --------------------------------------------------------------------------
@@ -716,10 +754,11 @@ def start(user: jellyfin.User, medium: str, unit: str, filename: str,
             unit = (suggest_unit(sheet) if medium == media.MUSIC
                     else found.units[0])
         skipped: list[dict] = []
-        items, duplicates, blanks = rows(sheet, medium, unit, skipped)
+        unknown: dict[str, int] = {}
+        items, duplicates, blanks = rows(sheet, medium, unit, skipped, unknown)
         if not items:
-            raise Unreadable(
-                "No rows of the selected type have a title. Check the Type and title columns.")
+            raise Unreadable(_nothing_of(unit, skipped) if skipped else
+                             "No rows of the selected type have a title. Check the Type and title columns.")
         if len(items) > max_rows(medium):
             raise Unreadable(
                 f"That file has {len(items):,} rows. The limit is "
@@ -752,7 +791,8 @@ def start(user: jellyfin.User, medium: str, unit: str, filename: str,
     payload = {
         "medium": medium, "unit": unit, "filename": filename,
         "duplicates": duplicates, "blanks": blanks,
-        "skipped": skipped, "has_source": True, "matching_version": MATCHING_VERSION,
+        "skipped": skipped, "unknown_types": unknown,
+        "has_source": True, "matching_version": MATCHING_VERSION,
         "headings": list(sheet.headings),
         # The parsed rows, so a list a restart interrupted carries on from
         # where it got to instead of being looked up again from the top.

@@ -114,8 +114,10 @@ A list with no headings is read as one title per line, and for music
 column is refused with the headings that would work.
 
 Music exports with a `Type` column can contain tracks, albums and artists in
-one file. Only rows of the chosen kind are imported; other or unknown types
-are listed as skipped. A track import requires a track/title column and never
+one file. Only rows of the chosen kind are imported; rows of the other two
+kinds are listed as skipped. TuneMyMusic's `Favorite` and `Playlist` rows are
+songs. A type word Nextup does not know is read as the chosen kind, and the
+report names it. A track import requires a track/title column and never
 substitutes the album column. The original upload is available to its owner
 from **Download the original file**, including skipped rows and duplicates,
 until the import report expires. Older imports that did not save it cannot
