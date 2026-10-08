@@ -30,7 +30,7 @@ import time
 import unicodedata
 import uuid
 from collections import Counter
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from difflib import SequenceMatcher
 from urllib.parse import urlencode
 
@@ -121,6 +121,9 @@ _ROLES = {
     # recording, which is how a single edit is told from the album cut.
     "appleid": ("appleid", "applemusicid", "applemusictrackid", "itunesid",
                 "itunestrackid"),
+    # Which playlist each song came from, as TuneMyMusic writes it for a whole
+    # library: one file, every playlist.
+    "playlist": ("playlistname", "playlist", "playlisttitle"),
 }
 
 #: A single-column file whose first line is one of these has a heading rather
@@ -331,6 +334,12 @@ class Row:
     #: Apple's catalogue id for the song, from an Apple Music export. Digits
     #: only: a library id ("i.abc123") names nothing anybody else can look up.
     apple_id: str = ""
+    #: The playlist the file says this line is on, "" for none.
+    playlist: str = ""
+    #: (line, playlist) for each later line of the file that is the same song
+    #: on a playlist. Those lines are not asked for again, but the song still
+    #: goes into each of their playlists, at each of their places.
+    placements: tuple = ()
 
     @property
     def label(self) -> str:
@@ -415,9 +424,12 @@ def rows(sheet: Sheet, medium: str, unit: str,
         artist_at = None
     year_at = sheet.roles.get("year")
     type_at = sheet.roles.get("type") if medium == media.MUSIC else None
+    playlist_at = (sheet.roles.get("playlist")
+                   if medium == media.MUSIC and unit == "track" else None)
 
     found: list[Row] = []
-    seen: set[tuple] = set()
+    seen: dict[tuple, int] = {}
+    also: dict[int, list[tuple[int, str]]] = {}
     duplicates = 0
     blanks = 0
     for index, row in enumerate(sheet.rows):
@@ -462,16 +474,43 @@ def rows(sheet: Sheet, medium: str, unit: str,
         # other as a duplicate somebody never sees again.
         key = ((songs.name_key(artist), songs.song_key(title), songs.name_key(songs.guests(title)), year)
                if medium == media.MUSIC else (_key(artist), _key(title), year))
+        named = _playlist_name(cell(playlist_at))
         if key in seen:
             duplicates += 1
+            if named:
+                also.setdefault(seen[key], []).append((sheet.lines[index], named))
             continue
-        seen.add(key)
+        seen[key] = len(found)
         apple_id = cell(sheet.roles.get("appleid")) if medium == media.MUSIC else ""
         found.append(Row(sheet.lines[index], title, artist, year, source_row,
                          sheet.starts[index] if sheet.starts else sheet.lines[index],
                          cell(sheet.roles.get("album")), record_type,
-                         apple_id if apple_id.isdigit() else ""))
+                         apple_id if apple_id.isdigit() else "", named))
+    for at, more in also.items():
+        found[at] = replace(found[at], placements=tuple(more))
     return found, duplicates, blanks
+
+
+#: What TuneMyMusic writes in its playlist column for a library's own views.
+#: They are the library, not playlists anybody made.
+_LIBRARY_VIEWS = frozenset({"librarysongs", "libraryalbums", "libraryartists",
+                            "likedsongs"})
+#: The most playlists one file may name. Each one is made in Jellyfin.
+MAX_FILE_PLAYLISTS = 50
+
+
+def _playlist_name(cell: str) -> str:
+    name = playlists.clean_name(cell)
+    return "" if _fold_heading(name) in _LIBRARY_VIEWS else name
+
+
+def _file_playlists(items: list[Row]) -> list[str]:
+    """Every playlist a file names, once each, in the order the file first names it."""
+    named: dict[str, str] = {}
+    for row in items:
+        for name in ([row.playlist] if row.playlist else []) + [n for _, n in row.placements]:
+            named.setdefault(playlists.name_key(name), name)
+    return list(named.values())
 
 
 def _record_unit(value: str) -> str:
@@ -725,6 +764,35 @@ def _settled(row: Row, hits: list[dict], medium: str, unit: str, wanted: Wanted)
     return any(_good(fit, wanted) for fit in fits)
 
 
+def _asked_songs(user: jellyfin.User, medium: str, unit: str) -> dict[tuple[str, str], list]:
+    """The songs this account's lists have already asked for or queued, by credit and title.
+
+    A ledger entry is keyed on a song's length bucket as well, so the same song
+    picked from another album is another key. A second list that shares songs
+    with a first one still in the queue -- a playlist file after a library
+    file, say -- would otherwise ask for every one of them again.
+    """
+    if medium != media.MUSIC or unit != "track":
+        return {}
+    out: dict[tuple[str, str], list] = {}
+    for hit in store.import_hits(user.key, medium, (ASKED, WAITING, ALREADY)):
+        key = (songs.name_key(hit.get("artist") or ""), songs.song_key(hit.get("title") or ""))
+        out.setdefault(key, []).append(hit.get("durationSeconds"))
+    return out
+
+
+def _already_asked(hit: dict, asked: dict | None) -> bool:
+    """Whether an earlier list asked for this recording: the same song, about as long."""
+    lengths = (asked or {}).get((songs.name_key(hit.get("artist") or ""),
+                                 songs.song_key(hit.get("title") or "")))
+    if not lengths:
+        return False
+    mine = hit.get("durationSeconds")
+    return any(not isinstance(length, (int, float)) or not isinstance(mine, (int, float))
+               or abs(float(length) - float(mine)) <= OTHER_LENGTH_SECONDS
+               for length in lengths)
+
+
 def _merged(first: list[dict], more: list[dict]) -> list[dict]:
     """Two searches' hits as one list, the first search's order kept."""
     seen = {hit.get("itemKey") for hit in first}
@@ -732,7 +800,8 @@ def _merged(first: list[dict], more: list[dict]) -> list[dict]:
 
 
 def match(user: jellyfin.User, medium: str, unit: str, row: Row,
-          requested: set[str], known: dict | None = None) -> dict:
+          requested: set[str], known: dict | None = None,
+          asked: dict | None = None) -> dict:
     """One row, looked up and judged. Never raises: a row that failed says so.
 
     A search that throws is one row's problem. Five hundred rows against three
@@ -748,6 +817,9 @@ def match(user: jellyfin.User, medium: str, unit: str, row: Row,
     library import asked for live versions of songs whose own file named the
     studio album. Deezer is still asked first; the full search runs when
     Deezer has no hit that fits, and a search naming the album after that.
+
+    `asked` is `_asked_songs` for the account: a song an earlier list already
+    asked for or queued is held as already asked for, not asked for twice.
     """
     found: dict = {**asdict(row), "label": row.label, "state": MISSING,
                    "detail": "", "hit": None, "others": 0}
@@ -791,7 +863,8 @@ def match(user: jellyfin.User, medium: str, unit: str, row: Row,
         found["state"] = HELD
         found["detail"] = "Already in the library."
         return found
-    if identity_known and (chosen.get("requested") or chosen.get("itemKey") in requested):
+    if identity_known and (chosen.get("requested") or chosen.get("itemKey") in requested
+                           or _already_asked(chosen, asked)):
         found["state"] = HELD
         found["detail"] = "Already asked for."
         return found
@@ -892,6 +965,23 @@ def start(user: jellyfin.User, medium: str, unit: str, filename: str,
             except jellyfin.JellyfinUnavailable as exc:
                 raise Unreadable("Jellyfin could not be reached to make the "
                                  "playlist. Try again in a moment.") from exc
+        file_names = _file_playlists(items)
+        if len(file_names) > MAX_FILE_PLAYLISTS:
+            raise Unreadable(
+                f"That file names {len(file_names):,} playlists. The limit is "
+                f"{MAX_FILE_PLAYLISTS} per file, so split it into smaller files.")
+        file_lists: list[dict] = []
+        refused_lists: list[dict] = []
+        for name in file_names:
+            # One name in use by a playlist this did not make is that
+            # playlist's problem, not the file's: the rest are still made.
+            try:
+                file_lists.append({"name": name, "id": playlists.resolve(user, name)})
+            except playlists.Refused as refused:
+                refused_lists.append({"name": name, "reason": str(refused)})
+            except jellyfin.JellyfinUnavailable as exc:
+                raise Unreadable("Jellyfin could not be reached to make the "
+                                 "playlists. Try again in a moment.") from exc
     except Unreadable as exc:
         # The person is told why on the page. This puts the reason, and the
         # headings the file had, where a report of "importing does not work"
@@ -915,6 +1005,10 @@ def start(user: jellyfin.User, medium: str, unit: str, filename: str,
     if playlist_id:
         payload["playlist"] = {"name": playlists.clean_name(playlist),
                                "id": playlist_id}
+    if file_lists:
+        payload["playlists"] = file_lists
+    if refused_lists:
+        payload["playlists_refused"] = refused_lists
     store.prune_imports(time.time() - config.IMPORT_RETENTION_HOURS * 3600)
     store.put_import(import_id, user.key, medium, READING, len(items), payload,
                      source=data.encode("utf-8") if isinstance(data, str) else data)
@@ -958,10 +1052,12 @@ def _work_through(import_id: str, user: jellyfin.User, medium: str, unit: str,
     a few at a time in the order of the file, and every other song the list
     asks for is waited for and put in when it turns up.
     """
-    playlist = _playlist_of(import_id)
-    found_now: list[tuple[int, str]] = []
+    lists = _lists_of(import_id)
+    found_now: dict[str, list[tuple[int, str]]] = {}
+    by_id: dict[str, dict] = {}
     try:
         requested = store.outstanding_keys(user.key, medium)
+        asked = _asked_songs(user, medium, unit)
         library = _library_for(medium, unit)
         # One lookup per hundred and fifty songs, before the first search,
         # so every row is matched knowing which recording it names.
@@ -974,26 +1070,29 @@ def _work_through(import_id: str, user: jellyfin.User, medium: str, unit: str,
                 break
             item_id = library.find(row.title, row.artist, row.album) if library else None
             if item_id:
-                store.put_import_row(import_id, _in_library(row, item_id))
+                held = _in_library(row, item_id)
+                store.put_import_row(import_id, held)
                 done += 1
                 store.touch_import(import_id, done)
-                if playlist:
-                    found_now.append((row.line, item_id))
-                    if len(found_now) >= PLAYLIST_BATCH:
-                        _add_found(user, playlist, import_id, found_now)
-                        found_now = []
+                for line, playlist in _targets(lists, held):
+                    by_id[playlist["id"]] = playlist
+                    waiting = found_now.setdefault(playlist["id"], [])
+                    waiting.append((line, item_id))
+                    if len(waiting) >= PLAYLIST_BATCH:
+                        _add_found(user, playlist, import_id, waiting)
+                        found_now[playlist["id"]] = []
                 continue
             with _turn:
                 found = match(user, medium, unit, row, requested,
-                              known.get(row.apple_id))
+                              known.get(row.apple_id), asked)
             outcome, detail = (_ask_one(import_id, user, medium, found)
                                if found["state"] == MATCHED else ("", ""))
             if outcome is None:
                 log.info("import %s stopped after %d rows", import_id, done)
                 break
             store.put_import_row(import_id, found, outcome, detail)
-            if playlist:
-                _wait_for(user, playlist, import_id, found, outcome)
+            for line, playlist in _targets(lists, found):
+                _wait_for(user, playlist, import_id, found, outcome, line)
             done += 1
             store.touch_import(import_id, done)
             if config.IMPORT_PAUSE_SECONDS and index < len(items):
@@ -1001,16 +1100,16 @@ def _work_through(import_id: str, user: jellyfin.User, medium: str, unit: str,
                 # to find their rate limit is to send five thousand queries at
                 # machine speed.
                 time.sleep(config.IMPORT_PAUSE_SECONDS)
-        if playlist:
-            _add_found(user, playlist, import_id, found_now)
-            found_now = []
+        for playlist_id, waiting in found_now.items():
+            _add_found(user, by_id[playlist_id], import_id, waiting)
+        found_now = {}
     except Exception as exc:  # noqa: BLE001 - the thread must not die
         # silently, or the page waits for a phase that has stopped.
         log.exception("import %s failed while reading: %s", import_id, exc)
-        if playlist and found_now:
+        for playlist_id, waiting in found_now.items():
             # Already marked as in the library, so nothing else would ever
             # put them in the playlist.
-            _add_found(user, playlist, import_id, found_now)
+            _add_found(user, by_id[playlist_id], import_id, waiting)
         _close(import_id, FAILED, {
             "error": "Something went wrong while looking these up. Anything "
                      "asked for before it stopped is listed below."})
@@ -1030,9 +1129,34 @@ def _work_through(import_id: str, user: jellyfin.User, medium: str, unit: str,
 PLAYLIST_BATCH = 25
 
 
-def _playlist_of(import_id: str) -> dict | None:
+def _lists_of(import_id: str) -> tuple[dict | None, dict[str, dict]]:
+    """A list's playlists: the one the form named, and the file's own, by name."""
     row = store.get_import(import_id)
-    return json.loads(row["payload"]).get("playlist") if row else None
+    payload = json.loads(row["payload"]) if row else {}
+    return payload.get("playlist"), {playlists.name_key(found["name"]): found
+                                     for found in payload.get("playlists") or []}
+
+
+def _targets(lists: tuple[dict | None, dict[str, dict]], row: dict) -> list[tuple[int, dict]]:
+    """(line, playlist) for every playlist one row's song goes into.
+
+    A row on a playlist the file names goes into that one; a row on none, into
+    the playlist the form named, if any. The later lines that are the same
+    song on other playlists each add their own, at their own place.
+    """
+    form, named = lists
+    out: list[tuple[int, dict]] = []
+    own = row.get("playlist") or ""
+    if own:
+        if playlists.name_key(own) in named:
+            out.append((row["line"], named[playlists.name_key(own)]))
+    elif form:
+        out.append((row["line"], form))
+    for line, name in row.get("placements") or ():
+        found = named.get(playlists.name_key(name))
+        if found:
+            out.append((int(line), found))
+    return out
 
 
 def _library_for(medium: str, unit: str) -> songs.LibraryIndex | None:
@@ -1072,14 +1196,18 @@ def _add_found(user: jellyfin.User, playlist: dict, import_id: str,
 
 
 def _wait_for(user: jellyfin.User, playlist: dict, import_id: str, row: dict,
-              outcome: str) -> None:
-    """Wait for a song of a playlist that is on its way, to put it in later."""
+              outcome: str, line: int | None = None) -> None:
+    """Wait for a song of a playlist that is on its way, to put it in later.
+
+    `line` is where the song stands in that playlist, when it is not the row's
+    own line: the same song later in the file, on another playlist.
+    """
     on_its_way = (outcome in (ASKED, WAITING, ALREADY)
                   or (not outcome and row["state"] == HELD and row.get("hit")))
     if not on_its_way:
         return
     hit = row.get("hit") or {}
-    playlists.wait_for(user, playlist["id"], import_id, row["line"],
+    playlists.wait_for(user, playlist["id"], import_id, line or row["line"],
                        hit.get("title") or row["title"],
                        hit.get("artist") or row["artist"],
                        hit.get("album") or "")
@@ -1322,15 +1450,16 @@ def _ask_chosen(import_id: str, user: jellyfin.User, medium: str,
                 chosen: list[dict], final: bool) -> None:
     """Ask for each ticked row, and write down what became of it."""
     try:
-        playlist = _playlist_of(import_id)
+        lists = _lists_of(import_id)
         for index, row in enumerate(chosen, start=1):
             outcome, detail = _ask_one(import_id, user, medium, row)
             # A list stopped while this was on its way: the row is offered
             # again rather than left claimed.
             store.set_import_outcome(import_id, row["line"], outcome or "",
                                      detail)
-            if playlist and outcome:
-                _wait_for(user, playlist, import_id, row, outcome)
+            if outcome:
+                for line, playlist in _targets(lists, row):
+                    _wait_for(user, playlist, import_id, row, outcome, line)
             if final:
                 store.touch_import(import_id, index)
     except Exception as exc:  # noqa: BLE001 - the thread must not die silently.
@@ -1396,19 +1525,20 @@ def replace_row(user: jellyfin.User, import_id: str, line: int, hit: dict) -> st
         library = _library_for(batch["medium"], batch["unit"])
         item_id = library.find(hit["title"], hit.get("artist") or "",
                                hit.get("album") or "") if library else None
+        lists = _lists_of(import_id)
         if item_id:
             row.update(state=HELD, itemId=item_id)
             outcome, detail = ALREADY, ""
             store.put_import_row(import_id, row, outcome)
-            if batch.get("playlist"):
-                _add_found(user, batch["playlist"], import_id, [(line, item_id)])
+            for at, playlist in _targets(lists, row):
+                _add_found(user, playlist, import_id, [(at, item_id)])
         else:
             outcome, detail = _ask_one(import_id, user, batch["medium"], row)
             if outcome in (None, REFUSED):
                 raise wants.Denied(detail or "This list was stopped before the request was sent.")
             store.put_import_row(import_id, row, outcome, detail)
-            if batch.get("playlist"):
-                _wait_for(user, batch["playlist"], import_id, row, outcome)
+            for at, playlist in _targets(lists, row):
+                _wait_for(user, playlist, import_id, row, outcome, at)
     except Exception:
         # Do not erase an accepted request if playlist bookkeeping failed.
         current = next((r for r in store.import_rows(import_id) if r["line"] == line), {})

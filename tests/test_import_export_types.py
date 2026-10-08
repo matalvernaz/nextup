@@ -17,7 +17,7 @@ harness.setup(BUSKARR_URL="http://buskarr.invalid", BUSKARR_API_KEY="k",
               IMPORT_PAUSE_SECONDS="0", JELLYFIN_USER="")
 
 from fastapi.testclient import TestClient
-from app import buskarr, imports, itunes, jellyfin, main, media, sessions, store, wants
+from app import buskarr, imports, itunes, jellyfin, main, media, playlists, sessions, store, wants
 
 check = harness.Check("import export types")
 store.init()
@@ -106,6 +106,9 @@ wants.search = lambda *args, **kwargs: []
 imports._library_for = lambda *args: None
 # The export's Apple ids would be looked up; this test is about its Type column.
 itunes.songs_by_id = lambda ids: {}
+# Its Playlist name column makes the playlists it names; no Jellyfin here.
+made_playlists = []
+playlists.resolve = lambda user, name: made_playlists.append(name) or f"pl-{name}"
 client = TestClient(main.app, follow_redirects=False)
 client.cookies.set(sessions.COOKIE_NAME, sessions.issue(OWNER.id, OWNER.id))
 
@@ -132,6 +135,8 @@ if where.startswith("/import/") and "msg=" not in where:
     check.equal((batch["unit"], batch["total"], batch["duplicates"], len(batch["skipped"])),
                 ("track", 4, 1, 4), "read as four songs, one duplicate, four rows of other types")
     check.equal(batch["state"], imports.DONE, "and read to the end without failing")
+    check.equal([p["name"] for p in batch.get("playlists", [])], ["Road Trip"],
+                "the one real playlist in the export is made, the library's views are not")
     page = " ".join(client.get(where).text.split())
     check.that("Row 4 of your file: Rumours. Its type is Album, not a track." in page,
                "the page says which rows were left out and why")
