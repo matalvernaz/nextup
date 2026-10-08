@@ -703,6 +703,9 @@ class Wanted:
     #: The row's credit, so an album named after the artist is not taken for
     #: every compilation that has the artist's name in its title.
     artist: str = ""
+    #: The row's own title, so a hit crediting a guest the row does not is
+    #: known for the duet it is.
+    title: str = ""
 
 
 def _wanted(row: Row, known: dict | None) -> Wanted:
@@ -716,18 +719,19 @@ def _wanted(row: Row, known: dict | None) -> Wanted:
     return Wanted(known.get("album") or row.album,
                   float(length) if isinstance(length, (int, float)) and length > 0 else None,
                   songs.not_the_record(row.title) or songs.not_the_record(row.album),
-                  row.artist)
+                  row.artist, row.title)
 
 
-def _fit(hit: dict, wanted: Wanted) -> tuple[bool, int, int, int]:
+def _fit(hit: dict, wanted: Wanted) -> tuple[bool, int, int, int, int]:
     """How well an exact hit fits the row's recording. Lower is better, in order.
 
     A length far from the export's rules a hit out first: that is a single
     edit for an album cut, or a live take, whatever its album says. Then a
-    live, acoustic or karaoke album when the row is neither. Then the file's
-    album. A length a few seconds out comes last, because catalogues round
-    and master differently: on 2026-10-08 a re-recorded live "Shop Around"
-    was a second nearer Apple's length than the studio cut.
+    live, acoustic, alternate or karaoke album when the row is neither, then a
+    guest the row does not credit (the duet). Then the file's album. A length
+    a few seconds out comes last, because catalogues round and master
+    differently: on 2026-10-08 a re-recorded live "Shop Around" was a second
+    nearer Apple's length than the studio cut.
     """
     length = hit.get("durationSeconds")
     if wanted.duration and isinstance(length, (int, float)) and length > 0:
@@ -738,18 +742,25 @@ def _fit(hit: dict, wanted: Wanted) -> tuple[bool, int, int, int]:
     album = hit.get("album") or ""
     elsewhere = 0 if wanted.album and songs.same_album(wanted.album, album, wanted.artist) else 1
     staged = 1 if not wanted.performance and songs.not_the_record(album) else 0
-    return timing == 2, staged, elsewhere, timing
+    duet = 1 if wanted.title and songs.extra_guest(wanted.title, wanted.artist,
+                                                   hit.get("title") or "") else 0
+    return timing == 2, staged, duet, elsewhere, timing
 
 
-def _good(fit: tuple[bool, int, int, int], wanted: Wanted) -> bool:
-    """A fit good enough that no wider search could do better.
+def _good(fit: tuple[bool, int, int, int, int], wanted: Wanted) -> bool:
+    """A fit no wider search could better: the row's own recording, on its own album.
 
-    Not far out, not a performance, and either the length or the album
-    agrees. A row with neither to go on is settled by any studio hit.
+    Never far out, a performance or a duet. With an album to go on, the album
+    must agree: the same take filed under a compilation nobody named is the
+    right sound in the wrong place, and a search naming the album usually
+    finds the record itself. With only a length, the length must agree.
     """
-    far, staged, elsewhere, timing = fit
-    return (not far and not staged
-            and (timing == 0 or elsewhere == 0 or not (wanted.album or wanted.duration)))
+    far, staged, duet, elsewhere, timing = fit
+    if far or staged or duet:
+        return False
+    if wanted.album:
+        return elsewhere == 0
+    return timing == 0 or not wanted.duration
 
 
 def _settled(row: Row, hits: list[dict], medium: str, unit: str, wanted: Wanted) -> bool:
