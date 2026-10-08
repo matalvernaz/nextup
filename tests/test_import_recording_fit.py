@@ -88,14 +88,52 @@ row = imports.Row(4, "Fly Like an Eagle", "Steve Miller Band", album="Greatest H
 miller = dict(artist="Steve Miller Band")
 album_cut = hit("Fly Like An Eagle", "Greatest Hits 1974-78", 283.0, **miller)
 single_edit = hit("Fly Like an Eagle", "Rock Anthems of the 70s", 186.0, **miller)
-found, asked = matched(row, {("Steve Miller Band Fly Like an Eagle", DEEZER): [album_cut, single_edit]},
-                       known={"title": "Fly Like an Eagle", "artist": "Steve Miller Band",
-                              "album": "Greatest Hits 1974-78", "duration": 185.2})
+eagle = "Steve Miller Band Fly Like an Eagle"
+apple_eagle = {"title": "Fly Like an Eagle", "artist": "Steve Miller Band",
+               "album": "Greatest Hits 1974-78", "duration": 185.2}
+found, asked = matched(row, {(eagle, DEEZER): [album_cut, single_edit]}, known=apple_eagle)
 check.equal(found["hit"]["durationSeconds"], 186.0,
             "the single edit the person had, though another hit carries their album's name")
-check.equal(len(asked), 1, "a hit of the right length on Deezer settles it")
+check.equal(asked[-1], (eagle + " Greatest Hits 1974-78", EVERYWHERE),
+            "and the album was still searched for, since the edit was on another album")
+greatest_edit = hit("Fly Like an Eagle", "Greatest Hits 1974-78", 185.5, **miller, source="itunes")
+found, asked = matched(row, {(eagle, DEEZER): [album_cut, single_edit],
+                             (eagle + " Greatest Hits 1974-78", EVERYWHERE): [greatest_edit]},
+                       known=apple_eagle)
+check.equal((found["hit"]["album"], found["hit"]["durationSeconds"]),
+            ("Greatest Hits 1974-78", 185.5),
+            "where the album search finds the edit on his own album, that one")
+
+print("\na hit crediting a guest the row does not is the duet")
+row = imports.Row(10, "Bubbly", "Colbie Caillat", album="Coco")
+colbie = dict(artist="Colbie Caillat")
+duet = hit("Bubbly (feat. Amos Lee)", "This Time Around", 198.0, **colbie)
+coco = hit("Bubbly", "Coco", 196.28, **colbie, source="itunes")
+found, asked = matched(row, {("Colbie Caillat Bubbly", DEEZER): [duet],
+                             ("Colbie Caillat Bubbly", EVERYWHERE): [duet, coco]},
+                       known={"title": "Bubbly", "artist": "Colbie Caillat", "album": "Coco",
+                              "duration": 196.3})
+check.equal(found["hit"]["title"], "Bubbly", "the song on Coco, not the duet of the same length")
+# With only a length to go on, the album cannot tell them apart: the guest has to.
+row = imports.Row(11, "Bubbly", "Colbie Caillat")
+solo = hit("Bubbly", "Some Compilation", 196.0, **colbie)
+by_length = {"title": "Bubbly", "artist": "Colbie Caillat", "album": "", "duration": 196.3}
+found, asked = matched(row, {("Colbie Caillat Bubbly", DEEZER): [duet, solo]}, known=by_length)
+check.equal(found["hit"]["title"], "Bubbly", "of two hits of the right length, not the duet")
+found, asked = matched(row, {("Colbie Caillat Bubbly", DEEZER): [duet],
+                             ("Colbie Caillat Bubbly", EVERYWHERE): [duet, solo]}, known=by_length)
+check.equal((found["hit"]["title"], len(asked)), ("Bubbly", 2),
+            "and a duet alone on Deezer does not settle the search")
+for title, credit, other, extra in [
+        ("Bubbly", "Colbie Caillat", "Bubbly (feat. Amos Lee)", True),
+        ("Mood (feat. iann dior)", "24kGoldn", "Mood (feat. iann dior)", False),
+        ("Best Friend", "Saweetie, Doja Cat", "Best Friend (feat. Doja Cat)", False),
+        ("Stay", "Zedd & Alessia Cara", "Stay (feat. Alessia Cara)", False),
+        ("Lovely Day", "Bill Withers", "Lovely Day", False)]:
+    check.equal(songs.extra_guest(title, credit, other), extra, f"{other!r} for {title!r} by {credit!r}")
 
 print("\nApple's record of some other song is no evidence")
+row = imports.Row(4, "Fly Like an Eagle", "Steve Miller Band", album="Greatest Hits 1974-78")
 wanted = imports._wanted(row, {"title": "Something Else Entirely", "artist": "Nobody",
                                "album": "Elsewhere", "duration": 100.0})
 check.equal((wanted.album, wanted.duration), ("Greatest Hits 1974-78", None),
@@ -177,8 +215,9 @@ for a, b, same in [
         ("", "Coco", False)]:
     check.equal(songs.same_album(a, b), same, f"{a!r} and {b!r}")
 for name, staged in [("Live in Rotterdam 1985", True), ("MTV Unplugged", True),
-                     ("Coco - Summer Sessions", True), ("Frampton Comes Alive!", False),
-                     ("Magical Mystery Tour", False), ("Delivery", False)]:
+                     ("Coco - Summer Sessions", True), ("Route 66 - The Alternate Takes", True),
+                     ("Outtakes", True), ("Frampton Comes Alive!", False),
+                     ("Magical Mystery Tour", False), ("Delivery", False), ("Demon Days", False)]:
     check.equal(songs.not_the_record(name), staged, f"{name!r} is a performance or reworking")
 
 print("\nan export's Apple id column is read, library ids are not")

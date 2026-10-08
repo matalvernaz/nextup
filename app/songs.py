@@ -189,7 +189,8 @@ def close_score(title: str, artist: str, other_title: str, other_artist: str) ->
 #: only on one of these is a different recording from the studio cut of the same title.
 _NOT_THE_RECORD = re.compile(
     r"\b(live|concerts?|unplugged|en vivo|ao vivo|on stage|bootleg|rehearsals?|karaoke|"
-    r"tribute|instrumentals?|acoustic|sessions|remix(es|ed)?)\b", re.IGNORECASE)
+    r"tribute|instrumentals?|acoustic|sessions|remix(es|ed)?|alternates?|outtakes?|demos?)\b",
+    re.IGNORECASE)
 
 
 def not_the_record(name: str) -> bool:
@@ -206,6 +207,20 @@ def album_key(name: str) -> str:
     text = _ASIDE.sub(" ", _plain(name))
     text = re.sub(r"\s+-\s+(single|ep)\s*$", " ", text)
     return _key(text)
+
+
+def extra_guest(title: str, credit: str, other_title: str) -> bool:
+    """Whether `other_title` credits a guest that neither `title` nor `credit` names.
+
+    "Bubbly (feat. Amos Lee)" is the duet, not the "Bubbly" a list credits to Colbie Caillat
+    alone. A guest the list does name, in the title or the artist field, is no difference.
+    """
+    theirs = guests(other_title)
+    if not theirs:
+        return False
+    named = name_key(f"{credit} {guests(title)}")
+    return not any(name_key(part) and name_key(part) in named
+                   for part in _LIST_SPLIT.split(_plain(theirs)) if part.strip())
 
 
 def same_album(a: str, b: str, artist: str = "") -> bool:
