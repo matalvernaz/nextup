@@ -123,6 +123,72 @@ def lookup(itunes_id: str) -> dict | None:
     return found
 
 
+#: Apple answers up to two hundred ids in one lookup; this stays under it.
+SONG_LOOKUP_BATCH = 150
+#: How long what Apple said about one song id is kept. A recording's length
+#: and album do not change.
+SONG_CACHE_HOURS = 24 * 30
+
+
+def songs_by_id(ids: list[str]) -> dict[str, dict]:
+    """Apple's own record of each song id: title, artist, album and length.
+
+    An Apple Music export (TuneMyMusic writes one) carries the catalogue id of
+    the very recording somebody had, and that is the only thing in such a file
+    that tells a single edit from the album cut, or the studio take from a live
+    one with the same title. Ids Apple does not know are left out; a lookup
+    that fails is left out too, and the caller matches on names as before.
+    """
+    wanted = list(dict.fromkeys(str(i).strip() for i in ids if str(i).strip().isdigit()))
+    out: dict[str, dict] = {}
+    unknown: list[str] = []
+    for song_id in wanted:
+        cached = store.get_external(f"itunes:song:{song_id}", SONG_CACHE_HOURS)
+        if cached is None:
+            unknown.append(song_id)
+        elif cached:
+            out[song_id] = cached
+    misses = set(unknown)
+    for country in config.ITUNES_LOOKUP_COUNTRIES:
+        ask = [song_id for song_id in unknown if song_id in misses]
+        for at in range(0, len(ask), SONG_LOOKUP_BATCH):
+            chunk = ask[at:at + SONG_LOOKUP_BATCH]
+            rows = _get(LOOKUP_URL, {"id": ",".join(chunk), "entity": "song",
+                                     "country": country})
+            if rows is None:
+                # Not answered is not "not sold here": nothing is recorded,
+                # so the next list asks again.
+                misses.difference_update(chunk)
+                continue
+            for row in rows:
+                song = _song(row)
+                if not song or song["id"] not in misses:
+                    continue
+                song_id = song.pop("id")
+                out[song_id] = song
+                misses.discard(song_id)
+                store.put_external(f"itunes:song:{song_id}", song)
+    for song_id in misses:
+        # Asked of every store and sold in none of them. Recorded, so the next
+        # list does not ask three stores about it again.
+        store.put_external(f"itunes:song:{song_id}", {})
+    return out
+
+
+def _song(row: dict) -> dict | None:
+    """One lookup row as what an import needs to know about a recording."""
+    if not isinstance(row, dict) or row.get("wrapperType") != "track":
+        return None
+    millis = row.get("trackTimeMillis")
+    title = (row.get("trackName") or "").strip()
+    if not title or not isinstance(millis, (int, float)) or millis <= 0:
+        return None
+    return {"id": str(row.get("trackId") or ""), "title": title,
+            "artist": (row.get("artistName") or "").strip(),
+            "album": (row.get("collectionName") or "").strip(),
+            "duration": round(millis / 1000, 3)}
+
+
 def _get(url: str, params: dict) -> list[dict] | None:
     """The `results` of one catalogue call, or None when it did not answer."""
     try:

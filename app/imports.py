@@ -34,7 +34,7 @@ from dataclasses import asdict, dataclass
 from difflib import SequenceMatcher
 from urllib.parse import urlencode
 
-from . import config, jellyfin, logs, media, playlists, songs, store, wants
+from . import config, itunes, jellyfin, logs, media, playlists, songs, store, wants
 
 log = logs.get("imports")
 
@@ -117,6 +117,10 @@ _ROLES = {
     # first in the file asked for a hundred films made in 2024.
     "year": ("year", "releaseyear", "originalreleaseyear", "released",
              "releasedate", "firstreleased", "published", "date"),
+    # An Apple Music export (TuneMyMusic's "Apple - id") names the very
+    # recording, which is how a single edit is told from the album cut.
+    "appleid": ("appleid", "applemusicid", "applemusictrackid", "itunesid",
+                "itunestrackid"),
 }
 
 #: A single-column file whose first line is one of these has a heading rather
@@ -324,6 +328,9 @@ class Row:
     line_start: int = 0
     album: str = ""
     record_type: str = ""
+    #: Apple's catalogue id for the song, from an Apple Music export. Digits
+    #: only: a library id ("i.abc123") names nothing anybody else can look up.
+    apple_id: str = ""
 
     @property
     def label(self) -> str:
@@ -459,9 +466,11 @@ def rows(sheet: Sheet, medium: str, unit: str,
             duplicates += 1
             continue
         seen.add(key)
+        apple_id = cell(sheet.roles.get("appleid")) if medium == media.MUSIC else ""
         found.append(Row(sheet.lines[index], title, artist, year, source_row,
                          sheet.starts[index] if sheet.starts else sheet.lines[index],
-                         cell(sheet.roles.get("album")), record_type))
+                         cell(sheet.roles.get("album")), record_type,
+                         apple_id if apple_id.isdigit() else ""))
     return found, duplicates, blanks
 
 
@@ -636,26 +645,113 @@ FIRST_LOOK = ("deezer",)
 FIRST_LOOK_UNITS = ("track", "album")
 
 
+#: How close a catalogue hit's length must be to the length the export gave
+#: for it to be the same recording. Catalogues round differently and trim
+#: silence differently; a single edit or a live take is tens of seconds away.
+SAME_LENGTH_SECONDS = 4.0
+#: Further than this from the export's length is another recording.
+OTHER_LENGTH_SECONDS = 10.0
+
+
+@dataclass(frozen=True, slots=True)
+class Wanted:
+    """What a row says about its recording beyond the title and the credit."""
+    album: str = ""
+    duration: float | None = None
+    #: The row is itself a live take or a reworking, so a live album is no
+    #: mark against a hit.
+    performance: bool = False
+
+
+def _wanted(row: Row, known: dict | None) -> Wanted:
+    """The album and length of a row's recording: Apple's, where the export named it."""
+    known = known or {}
+    # Apple's record of a different song is no evidence about this one.
+    if known and songs.close_score(row.title, row.artist, known.get("title") or "",
+                                   known.get("artist") or "") < 0.7:
+        known = {}
+    length = known.get("duration")
+    return Wanted(known.get("album") or row.album,
+                  float(length) if isinstance(length, (int, float)) and length > 0 else None,
+                  songs.not_the_record(row.title) or songs.not_the_record(row.album))
+
+
+def _fit(hit: dict, wanted: Wanted) -> tuple[int, int, int]:
+    """How well an exact hit fits the row's recording. Lower is better, in order.
+
+    Length first, because the length is the recording: the same take on a
+    compilation is the song somebody had, and the live take on the deluxe
+    edition of their very album is not. Then the album, then whether the
+    album is a performance or a reworking when the row is neither.
+    """
+    length = hit.get("durationSeconds")
+    if wanted.duration and isinstance(length, (int, float)) and length > 0:
+        off = abs(float(length) - wanted.duration)
+        timing = 0 if off <= SAME_LENGTH_SECONDS else 2 if off > OTHER_LENGTH_SECONDS else 1
+    else:
+        timing = 1
+    album = hit.get("album") or ""
+    elsewhere = 0 if wanted.album and songs.same_album(wanted.album, album) else 1
+    staged = 1 if not wanted.performance and songs.not_the_record(album) else 0
+    return timing, elsewhere, staged
+
+
+def _settled(row: Row, hits: list[dict], medium: str, unit: str, wanted: Wanted) -> bool:
+    """Whether these hits already hold the row's own recording, so nothing wider is asked.
+
+    Only a song carries a recording to look for. Anything else is settled by
+    any exact hit, as it always was.
+    """
+    fits = [_fit(hit, wanted) for hit in hits if is_strict(row, hit, medium)]
+    if not fits or medium != media.MUSIC or unit != "track":
+        return bool(fits)
+    if wanted.duration:
+        return any(timing == 0 and staged == 0 for timing, _, staged in fits)
+    if wanted.album:
+        return any(elsewhere == 0 and staged == 0 for _, elsewhere, staged in fits)
+    return any(staged == 0 for _, _, staged in fits)
+
+
+def _merged(first: list[dict], more: list[dict]) -> list[dict]:
+    """Two searches' hits as one list, the first search's order kept."""
+    seen = {hit.get("itemKey") for hit in first}
+    return first + [hit for hit in more if hit.get("itemKey") not in seen]
+
+
 def match(user: jellyfin.User, medium: str, unit: str, row: Row,
-          requested: set[str]) -> dict:
+          requested: set[str], known: dict | None = None) -> dict:
     """One row, looked up and judged. Never raises: a row that failed says so.
 
     A search that throws is one row's problem. Five hundred rows against three
     third-party catalogues will find a timeout somewhere, and losing the whole
     file to it -- after the other four hundred and ninety-nine have already
     been paid for -- is the wrong answer to a network blip.
+
+    A song is matched to its recording, not just its title. `known` is
+    Apple's record of it (`itunes.songs_by_id`) when the export carried an
+    Apple id; otherwise the row's own album is what there is. The first
+    exact hit used to win, and a catalogue lists the live album, the rehearsal
+    take and the 2023 re-recording beside the studio cut: on 2026-10-05 a
+    library import asked for live versions of songs whose own file named the
+    studio album. Deezer is still asked first; the full search runs when
+    Deezer has no hit that fits, and a search naming the album after that.
     """
     found: dict = {**asdict(row), "label": row.label, "state": MISSING,
                    "detail": "", "hit": None, "others": 0}
     query = _query(row, medium, unit)
+    song = medium == media.MUSIC and unit == "track"
+    wanted = _wanted(row, known) if song else Wanted()
     try:
         hits = []
         if medium == media.MUSIC and unit in FIRST_LOOK_UNITS:
-            first = wants.search(query, medium, unit, user, sources=FIRST_LOOK)
-            if any(is_strict(row, hit, medium) for hit in first):
-                hits = first
-        if not hits:
-            hits = wants.search(query, medium, unit, user)
+            hits = wants.search(query, medium, unit, user, sources=FIRST_LOOK)
+        if not _settled(row, hits, medium, unit, wanted):
+            # Deezer's hits are kept behind the full search's: a live take
+            # that is all anybody has is still the match.
+            hits = _merged(wants.search(query, medium, unit, user), hits)
+            if song and wanted.album and not _settled(row, hits, medium, unit, wanted):
+                hits = _merged(hits, wants.search(
+                    f"{query} {songs.search_title(wanted.album)}", medium, unit, user))
     except Exception as exc:  # noqa: BLE001 - see the docstring.
         log.warning("import row %d could not be looked up: %s", row.line, exc)
         found["detail"] = "The search for this one failed. Try it again later."
@@ -670,7 +766,11 @@ def match(user: jellyfin.User, medium: str, unit: str, row: Row,
     if not exact and (not plausible or plausible[0][1] < 0.7):
         found["detail"] = NO_MATCH
         return found
-    chosen = exact[0] if exact else plausible[0][0]
+    if exact:
+        # min keeps the catalogue's order among equally good fits.
+        chosen = min(exact, key=lambda hit: _fit(hit, wanted)) if song else exact[0]
+    else:
+        chosen = plausible[0][0]
     found["hit"] = _keep(chosen)
     found["others"] = len(hits) - 1
     identity_known = bool(exact) or medium != media.MUSIC
@@ -687,7 +787,8 @@ def match(user: jellyfin.User, medium: str, unit: str, row: Row,
         found["detail"] = "Closest result, not an exact match."
         return found
     found["state"] = MATCHED
-    found["detail"] = (f"{len(exact)} exact matches. This asks for the first."
+    found["detail"] = ((f"{len(exact)} exact matches. This asks for the "
+                        + ("first." if chosen is exact[0] else "one that fits the list best."))
                        if len(exact) > 1 else "")
     return found
 
@@ -849,6 +950,10 @@ def _work_through(import_id: str, user: jellyfin.User, medium: str, unit: str,
     try:
         requested = store.outstanding_keys(user.key, medium)
         library = _library_for(medium, unit)
+        # One lookup per hundred and fifty songs, before the first search,
+        # so every row is matched knowing which recording it names.
+        known = (itunes.songs_by_id([row.apple_id for row in items if row.apple_id])
+                 if medium == media.MUSIC and unit == "track" else {})
         done = len(store.import_row_lines(import_id))
         for index, row in enumerate(items, start=1):
             if import_id in _stopping:
@@ -866,7 +971,8 @@ def _work_through(import_id: str, user: jellyfin.User, medium: str, unit: str,
                         found_now = []
                 continue
             with _turn:
-                found = match(user, medium, unit, row, requested)
+                found = match(user, medium, unit, row, requested,
+                              known.get(row.apple_id))
             outcome, detail = (_ask_one(import_id, user, medium, found)
                                if found["state"] == MATCHED else ("", ""))
             if outcome is None:

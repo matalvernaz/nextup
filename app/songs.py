@@ -185,6 +185,48 @@ def close_score(title: str, artist: str, other_title: str, other_artist: str) ->
     return title_score
 
 
+#: Words that make an album a performance or a reworking rather than the record: a song found
+#: only on one of these is a different recording from the studio cut of the same title.
+_NOT_THE_RECORD = re.compile(
+    r"\b(live|concerts?|unplugged|en vivo|ao vivo|on stage|bootleg|rehearsals?|karaoke|"
+    r"tribute|instrumentals?|acoustic|sessions|remix(es|ed)?)\b", re.IGNORECASE)
+
+
+def not_the_record(name: str) -> bool:
+    """Whether an album or title names a performance or reworking (live, acoustic, karaoke...)."""
+    return bool(_NOT_THE_RECORD.search(_plain(name)))
+
+
+def album_key(name: str) -> str:
+    """An album title reduced to what two spellings of the same release share.
+
+    The edition goes ("Meteora (Deluxe Edition)" is Meteora), and so does Apple's "- Single" and
+    "- EP" label, so the single a song was released on is the single somebody's export names.
+    """
+    text = _ASIDE.sub(" ", _plain(name))
+    text = re.sub(r"\s+-\s+(single|ep)\s*$", " ", text)
+    return _key(text)
+
+
+def same_album(a: str, b: str) -> bool:
+    """Two album titles name the same release.
+
+    Equal once the edition is set aside, or one is the whole of the other, word for word, at
+    two words or more: "Greatest Hits" is "Simon & Garfunkel's Greatest Hits". A live album is
+    never the same release as one that is not, whatever else they share.
+    """
+    left, right = album_key(a), album_key(b)
+    if not left or not right:
+        return False
+    if not_the_record(a) != not_the_record(b):
+        return False
+    if left == right:
+        return True
+    short, long_ = sorted((left.split(), right.split()), key=len)
+    return len(short) >= 2 and any(long_[i:i + len(short)] == short
+                                   for i in range(len(long_) - len(short) + 1))
+
+
 def listed_names(credit: str) -> set[str]:
     """The names an export's credit lists, as keys, and the whole credit as one more."""
     plain = _plain(credit)

@@ -354,6 +354,12 @@ if PODCAST_EPISODES_DEFAULT and episodes.decode(PODCAST_EPISODES_DEFAULT) is Non
 # Which of Apple's storefronts answers searches. Podcasts are the same in all
 # of them but availability is per store; `us` is the largest.
 ITUNES_COUNTRY = _text("ITUNES_COUNTRY", "us").lower()
+# The storefronts an Apple Music export's song ids are looked up in, in order.
+# An id is the same in every store, but a store only answers for what it
+# sells, so an id the first one misses is asked of the next.
+ITUNES_LOOKUP_COUNTRIES = tuple(
+    c.strip().lower() for c in _text("ITUNES_LOOKUP_COUNTRIES", "us,ca,gb").split(",")
+    if c.strip())
 
 PODCAST_RECOMMENDATION_LIMIT = _int("PODCAST_RECOMMENDATION_LIMIT", 20)
 PODCAST_RECOMMENDATION_CACHE_SECONDS = _int(
