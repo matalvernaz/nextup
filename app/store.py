@@ -1607,6 +1607,25 @@ def set_import_outcome(import_id: str, line: int, outcome: str,
             "WHERE import_id=? AND line=?", (outcome, detail, import_id, line))
 
 
+def import_hits(user_key: str, medium: str, outcomes: tuple[str, ...]) -> list[dict]:
+    """The hits this account's lists have queued, or asked for with one of `outcomes`."""
+    marks = ",".join("?" * len(outcomes))
+    with db() as conn:
+        queued = conn.execute(
+            "SELECT hit FROM import_queue WHERE user_key=? AND medium=?",
+            (user_key, medium)).fetchall()
+        rows = conn.execute(
+            "SELECT r.data FROM import_rows r JOIN imports i ON i.import_id = r.import_id "
+            f"WHERE i.user_key=? AND i.medium=? AND r.outcome IN ({marks})",
+            (user_key, medium, *outcomes)).fetchall()
+    out = [json.loads(row["hit"]) for row in queued]
+    for row in rows:
+        hit = json.loads(row["data"]).get("hit")
+        if isinstance(hit, dict):
+            out.append(hit)
+    return out
+
+
 def leave_undecided(import_id: str) -> int:
     """Mark every row nobody has decided about yet as left. Returns how many."""
     with db() as conn:
@@ -1680,11 +1699,13 @@ def playlist_lines(playlist_id: str, import_id: str) -> dict[int, str]:
             "AND import_id=?", (playlist_id, import_id))}
 
 
-def playlist_line_count(import_id: str) -> int:
+def playlist_line_count(import_id: str, playlist_id: str = "") -> int:
+    """Lines of a list in its playlists, or in one of them."""
     with db() as conn:
         return int(conn.execute(
-            "SELECT COUNT(*) AS n FROM playlist_lines WHERE import_id=?",
-            (import_id,)).fetchone()["n"])
+            "SELECT COUNT(*) AS n FROM playlist_lines WHERE import_id=? "
+            "AND (?='' OR playlist_id=?)",
+            (import_id, playlist_id, playlist_id)).fetchone()["n"])
 
 
 def add_pending(user_key: str, playlist_id: str, import_id: str, line: int,
@@ -1705,11 +1726,13 @@ def pending_all() -> list[sqlite3.Row]:
         ).fetchall()
 
 
-def pending_count(import_id: str) -> int:
+def pending_count(import_id: str, playlist_id: str = "") -> int:
+    """A list's songs still to go into its playlists, or into one of them."""
     with db() as conn:
         return int(conn.execute(
-            "SELECT COUNT(*) AS n FROM playlist_pending WHERE import_id=?",
-            (import_id,)).fetchone()["n"])
+            "SELECT COUNT(*) AS n FROM playlist_pending WHERE import_id=? "
+            "AND (?='' OR playlist_id=?)",
+            (import_id, playlist_id, playlist_id)).fetchone()["n"])
 
 
 def drop_pending(pending_id: int) -> None:

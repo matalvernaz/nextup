@@ -1219,7 +1219,7 @@ def get_import_batch(request: Request, import_id: str, msg: str = ""):
         request=request, name="import_batch.html",
         context={
             "user": user, "batch": batch, "rows": imports.view(batch),
-            "playlist": playlists.summary(import_id, batch.get("playlist")),
+            "playlists": playlists.summaries(import_id, batch),
             "message": msg,
             "hit_label": imports.hit_label,
             "source_label": imports.source_label,

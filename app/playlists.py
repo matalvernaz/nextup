@@ -130,6 +130,10 @@ def add_found(user: jellyfin.User, playlist_id: str, import_id: str,
         # line is written down first, so the run before it can be placed in
         # front of it.
         present = set(current)
+        # In the order of the file. A song that is on several of a file's
+        # playlists reaches each of them from the line it was first found on,
+        # so the lines handed in here are not always in order.
+        found = sorted(found)
         anchors = [(line, item) for line, item in found if item in present]
         placed.update(anchors)
         store.add_playlist_lines(playlist_id, import_id, anchors)
@@ -137,11 +141,14 @@ def add_found(user: jellyfin.User, playlist_id: str, import_id: str,
         seen: set[str] = set()
         added = 0
         for line, item in found:
-            if item in present:
+            if item in present or (run and any(run[-1][0] < at < line for at in placed)):
+                # A song already in the playlist, or one placed since that
+                # sits between this line and the run's last: the run goes in
+                # first, so nothing lands on the wrong side of it.
                 _insert(user, playlist_id, import_id, current, placed, run)
                 added += len(run)
                 run = []
-            elif item not in seen:
+            if item not in present and item not in seen:
                 # The same song on two lines of a list goes in once.
                 seen.add(item)
                 run.append((line, item))
@@ -170,9 +177,22 @@ def summary(import_id: str, playlist: dict | None) -> dict | None:
     """
     if not playlist:
         return None
-    return {"id": playlist.get("id") or "", "name": playlist.get("name") or "",
-            "inPlaylist": store.playlist_line_count(import_id),
-            "pending": store.pending_count(import_id)}
+    playlist_id = playlist.get("id") or ""
+    return {"id": playlist_id, "name": playlist.get("name") or "",
+            "inPlaylist": store.playlist_line_count(import_id, playlist_id),
+            "pending": store.pending_count(import_id, playlist_id)}
+
+
+def summaries(import_id: str, batch: dict) -> list[dict]:
+    """`summary` for every playlist a list fills: the form's, then the file's own."""
+    found = [batch.get("playlist")] + list(batch.get("playlists") or [])
+    seen: set[str] = set()
+    out = []
+    for playlist in found:
+        if playlist and playlist.get("id") not in seen:
+            seen.add(playlist.get("id"))
+            out.append(summary(import_id, playlist))
+    return out
 
 
 def resolve_pending() -> int:

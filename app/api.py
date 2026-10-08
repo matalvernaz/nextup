@@ -1080,6 +1080,11 @@ def _import_state(user: jellyfin.User, import_id: str) -> dict:
         # name, how many songs are in it, and how many will be when they turn
         # up in the library.
         "playlist": playlists.summary(batch["id"], batch.get("playlist")),
+        # Every playlist the list fills, the one above first: a file can name
+        # its own playlists in a column, the way a whole-library export does.
+        "playlists": playlists.summaries(batch["id"], batch),
+        # Playlists the file named that were not made, and why.
+        "playlistsRefused": batch.get("playlists_refused", []),
         "error": batch.get("error"),
         "remainingToday": _import_remaining(user, batch),
         # Music lists have their own allowance, counted in songs; None for an

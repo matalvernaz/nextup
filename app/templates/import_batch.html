@@ -82,11 +82,25 @@
 </ul>
 {% endif %}
 
-{% if playlist %}
-<p>Playlist “{{ playlist.name }}”: {{ "{:,}".format(playlist.inPlaylist) }}
+{% macro playlist_line(playlist) -%}
+Playlist “{{ playlist.name }}”: {{ "{:,}".format(playlist.inPlaylist) }}
    song{{ '' if playlist.inPlaylist == 1 else 's' }} from this list in it
    {%- if playlist.pending %}, and {{ "{:,}".format(playlist.pending) }} more
-   will go in when {{ 'it arrives' if playlist.pending == 1 else 'they arrive' }}{% endif %}.</p>
+   will go in when {{ 'it arrives' if playlist.pending == 1 else 'they arrive' }}{% endif %}.
+{%- endmacro %}
+{% if playlists|length == 1 %}
+<p>{{ playlist_line(playlists[0]) }}</p>
+{% elif playlists %}
+<h3>Playlists</h3>
+<ul>
+  {% for playlist in playlists %}<li>{{ playlist_line(playlist) }}</li>
+  {% endfor %}
+</ul>
+{% endif %}
+{% if batch.playlists_refused %}
+<p>Not made: {% for refused in batch.playlists_refused %}“{{ refused.name }}”{{ ', ' if not loop.last }}{% endfor %}.
+   A playlist with that name already exists that Nextup did not make, so
+   nothing was added to it. Its songs were still asked for.</p>
 {% endif %}
 
 {% if rows.review %}
