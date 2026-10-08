@@ -208,12 +208,14 @@ def album_key(name: str) -> str:
     return _key(text)
 
 
-def same_album(a: str, b: str) -> bool:
+def same_album(a: str, b: str, artist: str = "") -> bool:
     """Two album titles name the same release.
 
     Equal once the edition is set aside, or one is the whole of the other, word for word, at
     two words or more: "Greatest Hits" is "Simon & Garfunkel's Greatest Hits". A live album is
-    never the same release as one that is not, whatever else they share.
+    never the same release as one that is not, whatever else they share. An album named after
+    `artist` is only ever itself: "Bruce Springsteen" is not "The Essential Bruce Springsteen",
+    and taking it for one swapped a ten-minute live "Rosalita" into somebody's list.
     """
     left, right = album_key(a), album_key(b)
     if not left or not right:
@@ -223,6 +225,8 @@ def same_album(a: str, b: str) -> bool:
     if left == right:
         return True
     short, long_ = sorted((left.split(), right.split()), key=len)
+    if artist and " ".join(short) == name_key(artist):
+        return False
     return len(short) >= 2 and any(long_[i:i + len(short)] == short
                                    for i in range(len(long_) - len(short) + 1))
 

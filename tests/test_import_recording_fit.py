@@ -119,8 +119,39 @@ check.equal(found["hit"]["album"], basement["album"],
 print("\na row that is itself a live take is not steered away from live albums")
 wanted = imports._wanted(imports.Row(6, "Bridge Over Troubled Water [Live]", "Simon & Garfunkel",
                                      album="Greatest Hits"), None)
-check.equal(imports._fit(hit("x", "The Concert in Central Park", 300.0), wanted)[2], 0,
+check.equal(imports._fit(hit("x", "The Concert in Central Park", 300.0), wanted)[1], 0,
             "no mark against a live album for a live row")
+
+print("\na few seconds nearer Apple's length does not beat the record itself")
+row = imports.Row(8, "Shop Around", "The Miracles", album="Hi ...We're The Miracles")
+miracles = dict(artist="The Miracles")
+studio = hit("Shop Around", "Hi ...We're The Miracles", 165.0, **miracles)
+rerecorded = hit("Shop Around", "Recorded Live On Stage", 170.0, **miracles)
+found, asked = matched(row, {("The Miracles Shop Around", DEEZER): [rerecorded, studio]},
+                       known={"title": "Shop Around", "artist": "The Miracles",
+                              "album": "Hi ...We're The Miracles", "duration": 170.8})
+check.equal(found["hit"]["album"], studio["album"],
+            "the studio cut on his own album, though the live one is nearer by five seconds")
+check.equal(len(asked), 1, "and the album's own hit settles the search")
+
+print("\nan album named after the artist is not every compilation with the name in it")
+row = imports.Row(9, "Rosalita (Come Out Tonight)", "Bruce Springsteen",
+                  album="The Essential Bruce Springsteen [Disc 1]")
+boss = dict(artist="Bruce Springsteen")
+live_one = hit("Rosalita (Come Out Tonight)", "Bruce Springsteen", 630.0, **boss)
+wild = hit("Rosalita (Come Out Tonight)", "The Wild, the Innocent & the E Street Shuffle", 422.0, **boss)
+essential = hit("Rosalita (Come Out Tonight)", "The Essential Bruce Springsteen", 424.0, **boss)
+query = "Bruce Springsteen Rosalita (Come Out Tonight)"
+found, asked = matched(row, {(query, DEEZER): [live_one, wild],
+                             (query, EVERYWHERE): [live_one, wild],
+                             (query + " The Essential Bruce Springsteen [Disc 1]", EVERYWHERE): [essential]})
+check.equal(found["hit"]["album"], "The Essential Bruce Springsteen",
+            "the album he named, found by asking for it, not an album called Bruce Springsteen")
+check.equal(songs.same_album("The Essential Bruce Springsteen", "Bruce Springsteen",
+                             "Bruce Springsteen"), False,
+            "an album named after the artist is only itself")
+check.equal(songs.same_album("The Essential Bruce Springsteen", "The Essential Bruce Springsteen [Disc 1]",
+                             "Bruce Springsteen"), True, "but the same compilation still is")
 
 print("\nan album list is matched as it always was")
 row = imports.Row(7, "Kind of Blue", "Miles Davis")
