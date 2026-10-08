@@ -132,6 +132,50 @@ for title, credit, other, extra in [
         ("Lovely Day", "Bill Withers", "Lovely Day", False)]:
     check.equal(songs.extra_guest(title, credit, other), extra, f"{other!r} for {title!r} by {credit!r}")
 
+print("\nthe same song and length bucket on another album is not a duplicate")
+# Real, 2026-10-08: the live "Live in London" take is 224.9 s and the Out of Our Heads cut
+# 223.4 s, the same five-second bucket, so both carry one ledger key.
+row = imports.Row(12, "(I Can't Get No) Satisfaction", "The Rolling Stones", album="Out of Our Heads")
+same_key = "bk:track:satisfaction-bucket-44"
+in_london = dict(hit("(I Can't Get No) Satisfaction", "Live in London", 224.9, **stones), itemKey=same_key)
+the_record = dict(hit("(I Can't Get No) Satisfaction", "Out of Our Heads", 223.4, **stones),
+                  itemKey=same_key)
+query = "The Rolling Stones (I Can't Get No) Satisfaction"
+found, asked = matched(row, {(query, EVERYWHERE): [in_london],
+                             (query + " Out of Our Heads", EVERYWHERE): [the_record]},
+                       known={"title": "(I Can't Get No) Satisfaction", "artist": "The Rolling Stones",
+                              "album": "Out of Our Heads", "duration": 223.4})
+check.equal(found["hit"]["album"], "Out of Our Heads",
+            "the album search's hit survives the merge though it shares the live take's key")
+
+print("\na hit with no length never beats one of the right length, nor settles a search")
+row = imports.Row(13, "Linger", "The Cranberries", album="Stars: The Best of the Cranberries 1992-2002")
+lengthless = hit("Linger", "Stars: The Best of the Cranberries 1992-2002", None, source="musicbrainz")
+right_length = hit("Linger", "The Cranberries: Gold", 275.5, source="itunes")
+found, asked = matched(row, {("The Cranberries Linger", DEEZER): [lengthless],
+                             ("The Cranberries Linger", EVERYWHERE): [lengthless, right_length]},
+                       known={"title": "Linger", "artist": "The Cranberries",
+                              "album": "Stars: The Best of the Cranberries 1992-2002", "duration": 274.8})
+check.equal(found["hit"].get("durationSeconds"), 275.5,
+            "the right length on another album, over no length on the right one")
+check.equal(asked[1:2], [("The Cranberries Linger", EVERYWHERE)],
+            "and a lengthless hit on the right album did not settle the search")
+
+print("\nthe file's own album comes before the one Apple's id resolves to")
+row = imports.Row(14, "Breaking The Habit", "Linkin Park", album="Meteora")
+park = dict(artist="Linkin Park")
+broken = hit("Breaking the Habit", "Broken Dreams", 197.0, **park)
+meteora = hit("Breaking the Habit", "Meteora (Deluxe Edition)", 196.9, **park, source="itunes")
+found, asked = matched(row, {("Linkin Park Breaking The Habit", DEEZER): [broken],
+                             ("Linkin Park Breaking The Habit", EVERYWHERE): [broken, meteora]},
+                       known={"title": "Breaking the Habit", "artist": "Linkin Park",
+                              "album": "Rocktober!", "duration": 196.907})
+check.equal(found["hit"]["album"], "Meteora (Deluxe Edition)",
+            "filed under Meteora as his library has it, at the length Apple gives")
+wanted = imports._wanted(imports.Row(15, "Song", "Somebody"),
+                         {"title": "Song", "artist": "Somebody", "album": "Apple's Album", "duration": 200.0})
+check.equal(wanted.album, "Apple's Album", "Apple's album is used when the file has none")
+
 print("\nApple's record of some other song is no evidence")
 row = imports.Row(4, "Fly Like an Eagle", "Steve Miller Band", album="Greatest Hits 1974-78")
 wanted = imports._wanted(row, {"title": "Something Else Entirely", "artist": "Nobody",
