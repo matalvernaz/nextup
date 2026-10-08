@@ -716,13 +716,17 @@ def _wanted(row: Row, known: dict | None) -> Wanted:
                                    known.get("artist") or "") < 0.7:
         known = {}
     length = known.get("duration")
-    return Wanted(known.get("album") or row.album,
+    # The file's album first: it is the person's own library. Apple's id can
+    # resolve to a compilation the same recording is also on ("Breaking the
+    # Habit" from Meteora came back as "Rocktober!"); its length is still the
+    # recording's.
+    return Wanted(row.album or known.get("album") or "",
                   float(length) if isinstance(length, (int, float)) and length > 0 else None,
                   songs.not_the_record(row.title) or songs.not_the_record(row.album),
                   row.artist, row.title)
 
 
-def _fit(hit: dict, wanted: Wanted) -> tuple[bool, int, int, int, int]:
+def _fit(hit: dict, wanted: Wanted) -> tuple[bool, int, int, int, int, int]:
     """How well an exact hit fits the row's recording. Lower is better, in order.
 
     A length far from the export's rules a hit out first: that is a single
@@ -732,8 +736,13 @@ def _fit(hit: dict, wanted: Wanted) -> tuple[bool, int, int, int, int]:
     a few seconds out comes last, because catalogues round and master
     differently: on 2026-10-08 a re-recorded live "Shop Around" was a second
     nearer Apple's length than the studio cut.
+
+    A hit with no length at all ranks below any hit with one, before the
+    album: buskarr reads a missing length as "cannot judge" and takes a file
+    of any length for it.
     """
     length = hit.get("durationSeconds")
+    lengthless = 0 if isinstance(length, (int, float)) and length > 0 else 1
     if wanted.duration and isinstance(length, (int, float)) and length > 0:
         off = abs(float(length) - wanted.duration)
         timing = 0 if off <= SAME_LENGTH_SECONDS else 2 if off > OTHER_LENGTH_SECONDS else 1
@@ -744,10 +753,10 @@ def _fit(hit: dict, wanted: Wanted) -> tuple[bool, int, int, int, int]:
     staged = 1 if not wanted.performance and songs.not_the_record(album) else 0
     duet = 1 if wanted.title and songs.extra_guest(wanted.title, wanted.artist,
                                                    hit.get("title") or "") else 0
-    return timing == 2, staged, duet, elsewhere, timing
+    return timing == 2, staged, duet, lengthless, elsewhere, timing
 
 
-def _good(fit: tuple[bool, int, int, int, int], wanted: Wanted) -> bool:
+def _good(fit: tuple[bool, int, int, int, int, int], wanted: Wanted) -> bool:
     """A fit no wider search could better: the row's own recording, on its own album.
 
     Never far out, a performance or a duet. With an album to go on, the album
@@ -755,8 +764,8 @@ def _good(fit: tuple[bool, int, int, int, int], wanted: Wanted) -> bool:
     right sound in the wrong place, and a search naming the album usually
     finds the record itself. With only a length, the length must agree.
     """
-    far, staged, duet, elsewhere, timing = fit
-    if far or staged or duet:
+    far, staged, duet, lengthless, elsewhere, timing = fit
+    if far or staged or duet or lengthless:
         return False
     if wanted.album:
         return elsewhere == 0
@@ -805,9 +814,19 @@ def _already_asked(hit: dict, asked: dict | None) -> bool:
 
 
 def _merged(first: list[dict], more: list[dict]) -> list[dict]:
-    """Two searches' hits as one list, the first search's order kept."""
-    seen = {hit.get("itemKey") for hit in first}
-    return first + [hit for hit in more if hit.get("itemKey") not in seen]
+    """Two searches' hits as one list, the first search's order kept.
+
+    A hit is a duplicate only on the same album too. A song's ledger key is
+    its credit, title and five-second length bucket, so the studio cut and a
+    live take a second longer share one: keyed on that alone, the search
+    naming the album found "Satisfaction" on Out of Our Heads and the merge
+    dropped it for the live one already in the list.
+    """
+    def same(hit: dict) -> tuple:
+        return hit.get("itemKey"), songs.album_key(hit.get("album") or "")
+
+    seen = {same(hit) for hit in first}
+    return first + [hit for hit in more if same(hit) not in seen]
 
 
 def match(user: jellyfin.User, medium: str, unit: str, row: Row,
