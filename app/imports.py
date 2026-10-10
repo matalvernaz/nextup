@@ -726,6 +726,31 @@ def _wanted(row: Row, known: dict | None) -> Wanted:
                   row.artist, row.title)
 
 
+#: Apple's way of saying what kind of release an album is. Not part of its name.
+_RELEASE_KIND = re.compile(r"\s+-\s+(?:Single|EP)\s*$", re.IGNORECASE)
+
+
+def filed_under(row: Row, hit: dict) -> str | None:
+    """The album a song from a list is filed under, when it is not the hit's own.
+
+    The list's own album where it names one, because that is how the person
+    has their music. The catalogue's album is only the release a search
+    happened to find the recording on: on 2026-10-10 "One Kiss" was about to be
+    filed under "Hot Summer Party Mix" and NERO's "Welcome Reality" under
+    "Me and You", each a one-song album nobody had, where the file said
+    "One Kiss - Single" and "Welcome Reality (Deluxe Version)". buskarr matches
+    the label to an album the artist already has, so an edition name is fine.
+
+    None when the row names no album or the hit is already on it, which leaves
+    the hit's album and its year as they are.
+    """
+    own = _RELEASE_KIND.sub("", row.album or "").strip()
+    found = hit.get("album") or ""
+    if not own or (found and songs.same_album(own, found, row.artist)):
+        return None
+    return own
+
+
 def _fit(hit: dict, wanted: Wanted) -> tuple[bool, int, int, int, int, int]:
     """How well an exact hit fits the row's recording. Lower is better, in order.
 
@@ -887,6 +912,11 @@ def match(user: jellyfin.User, medium: str, unit: str, row: Row,
     else:
         chosen = plausible[0][0]
     found["hit"] = _keep(chosen)
+    own = filed_under(row, chosen) if song else None
+    if own:
+        # Its year was the catalogue release's, which this is not.
+        found["hit"]["album"] = own
+        found["hit"].pop("year", None)
     found["others"] = len(hits) - 1
     identity_known = bool(exact) or medium != media.MUSIC
     if identity_known and chosen.get("owned"):
