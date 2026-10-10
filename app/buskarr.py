@@ -127,6 +127,10 @@ def _described(row: dict, unit: str) -> dict:
         "medium": MEDIUM, "unit": "track",
         "title": row.get("title") or "", "artist": row.get("artist") or "",
         "album": row.get("album") or "", "overview": "",
+        # The album's own year, from the same catalogue as the album. Dropped
+        # here until now, so every song asked for from a list arrived with no
+        # year and its album directory undated.
+        "year": row.get("year") or None,
         "durationSeconds": row.get("duration"),
         "source": (row.get("sources") or [None])[0],
     }
@@ -192,11 +196,12 @@ def add(unit: str, hit: dict, requested_by: str,
         payload = resp.json()
     except ValueError:
         payload = {}
-    log.info("add unit=%s ref=%s reference=%s", unit, body["ref"],
-             payload.get("reference"))
+    log.info("add unit=%s ref=%s reference=%s in_library=%s", unit, body["ref"],
+             payload.get("reference"), bool(payload.get("inLibrary")))
     return arr.AddResult(True, payload.get("message") or "Sent to buskarr.",
                          payload.get("reference") or "",
-                         body["title"] or body["artist"])
+                         body["title"] or body["artist"],
+                         in_library=bool(payload.get("inLibrary")))
 
 
 def state(backend_id: str) -> dict | None:

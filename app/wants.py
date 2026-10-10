@@ -419,6 +419,14 @@ def _admit(user: jellyfin.User, found: media.Medium, medium: str,
         log.warning("want refused user=%s key=%s reason=%s",
                     user.key, item_key, result.message)
         raise (TryLater if result.transient else Denied)(result.message)
+    if result.in_library:
+        # buskarr found the recording already on disk and will fetch nothing.
+        # `_owned_now` cannot tell for music, so this is where it is learned;
+        # charged as a fresh ask, an imported list paid for songs it already had.
+        held.settle_owned(medium, item_key)
+        log.info("want already held user=%s medium=%s key=%s (no allowance spent)",
+                 user.key, medium, item_key)
+        return IN_LIBRARY, "Already in the library."
 
     backend_id = result.backend_id
     if not result.created:

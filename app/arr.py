@@ -58,6 +58,9 @@ class AddResult(NamedTuple):
     #: failed on its side. Asking again later is the right answer to this one,
     #: and the wrong answer to a refusal.
     transient: bool = False
+    #: The tool already had it on disk and will fetch nothing. Music only, and
+    #: only from a buskarr that says so; nothing is charged for it.
+    in_library: bool = False
 
 
 @dataclass(frozen=True, slots=True)
