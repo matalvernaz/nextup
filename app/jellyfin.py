@@ -734,6 +734,12 @@ def update_item(record: dict) -> None:
         raise JellyfinUnavailable(str(exc)) from exc
 
 
+#: Every playlist made here is its owner's alone. Jellyfin makes a new playlist public unless told
+#: otherwise (``CreatePlaylistDto.IsPublic`` defaults to true), so every account on the server saw
+#: every reading list, "Next Read — defender" included, and was offered to delete it (2026-10-10).
+PRIVATE_PLAYLIST = False
+
+
 def find_playlist(uid: str, name: str) -> str | None:
     """Id of this account's playlist with that name, or None."""
     with _client() as c:
@@ -765,7 +771,7 @@ def set_playlist(uid: str, name: str, item_ids: list[str]) -> str | None:
         if pid is None:
             created = c.post("/Playlists", json={
                 "Name": name, "Ids": item_ids, "UserId": uid,
-                "MediaType": "Audio",
+                "MediaType": "Audio", "IsPublic": PRIVATE_PLAYLIST,
             }).raise_for_status().json()
             return created["Id"]
         existing = c.get(f"/Playlists/{pid}/Items",
@@ -848,6 +854,7 @@ def create_playlist(uid: str, name: str) -> str:
         with _client() as c:
             return c.post("/Playlists", json={
                 "Name": name, "Ids": [], "UserId": uid, "MediaType": "Audio",
+                "IsPublic": PRIVATE_PLAYLIST,
             }).raise_for_status().json()["Id"]
     except (httpx.HTTPError, ValueError, KeyError) as exc:
         raise JellyfinUnavailable(str(exc)) from exc
