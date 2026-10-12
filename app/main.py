@@ -979,9 +979,21 @@ def post_approvals_decline(request: Request, medium: str = Form(...),
                             status_code=303)
 
 
+# A single picker names both the medium and the scope of a search. Rendering
+# units only for the current medium made a book series impossible to choose
+# until after the first book search, and carried stale units between media.
+_SEARCH_TYPE_LABELS = {
+    (media.BOOK, "series"): "Book series",
+    (media.MUSIC, "track"): "Songs",
+    (media.MUSIC, "album"): "Albums",
+    (media.MUSIC, "artist"): "Artists",
+}
+
+
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request, q: str = "", medium: str = "", unit: str = "",
-          msg: str = "", import_id: str = "", import_line: int = 0):
+          msg: str = "", import_id: str = "", import_line: int = 0,
+          search_type: str = ""):
     """Search, and everything this account is currently waiting for."""
     if setup.needs_setup():
         # Nothing can be asked of a Jellyfin this service has no credential
@@ -1003,6 +1015,8 @@ def index(request: Request, q: str = "", medium: str = "", unit: str = "",
         import_context = {"id": import_id, "line": import_line,
                           "label": row["label"], "source": imports.source_label(row),
                           "filename": batch["filename"] or "Pasted list"}
+    elif search_type:
+        medium, _, unit = search_type.partition(":")
     offered = media.available()
     if import_context and medium not in offered:
         return RedirectResponse(f"/import/{quote(import_id, safe='')}?msg=" + quote(
@@ -1024,6 +1038,11 @@ def index(request: Request, q: str = "", medium: str = "", unit: str = "",
         context={
             "user": user,
             "media": list(offered.values()),
+            "search_types": [
+                {"medium": m.key, "unit": u,
+                 "label": _SEARCH_TYPE_LABELS.get((m.key, u), m.label)}
+                for m in offered.values() for u in m.units
+            ],
             "medium": medium,
             "unit": unit,
             "query": q,
@@ -1340,7 +1359,7 @@ BOOK = "book"
 #: Named here rather than read from the media registry because that registry
 #: only carries a medium whose acquisition tool is configured, and a film
 #: shelf needs no Radarr.
-DISCOVER_LABELS = {media.MOVIE: "Films", media.SERIES: "Series", BOOK: "Books",
+DISCOVER_LABELS = {media.MOVIE: "Films", media.SERIES: "TV shows", BOOK: "Books",
                    media.PODCAST: "Podcasts"}
 
 

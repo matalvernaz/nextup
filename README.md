@@ -240,14 +240,15 @@ arriving.
 | Medium | Units | Backend | Recommends from |
 |---|---|---|---|
 | Films | movie | Radarr | your playback, favourites and ratings |
-| Series | series | Sonarr | the same |
+| TV shows | series | Sonarr | the same |
 | Music | artist, album, track | buskarr | — |
 | Books | book, series | Listenarr | an Audible similarity graph and a local text model |
 | Podcasts | podcast | the Jellyfin fork itself | your listening, and Apple's catalogue for what to add |
 
-One search box with one picker for what kind of thing you want, not four
-screens. Asking for a whole book series is the same control as asking for a
-music artist, with a different scope.
+One search box with a picker offering Films, TV shows, Songs, Albums, Artists,
+Books, Book series and Podcasts, limited to what this deployment supports.
+Choose any of them before the first search. Asking for a whole book series is
+the same control as asking for a music artist, with a different scope.
 
 ## Backends are detected, not declared
 
