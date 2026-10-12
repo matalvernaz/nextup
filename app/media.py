@@ -28,7 +28,7 @@ class Medium:
     key: str
     #: What to call it on screen. Plural, because it names a section.
     label: str
-    #: What can be asked for within it. One for film and TV, three for music.
+    #: What can be asked for within it: books and series, or music's three units.
     units: tuple[str, ...]
     daily_cap: int
     library_ids: tuple[str, ...]
@@ -51,7 +51,7 @@ def cost(medium: str, unit: str) -> int:
 #: library ids are looked up separately because that is the part that can fail.
 _BACKENDS = (
     (MOVIE, "Films", ("movie",), radarr.configured, lambda: config.MOVIE_DAILY_CAP),
-    (SERIES, "Series", ("series",), sonarr.configured, lambda: config.SERIES_DAILY_CAP),
+    (SERIES, "TV shows", ("series",), sonarr.configured, lambda: config.SERIES_DAILY_CAP),
     (MUSIC, "Music", buskarr.UNITS, buskarr.configured, lambda: config.MUSIC_DAILY_CAP),
     (BOOK, "Books", listenarr.UNITS, listenarr.configured,
      lambda: config.BOOK_DAILY_CAP),

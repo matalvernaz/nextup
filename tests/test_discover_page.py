@@ -131,8 +131,8 @@ check.that('aria-current="page">Films' in warm.text,
 
 series = client.get("/discover?medium=series")
 check.equal(series.status_code, 200, "the series shelf answers too")
-check.that('aria-current="page">Series' in series.text,
-           "and the picker follows")
+check.that('aria-current="page">TV shows' in series.text,
+           "and the picker follows with an unambiguous TV label")
 
 # An unknown medium is a stale link, not an error: somebody in the right place
 # with the wrong query string. The search page treats its own picker the same.

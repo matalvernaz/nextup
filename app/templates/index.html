@@ -43,27 +43,13 @@ asked for yet.</p>
     <input type="hidden" name="unit" value="{{ unit }}">
     {% else %}
     <p>
-      <label for="medium">What kind of thing</label><br>
-      <select id="medium" name="medium">
-        {% for m in media %}
-        <option value="{{ m.key }}" {% if m.key == medium %}selected{% endif %}>{{ m.label }}</option>
+      <label for="search_type">What kind of thing</label><br>
+      <select id="search_type" name="search_type">
+        {% for choice in search_types %}
+        <option value="{{ choice.medium }}:{{ choice.unit }}" {% if choice.medium == medium and choice.unit == unit %}selected{% endif %}>{{ choice.label }}</option>
         {% endfor %}
       </select>
     </p>
-    {# Only music has more than one unit, so the control only appears there. #}
-    {% set current = (media | selectattr('key', 'equalto', medium) | first) %}
-    {% if current and current.units | length > 1 %}
-    <fieldset>
-      <legend>What to look for</legend>
-      {% for u in current.units %}
-      <p>
-        <input type="radio" id="unit-{{ u }}" name="unit" value="{{ u }}"
-               {% if u == unit %}checked{% endif %}>
-        <label for="unit-{{ u }}">{{ u | capitalize }}</label>
-      </p>
-      {% endfor %}
-    </fieldset>
-    {% endif %}
     {% endif %}
     <p>
       <label for="q">Title</label><br>
