@@ -177,6 +177,10 @@ def _to_add_metadata(result: dict, region: str | None = None) -> dict:
         # lookups somewhere that does not carry the book.
         "region": region or config.AUDIBLE_REGION,
         "title": result.get("title"),
+        # Some books are listed under a numbered series title with their real
+        # name here ("Dark Tower III" / "The Waste Lands"), and indexers publish
+        # them under that name. Listenarr cannot match such a release without it.
+        "subtitle": (result.get("subtitle") or "").strip() or None,
         "authors": _names(result.get("authors")),
         "narrators": _names(result.get("narrators")),
         "genres": _names(result.get("genres")),
