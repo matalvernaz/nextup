@@ -221,6 +221,43 @@ def _refresh_behind(user: jellyfin.User, update_playlist: bool) -> None:
 
 def result(user: jellyfin.User, force: bool = False,
             update_playlist: bool = True) -> dict:
+    """The cached shelves, with arrivals removed from the unowned suggestions.
+
+    Ownership has a shorter lifetime than recommendations. A search or arrival
+    sweep may already know about a book added elsewhere while the hour-old
+    recommendation snapshot still offers it. Filter every cache path against
+    that newer listing without waiting for another recommendation build.
+    """
+    data = _result(user, force=force, update_playlist=update_playlist)
+    if not data.get("discover"):
+        return data
+    with _cache_guard:
+        entry = _owned_cache.get(user.key)
+        rebuilding_shelf = user.key in _refreshing
+    # Restoring a shelf after a restart already starts a full rebuild, which
+    # publishes ownership on completion. Do not pay for a second listing here.
+    if entry is None:
+        return data
+    if (not rebuilding_shelf
+            and time.monotonic() - entry[0] > OWNED_TTL_SECONDS):
+        _rebuild_owned_behind(user)
+    return unowned_suggestions(data, entry[1])
+
+
+def unowned_suggestions(data: dict, owned: tuple[set, dict]) -> dict:
+    """A snapshot with only unowned suggestions, preserving its other fields.
+
+    Return a view rather than rewriting the persisted recommendation snapshot:
+    an item removed from the library can be suggested again, and other readers
+    keep their own snapshot and recommendation attribution.
+    """
+    discover = data.get("discover") or []
+    kept = [row for row in discover if not engine._already_owned(row, *owned)]
+    return {**data, "discover": kept} if len(kept) != len(discover) else data
+
+
+def _result(user: jellyfin.User, force: bool = False,
+            update_playlist: bool = True) -> dict:
     """This user's shelves, computing them only when the cache cannot answer.
 
     `update_playlist=False` is the API's read: it must not have side effects on

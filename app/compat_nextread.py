@@ -135,9 +135,14 @@ def get_shelves(force: bool = False,
     is the shape of the answer, and that is untouched.
     """
     data = shelves.result(user, force=force, update_playlist=True)
+    owned = shelves.owned_index(user)
+    requests = wants.states(user.key, owned)
+    # The first read after a restart can restore the shelf before its library
+    # index exists. The arrival check above may have just obtained that index;
+    # apply it to the same response so requests and suggestions agree.
+    data = shelves.unowned_suggestions(data, owned)
     log.info("shelves served user=%s owned=%d suggestions=%d force=%s",
              user.key, len(data["own"]), len(data["discover"]), force)
-    requests = wants.states(user.key, shelves.owned_index(user))
     if held_asks:
         # Books waiting for a keyholder, and the ones a keyholder said no to,
         # for a client that asked for them; their states are the ones

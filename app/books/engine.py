@@ -458,12 +458,15 @@ class TitleIndex(defaultdict):
     Without them "Disney Princess" -- the head of five different books here --
     reads as a book in its own right, and a request for a sixth Disney Princess
     story was a match for all of them (2026-09-24). See `shares_only_a_prefix`.
+    `series_names` distinguishes a plain first-book title named for its series
+    from an ordinary shortened title with a longer catalogue subtitle.
     """
 
     def __init__(self) -> None:
         super().__init__(set)
         self.fulls: set[str] = set()
         self.tails: dict[str, set[str]] = defaultdict(set)
+        self.series_names: set[str] = set()
 
 
 def _head_and_tail(title: str) -> tuple[str, str] | None:
@@ -527,23 +530,31 @@ def _could_be_one_book(one: str, other: str) -> bool:
 def shares_only_a_prefix(key: str, title: str, index) -> bool:
     """Whether `title` met the index at `key` only through a prefix it shares.
 
-    True when `key` is `title`'s head, no book in the library is titled just
-    that, and every book filed under the head carries a different subtitle:
+    True when `key` is `title`'s head and every book filed under the head
+    carries a different named subtitle:
     "Disney Princess: Moana and Tales from Motunui" against "Disney Princess:
     Belle and the Rose Riddle". False for a match on the whole title, on the
-    subtitle, on a head that is itself somebody's whole title ("Death Has Joined
-    the Party" asked for, "Death Has Joined the Party: A LitRPG Dungeon Crawl"
-    on the shelf), and on a subtitle worded differently. An index built before
-    it carried the attributes cannot tell, and keeps the old answer.
+    subtitle, and on a descriptive subtitle worded differently. A plain book
+    named for its series can match a marketing subtitle, but not a named
+    sequel: "Guinea Pigs Online" is book one, not "Guinea Pigs Online: Furry
+    Towers". Other shortened titles still match, such as "Side Jobs: Stories
+    from the Dresden Files" against "Side Jobs" in The Dresden Files. An index
+    built before it carried the attributes keeps the old answer.
     """
-    split = _head_and_tail(title)
-    if split is None or split[0] != key:
-        return False
     fulls = getattr(index, "fulls", None)
     tails = getattr(index, "tails", None)
     if fulls is None or tails is None:
         return False
-    if key in fulls:
+    series_names = getattr(index, "series_names", ())
+    split = _head_and_tail(title)
+    if split is None:
+        return (key in series_names and key not in fulls and key in tails
+                and not any(_describes_rather_than_names(seen)
+                            for seen in tails[key]))
+    if split[0] != key:
+        return False
+    if key in fulls and (key not in series_names
+                        or _describes_rather_than_names(split[1])):
         return False
     return not any(_could_be_one_book(split[1], seen) for seen in tails.get(key, ()))
 
@@ -565,6 +576,8 @@ def _owned_index(library: list[dict]) -> tuple[set[str], dict[str, set[str]]]:
             by_title[key] |= authors
         if _norm(name):
             by_title.fulls.add(_norm(name))
+        if series := _norm(item.get("SeriesName") or ""):
+            by_title.series_names.add(series)
         split = _head_and_tail(name)
         if split is not None and split[0]:
             by_title.tails[split[0]].add(split[1])
