@@ -344,6 +344,10 @@ SEARCH_LIMIT = _int("SEARCH_LIMIT", 25)
 MOVIE_DAILY_CAP = _int("MOVIE_DAILY_CAP", 3)
 SERIES_DAILY_CAP = _int("SERIES_DAILY_CAP", 1)
 MUSIC_DAILY_CAP = _int("MUSIC_DAILY_CAP", 3)
+# BBC is counted per episode, not per programme: one "get the whole series" tap
+# is a bounded batch that spends at most this many, and the rest is left for
+# later days rather than quietly queuing a back catalogue.
+BBC_DAILY_CAP = _int("BBC_DAILY_CAP", 10)
 
 # --- Podcasts ---------------------------------------------------------------
 #
@@ -443,6 +447,12 @@ ARRIVED_VISIBLE_HOURS = _int("ARRIVED_VISIBLE_HOURS", 48)
 # Past this, "on its way" would be a lie. Not a failure state: the request
 # stays monitored and the acquisition tool's own sweep keeps retrying.
 STILL_LOOKING_AFTER_HOURS = _int("STILL_LOOKING_AFTER_HOURS", 24)
+
+# A BBC ask is a direct get_iplayer download through the tunnel, not a wait on
+# the hourly PVR sweep, so it should arrive in minutes; past this, "on its way"
+# would be a lie. Not a failure state: the broker's job keeps running and the
+# reconcile pass keeps reading its status.
+BBC_STILL_LOOKING_AFTER_HOURS = _int("BBC_STILL_LOOKING_AFTER_HOURS", 6)
 
 # Whether an ask past somebody's daily allowance waits for a keyholder to
 # approve, instead of being refused. Off unless a deployment says otherwise,
@@ -557,6 +567,13 @@ _SETTABLE = {
     "BUSKARR_URL": ("text", ""),
     "BUSKARR_API_KEY": ("text", ""),
 
+    # BBC iPlayer, through the bbc-ui broker (which drives get_iplayer over a UK
+    # tunnel). The URL is where nextup reaches bbc-ui on the Docker network. The
+    # token is the shared secret bbc-ui's request/status/cancel endpoints
+    # require, held write-only on the Backends page as the API keys are. An unset
+    # URL means this deployment does not offer BBC, the rule every backend keeps.
+    "BBC_UI_URL": ("text", ""),
+    "BBC_UI_TOKEN": ("text", ""),
 
     # Recommendation sources outside the library, all optional and all dormant
     # without their credential. Each is off by default because each needs an

@@ -88,9 +88,11 @@ check.equal(len(C.episodes_from_reply(reply(episodes=[EP, EP]))), 2,
             "two episodes out of a catalogue reply")
 check.equal(len(C.programmes_from_reply(reply(programmes=[PROG]))), 1,
             "one programme out of a catalogue reply")
-check.equal(len(C.results_from_reply(reply(results=[RESULT]))), 1,
+check.equal(len(C.parse_results(reply(results=[RESULT]),
+                                requested=["m002xv0m"])), 1,
             "one result out of a request reply")
-check.equal(len(C.statuses_from_reply(reply(statuses=[STATUS]))), 1,
+check.equal(len(C.parse_statuses(reply(statuses=[STATUS], not_found=[]),
+                                 requested=["m002xv0m"]).statuses), 1,
             "one status out of a status reply")
 
 # --- a skewed or malformed reply is a ContractError, not a KeyError --------
@@ -197,5 +199,126 @@ check.raises(C.ContractError,
              lambda: C.JobStatus.from_json({**STATUS, "state": "downloading",
                                             "unavailable": "drm"}),
              "a downloading status carrying a reason is refused")
+
+# --- ContractError is not a ValueError (so broad excepts don't eat it) ------
+
+check.that(not issubclass(C.ContractError, ValueError),
+           "ContractError does not subclass ValueError")
+check.that(issubclass(C.ContractError, Exception),
+           "ContractError is an Exception")
+
+# --- Health (the probe's one read) ------------------------------------------
+
+h = C.Health.from_json(reply(ok=True, tunnel_ok=False))
+check.that(h.ok and not h.tunnel_ok, "health parses ok and tunnel_ok")
+check.raises(C.ContractError,
+             lambda: C.Health.from_json({"ok": True, "tunnel_ok": True}),
+             "health with no schema version is a skew, not healthy")
+check.raises(C.ContractError,
+             lambda: C.Health.from_json(reply(ok="yes", tunnel_ok=True)),
+             "health ok must be a bool")
+
+# --- request_body: one entry per pid, each with its own key -----------------
+
+body = C.request_body([("m1", "m1:k1", C.Reason.USER_REQUEST),
+                       ("m2", "m2:k2", C.Reason.RECONCILE)])
+check.equal(body["schema_version"], C.SCHEMA_VERSION,
+            "request body carries the version")
+check.equal([r["pid"] for r in body["requests"]], ["m1", "m2"],
+            "one entry per pid")
+check.equal(body["requests"][0]["attempt_key"], "m1:k1",
+            "each pid keeps its own key")
+check.equal(body["requests"][1]["reason"], "reconcile",
+            "each pid keeps its own reason")
+check.raises(C.ContractError, lambda: C.request_body([]),
+             "an empty request batch is refused")
+check.raises(C.ContractError,
+             lambda: C.request_body([("", "k", C.Reason.USER_REQUEST)]),
+             "a blank pid in a request is refused")
+check.raises(C.ContractError,
+             lambda: C.request_body([("m1", "", C.Reason.USER_REQUEST)]),
+             "a blank attempt key in a request is refused")
+check.raises(C.ContractError,
+             lambda: C.request_body([("m1", "k1", C.Reason.USER_REQUEST),
+                                     ("m1", "k2", C.Reason.USER_REQUEST)]),
+             "the same pid twice in one request is refused")
+check.raises(C.ContractError,
+             lambda: C.request_body([("m1", "k1", "user_request")]),
+             "a reason that is not a Reason is refused")
+
+# --- parse_statuses: a strict partition against the asked-about pids ---------
+
+part = C.parse_statuses(reply(statuses=[STATUS], not_found=["m2"]),
+                        requested=["m002xv0m", "m2", "m3"])
+check.equal(set(part.statuses), {"m002xv0m"}, "known statuses by pid")
+check.equal(part.not_found, frozenset({"m2"}), "explicit not_found")
+check.equal(part.unanswered, frozenset({"m3"}),
+            "a pid in neither list is unanswered")
+check.that(part.unanswered != part.not_found,
+           "unanswered and not_found are distinct")
+
+check.raises(C.ContractError,
+             lambda: C.parse_statuses(
+                 reply(statuses=[STATUS, STATUS], not_found=[]),
+                 requested=["m002xv0m"]),
+             "a duplicate status is refused")
+check.raises(C.ContractError,
+             lambda: C.parse_statuses(
+                 reply(statuses=[STATUS], not_found=["m002xv0m"]),
+                 requested=["m002xv0m"]),
+             "a pid in both statuses and not_found is refused")
+check.raises(C.ContractError,
+             lambda: C.parse_statuses(reply(statuses=[STATUS], not_found=[]),
+                                      requested=["other"]),
+             "a status for a pid not asked about is refused")
+check.raises(C.ContractError,
+             lambda: C.parse_statuses(reply(statuses=[], not_found=["m2", "m2"]),
+                                      requested=["m2"]),
+             "a duplicate not_found is refused")
+check.raises(C.ContractError,
+             lambda: C.parse_statuses(reply(statuses=[], not_found=[""]),
+                                      requested=["m2"]),
+             "a blank not_found pid is refused")
+check.raises(C.ContractError,
+             lambda: C.parse_statuses(reply(statuses=[], not_found="m2"),
+                                      requested=["m2"]),
+             "not_found that is not a list is refused")
+
+# --- parse_results: a request reply must cover exactly the batch -------------
+
+results = C.parse_results(reply(results=[RESULT]), requested=["m002xv0m"])
+check.equal(set(results), {"m002xv0m"}, "results keyed by pid")
+check.raises(C.ContractError,
+             lambda: C.parse_results(reply(results=[]), requested=["m002xv0m"]),
+             "a request reply that drops a requested pid is refused")
+check.raises(C.ContractError,
+             lambda: C.parse_results(reply(results=[RESULT, RESULT]),
+                                     requested=["m002xv0m"]),
+             "a duplicate result is refused")
+check.raises(C.ContractError,
+             lambda: C.parse_results(reply(results=[RESULT]), requested=["other"]),
+             "a result for a pid not requested is refused")
+check.raises(C.ContractError,
+             lambda: C.parse_results(reply(results="x"), requested=["m002xv0m"]),
+             "results that are not a list are refused")
+
+# --- parse_cancelled: a subset of what was asked, nothing unsolicited --------
+
+cancelled = C.parse_cancelled(reply(cancelled=["m1", "m2"]),
+                              requested=["m1", "m2", "m3"])
+check.equal(cancelled, frozenset({"m1", "m2"}), "cancelled is the dropped subset")
+check.raises(C.ContractError,
+             lambda: C.parse_cancelled(reply(cancelled=["x"]), requested=["m1"]),
+             "cancelling a pid not asked about is refused")
+check.raises(C.ContractError,
+             lambda: C.parse_cancelled(reply(cancelled=["m1", "m1"]),
+                                       requested=["m1"]),
+             "a duplicate cancelled is refused")
+check.raises(C.ContractError,
+             lambda: C.parse_cancelled(reply(cancelled=[""]), requested=["m1"]),
+             "a blank cancelled pid is refused")
+check.raises(C.ContractError,
+             lambda: C.parse_cancelled(reply(cancelled="m1"), requested=["m1"]),
+             "cancelled that is not a list is refused")
 
 raise SystemExit(check.report())

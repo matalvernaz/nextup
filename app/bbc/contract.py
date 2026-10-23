@@ -23,15 +23,18 @@ from dataclasses import dataclass
 SCHEMA_VERSION = 1
 
 
-class ContractError(ValueError):
+class ContractError(Exception):
     """A bbc-ui reply could not be read as this contract.
 
-    Its own type so the client can tell "bbc-ui answered something I cannot
-    read" -- a deploy skew, an outage to log loudly and, on a read path, to
-    treat as "state unknown" rather than failure -- from an ordinary per-item
-    outcome ("this episode is unavailable") carried inside a perfectly valid
-    reply. The read paths in wants.py lean on that distinction: a ContractError
-    must never refund a request or trigger a re-download.
+    Subclasses Exception rather than ValueError on purpose: the client catches
+    this explicitly and re-raises it as an outage, and a broad `except
+    ValueError` around a parse elsewhere must not swallow it. Its own type so the
+    client can tell "bbc-ui answered something I cannot read" -- a deploy skew,
+    an outage to log loudly and, on a read path, to treat as "state unknown"
+    rather than failure -- from an ordinary per-item outcome ("this episode is
+    unavailable") carried inside a perfectly valid reply. The read paths lean on
+    that distinction: a ContractError must never refund a request or trigger a
+    re-download.
     """
 
 
@@ -351,6 +354,25 @@ class JobStatus:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class Health:
+    """bbc-ui's liveness, the one thing the probe reads.
+
+    `ok` is bbc-ui itself answering; `tunnel_ok` is whether it can currently
+    reach iPlayer through the UK tunnel, which bbc-ui caches on its side so the
+    probe is one cheap Docker-network call, not a tunnel round trip per status
+    rebuild. A reply whose version this nextup does not share is a skew, and the
+    probe treats a skew as not healthy rather than trusting a body it cannot read.
+    """
+    ok: bool
+    tunnel_ok: bool
+
+    @classmethod
+    def from_json(cls, d: object) -> "Health":
+        d = check_version(d)
+        return cls(ok=_bool(d, "ok"), tunnel_ok=_bool(d, "tunnel_ok"))
+
+
 def check_version(d: object) -> dict:
     """Return a version-checked reply body, or raise ContractError.
 
@@ -387,11 +409,141 @@ def programmes_from_reply(d: object) -> list[Programme]:
     return [Programme.from_json(row) for row in _rows(d, "programmes")]
 
 
-def results_from_reply(d: object) -> list[RequestResult]:
-    """Per-pid outcomes out of a version-checked request reply."""
-    return [RequestResult.from_json(row) for row in _rows(d, "results")]
+def parse_results(d: object, requested) -> dict[str, RequestResult]:
+    """Per-pid outcomes, checked to cover exactly the pids that were requested.
+
+    A request reply must answer every pid it was sent -- bbc-ui acted on each --
+    so a missing, duplicate or unsolicited result is a ContractError. The client
+    maps that to BbcAmbiguous: a reply that does not cleanly cover the batch
+    leaves some intents with no outcome, which must reconcile against status
+    rather than read as accepted or refused.
+    """
+    want = set(requested)
+    body = check_version(d)
+    rows = body.get("results")
+    if not isinstance(rows, list):
+        raise ContractError("'results' is not a list")
+    results: dict[str, RequestResult] = {}
+    for row in rows:
+        result = RequestResult.from_json(row)
+        if result.pid in results:
+            raise ContractError(f"duplicate result for {result.pid!r}")
+        if result.pid not in want:
+            raise ContractError(f"result for a pid not requested: {result.pid!r}")
+        results[result.pid] = result
+    missing = want - set(results)
+    if missing:
+        raise ContractError(
+            f"request reply did not cover {len(missing)} requested pid(s): "
+            f"{', '.join(sorted(missing))}")
+    return results
 
 
-def statuses_from_reply(d: object) -> list[JobStatus]:
-    """Per-pid job states out of a version-checked status reply."""
-    return [JobStatus.from_json(row) for row in _rows(d, "statuses")]
+def parse_cancelled(d: object, requested) -> frozenset[str]:
+    """The pids bbc-ui confirms it dropped this household's request claim on.
+
+    A subset of what was asked -- a pid with no claim to drop may simply be
+    absent -- never unsolicited, never a duplicate. A skewed or malformed
+    acknowledgement is a ContractError, which cancel() maps to BbcAmbiguous so
+    the wants path never drops a claim on the strength of a reply it could not
+    read.
+    """
+    want = set(requested)
+    body = check_version(d)
+    rows = body.get("cancelled")
+    if not isinstance(rows, list):
+        raise ContractError("'cancelled' is not a list")
+    cancelled: set[str] = set()
+    for pid in rows:
+        if not isinstance(pid, str) or not pid.strip():
+            raise ContractError("'cancelled' has a blank or non-string pid")
+        if pid in cancelled:
+            raise ContractError(f"duplicate cancelled {pid!r}")
+        if pid not in want:
+            raise ContractError(f"cancelled a pid not asked about: {pid!r}")
+        cancelled.add(pid)
+    return frozenset(cancelled)
+
+
+def request_body(items) -> dict:
+    """The POST /api/request body: one entry per pid, each with its own key.
+
+    A batch cannot share one attempt key -- a key identifies the intent for a
+    single item, so two pids under one key could not be told apart when a
+    response is lost. `items` is an iterable of (pid, attempt_key, reason).
+    Rejects an empty batch, a blank pid or key, a non-Reason, and a pid that
+    appears twice (which would be two intents for one download).
+    """
+    requests = []
+    seen: set[str] = set()
+    for pid, attempt_key, reason in items:
+        if not isinstance(pid, str) or not pid.strip():
+            raise ContractError("a request item has a blank pid")
+        if not isinstance(attempt_key, str) or not attempt_key.strip():
+            raise ContractError(f"request item {pid!r} has a blank attempt_key")
+        if not isinstance(reason, Reason):
+            raise ContractError(f"request item {pid!r} reason is not a Reason")
+        if pid in seen:
+            raise ContractError(f"pid {pid!r} appears twice in one request")
+        seen.add(pid)
+        requests.append({"pid": pid, "attempt_key": attempt_key,
+                         "reason": reason.value})
+    if not requests:
+        raise ContractError("a request body must name at least one pid")
+    return {"schema_version": SCHEMA_VERSION, "requests": requests}
+
+
+@dataclass(frozen=True, slots=True)
+class StatusPartition:
+    """A status reply checked against the pids that were asked about.
+
+    `statuses` is what bbc-ui knows, by pid. `not_found` is what it EXPLICITLY
+    has no record of -- the only set a caller may act on by asking again.
+    `unanswered` is asked-about pids in neither, which means a truncated or
+    partial reply: the caller holds those as "unknown" and must never re-POST
+    them, because "no record" is the one thing that re-triggers a download. The
+    three are deliberately different types so the no-record set cannot be
+    mistaken for the unknown set.
+    """
+    statuses: dict[str, JobStatus]
+    not_found: frozenset[str]
+    unanswered: frozenset[str]
+
+
+def parse_statuses(d: object, requested) -> StatusPartition:
+    """Split a status reply into known / not-found / unanswered, strictly.
+
+    Everything is checked against `requested`: a duplicate pid, a pid in both
+    `statuses` and `not_found`, and a pid that was not asked about are each a
+    ContractError, because a reply that does not partition the asked-about pids
+    cleanly cannot be reconciled against safely.
+    """
+    requested = set(requested)
+    body = check_version(d)
+    rows = body.get("statuses")
+    if not isinstance(rows, list):
+        raise ContractError("'statuses' is not a list")
+    statuses: dict[str, JobStatus] = {}
+    for row in rows:
+        status = JobStatus.from_json(row)
+        if status.pid in statuses:
+            raise ContractError(f"duplicate status for {status.pid!r}")
+        if status.pid not in requested:
+            raise ContractError(f"status for a pid not asked about: {status.pid!r}")
+        statuses[status.pid] = status
+    missing = body.get("not_found")
+    if not isinstance(missing, list):
+        raise ContractError("'not_found' is not a list")
+    not_found: set[str] = set()
+    for pid in missing:
+        if not isinstance(pid, str) or not pid.strip():
+            raise ContractError("'not_found' has a blank or non-string pid")
+        if pid in not_found:
+            raise ContractError(f"duplicate not_found {pid!r}")
+        if pid not in requested:
+            raise ContractError(f"not_found for a pid not asked about: {pid!r}")
+        if pid in statuses:
+            raise ContractError(f"{pid!r} is in both statuses and not_found")
+        not_found.add(pid)
+    unanswered = requested - set(statuses) - not_found
+    return StatusPartition(statuses, frozenset(not_found), frozenset(unanswered))
