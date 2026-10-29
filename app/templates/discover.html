@@ -144,16 +144,9 @@
 {% elif medium == 'podcast' %}
 {#
   Podcasts. Two shelves, the way books have two: what to listen to next from
-  the library, and what to add to it. The second has an Ask button apiece,
-  because there is a tool to ask.
+  the library, and what to add to it. The second has no button: a show is
+  added in EchoFin, through Jellyfin's own add, so the shelf says where.
 #}
-<p>
-  {% if not can_request %}Requests for podcasts are not enabled on this server.
-  {% elif allowance is none %}You have no daily limit.
-  {% else %}You can ask for {{ allowance }} more
-    podcast{{ '' if allowance == 1 else 's' }} today.{% endif %}
-</p>
-
 {% include "_refresh.html" %}
 
 <h3>Listen next, from the podcasts the library already has</h3>
@@ -182,7 +175,8 @@
 <p>Nothing to suggest yet. This is drawn from the genres and makers of the
   podcasts you listen to here, once there are some.</p>
 {% else %}
-<p>{{ catalogue | length }} podcast{{ '' if catalogue | length == 1 else 's' }}, best first.</p>
+<p>{{ catalogue | length }} podcast{{ '' if catalogue | length == 1 else 's' }}, best first.
+  Add one in EchoFin: Library, Podcasts, Add a Show.</p>
 <ol class="shelf">
   {% for r in catalogue %}
   <li{% if r.thumbnailUrl %} class="with-cover"{% endif %}>
@@ -195,23 +189,6 @@
     <ul class="why">
       {% for reason in r.reason %}<li>{{ reason }}</li>{% endfor %}
     </ul>
-    {% endif %}
-    {% if r.requested %}
-    <p class="asked">Already asked for.</p>
-    {% elif can_request %}
-    <form method="post" action="/want">
-      <input type="hidden" name="medium" value="podcast">
-      <input type="hidden" name="item_key" value="{{ r.itemKey }}">
-      <input type="hidden" name="unit" value="podcast">
-      <input type="hidden" name="title" value="{{ r.title }}">
-      <input type="hidden" name="artist" value="{{ r.artist | default('') }}">
-      <input type="hidden" name="imageUrl" value="{{ r.imageUrl | default('') }}">
-      <input type="hidden" name="overview" value="{{ r.overview | default('') }}">
-      <input type="hidden" name="feedUrl" value="{{ r.feedUrl | default('') }}">
-      <input type="hidden" name="itunesId" value="{{ r.itunesId | default('') }}">
-      {% include "_episodes_choice.html" %}
-      <button type="submit">Ask for {{ r.title }}</button>
-    </form>
     {% endif %}
     </div>
   </li>

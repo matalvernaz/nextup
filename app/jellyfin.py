@@ -481,31 +481,10 @@ def podcasts_owned() -> list[dict]:
     """Every podcast in the podcast libraries, with the ids the fork wrote on it.
 
     Raises `JellyfinUnavailable` rather than answering empty, for the reason
-    `_items` does: an empty index reads every podcast as askable and every
-    request as not yet arrived.
+    `_items` does: an empty index would offer every podcast the library holds
+    as one to add.
     """
     return _items("podcast", "Podcast", fields="ProviderIds")
-
-
-def podcast_episode_count(item_id: str) -> int | None:
-    """How many episodes one podcast holds, or None when Jellyfin could not say.
-
-    Asked per podcast, as episodes are per series: the fork answers no child
-    count on a folder, and the whole podcast library is thousands of rows to
-    answer a question about one.
-    """
-    try:
-        with _client() as c:
-            resp = c.get("/Items", params={
-                "parentId": item_id, "includeItemTypes": "PodcastEpisode",
-                "recursive": "true", "limit": 0})
-            resp.raise_for_status()
-            total = resp.json().get("TotalRecordCount")
-    except (httpx.HTTPError, ValueError) as exc:
-        log.warning("podcast episode count failed id=%s (%s)", item_id, exc)
-        return None
-    return int(total) if isinstance(total, int) else None
-
 
 
 def item_with_path(item_id: str, user_id: str) -> dict | None:

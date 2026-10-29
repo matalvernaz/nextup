@@ -52,12 +52,6 @@ services:
       BUSKARR_URL: "http://buskarr:8000"
       BUSKARR_API_KEY: "${BUSKARR_API_KEY}"
 
-      # Podcasts. The Jellyfin fork fetches episodes itself into its Podcasts
-      # library, so there is no backend address to give. Nobody is given a
-      # default for how much of a podcast to fetch until the accounts page has
-      # counted the beta's answers.
-      PODCAST_EPISODES_DEFAULT: ""
-
       # Books, moved here when the audiobook service was merged in. The
       # library ids are stated rather than discovered because there are two of
       # them and only some of what is under a "books" collection type on this

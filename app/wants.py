@@ -7,11 +7,8 @@ quietly skips half of it.
 """
 import time
 
-from . import (artwork, buskarr, config, held, jellyfin, logs, media, podcasts,
-               podfetch, radarr, seasons, sonarr, store)
-# Under another name: three functions here already take an `episodes`
-# argument, the per-series episode counts.
-from . import episodes as episode_choice
+from . import (artwork, buskarr, config, held, jellyfin, logs, media, radarr,
+               seasons, sonarr, store)
 from .books import adapter as books
 
 log = logs.get("wants")
@@ -25,13 +22,6 @@ STILL_LOOKING = "still_looking"
 #: It is in the library. A whole-series request has every currently aired
 #: episode there; future episodes remain Sonarr's ongoing responsibility.
 IN_LIBRARY = "in_library"
-
-#: Why a podcast cannot be asked for until the person has said how much of it
-#: they want. Nothing is preselected for them: the beta chooses, and the
-#: answers are counted on the accounts page.
-NO_EPISODES_CHOICE = ("Choose how much of the podcast to fetch first: every "
-                      "episode, the newest few, or only new ones as they come "
-                      "out.")
 
 DAY_SECONDS = 24 * 3600
 
@@ -221,15 +211,12 @@ def search(query: str, medium: str, unit: str = "",
         return sonarr.search(query, limit, media.owned().series_tvdb)
     if medium == media.BOOK:
         return books.search_hits(user, query, unit or "book")
-    if medium == media.PODCAST:
-        return podcasts.search(query, user)
     return buskarr.search(query, unit or "track", limit, sources)
 
 
 def want(user: jellyfin.User, medium: str, item_key: str, unit: str = "",
          hit: dict | None = None, choice: seasons.Seasons | None = None,
          remember: bool = False,
-         episodes_choice: episode_choice.Episodes | None = None,
          imported: bool = False, over_limit: bool = False,
          approved: bool = False) -> tuple[str, str]:
     """Ask for one thing. Returns (state, message). Raises Denied if refused.
@@ -246,8 +233,7 @@ def want(user: jellyfin.User, medium: str, item_key: str, unit: str = "",
     no allowance is checked and nothing is charged.
 
     `choice` is which seasons of a series to ask for this once, and `remember`
-    keeps it as this account's usual choice as well. `episodes_choice` is the
-    same question for a podcast: how much of it to fetch. That is the answer to the
+    keeps it as this account's usual choice as well. That is the answer to the
     question a client puts before somebody's first series, kept before the ask
     is tried so a refused ask (a spent allowance) does not lose it.
 
@@ -283,18 +269,6 @@ def want(user: jellyfin.User, medium: str, item_key: str, unit: str = "",
             log.info("seasons remembered user=%s choice=%s",
                      user.key, choice.encode())
         choice = choice or usual_seasons(user)
-    elif medium == media.PODCAST:
-        if episodes_choice is not None and remember:
-            store.put_user_setting(user.key, episode_choice.SETTING,
-                                   episodes_choice.encode())
-            log.info("episodes remembered user=%s choice=%s",
-                     user.key, episodes_choice.encode())
-        choice = episodes_choice or usual_episodes(user)
-        if choice is None:
-            # Refused rather than guessed. A back catalogue is hundreds of
-            # files and "only new ones" is nothing today; neither is a default
-            # this service should pick for somebody.
-            raise Denied(NO_EPISODES_CHOICE)
     else:
         choice = None
 
@@ -326,16 +300,6 @@ def usual_seasons(user: jellyfin.User) -> seasons.Seasons | None:
     """
     own = seasons.decode(store.user_setting(user.key, seasons.SETTING))
     return own or seasons.decode(config.SERIES_SEASONS_DEFAULT)
-
-
-def usual_episodes(user: jellyfin.User) -> episode_choice.Episodes | None:
-    """How much of a podcast this account gets when an ask says nothing.
-
-    Their own choice, then the server's default, then None, which means the
-    ask is refused until they choose.
-    """
-    own = episode_choice.decode(store.user_setting(user.key, episode_choice.SETTING))
-    return own or episode_choice.decode(config.PODCAST_EPISODES_DEFAULT)
 
 
 def _admit(user: jellyfin.User, found: media.Medium, medium: str,
@@ -448,8 +412,6 @@ def _admit(user: jellyfin.User, found: media.Medium, medium: str,
         # and blurb; music has only what the search hit carried, which came
         # from this server in the first place.
         image_url=image_url, overview=overview,
-        episodes=(choice.encode()
-                  if medium == media.PODCAST and choice is not None else ""),
         allowance=pool,
         # Decided on the final price: a household repeat costs nothing, and
         # its backend id is somebody else's add, which this account must not
@@ -463,7 +425,6 @@ def _admit(user: jellyfin.User, found: media.Medium, medium: str,
         row["year"], 0, backend_id, seasons=result.seasons,
         image_url=row["image_url"] or image_url,
         overview=row["overview"] or overview,
-        episodes=row["choice"] if medium == media.PODCAST else "",
         allowance=store.APPROVED_POOL), except_user_key=user.key)
     log.info("want accepted user=%s key=%s backend_id=%s message=%r%s",
              user.key, item_key, result.backend_id, result.message,
@@ -481,13 +442,6 @@ def _owned_now(medium: str, item_key: str, hit: dict) -> bool:
         index = media.owned()
         owned = index.movie_tmdb if medium == media.MOVIE else index.series_tvdb
         return _provider_id(item_key) in owned
-    if medium == media.PODCAST:
-        try:
-            candidates = podcasts.owned()
-        except jellyfin.JellyfinUnavailable:
-            candidates = []
-        return podcasts.match_hit(
-            candidates, {**hit, "itemKey": item_key}) is not None
     return False
 
 
@@ -499,7 +453,7 @@ def _held_detail(medium: str, unit: str, choice) -> str:
         return "a series"
     if medium == media.MUSIC:
         return f"an {unit}" if unit[:1] in "aeiou" else f"a {unit}"
-    return {media.MOVIE: "a film", media.PODCAST: "a podcast"}.get(medium, "")
+    return {media.MOVIE: "a film"}.get(medium, "")
 
 
 def _still_held(row, medium: str) -> bool:
@@ -525,8 +479,6 @@ def _still_held(row, medium: str) -> bool:
             return True
         return provider_id in (index.movie_tmdb if medium == media.MOVIE
                                else index.series_tvdb)
-    if medium == media.PODCAST:
-        return podcasts.still_held(row)
     # Music is buskarr's to answer: it placed the file and holds the exact
     # identity it placed it under, which is the only handle on it there is.
     reported = buskarr.state(row["backend_id"])
@@ -543,11 +495,6 @@ def _add(medium: str, unit: str, item_key: str, hit: dict,
     if medium == media.SERIES:
         return sonarr.add(_provider_id(item_key), hit.get("title", ""),
                           choice=choice)
-    if medium == media.PODCAST:
-        # The feed is the whole identity; the ledger key is only a digest of
-        # it, so the address itself has to travel with the ask.
-        return podfetch.add(str(hit.get("feedUrl") or ""), hit.get("title", ""),
-                            choice, organize=podfetch.organize_of(hit.get("organize")))
     # The name, not the ledger key: buskarr renders `requested_by` in its own
     # queue table for a person to read, and an account id says nothing there.
     return buskarr.add(unit, hit, user.name, bulk=bulk)
@@ -645,16 +592,13 @@ def _ledger_states(user: jellyfin.User, medium: str | None = None) -> list[dict]
     out = []
     for row in rows:
         # Asked for once and passed to both callers. Deriving the state and
-        # describing it are two questions about the same answer. A podcast row
-        # asks podfetch, and that ask is also what tells Jellyfin to look.
+        # describing it are two questions about the same answer.
         reported = None
         if row["fulfilled_at"] is None:
             if row["medium"] == media.MUSIC:
                 reported = (buskarr.state(row["backend_id"])
                             if music_states is None
                             else music_states.get(row["backend_id"]))
-            elif row["medium"] == media.PODCAST:
-                reported = podcasts.progress(row)
         state = _state(
             row, row["medium"], index, reported, episodes, series_progress)
         if state == IN_LIBRARY and row["fulfilled_at"] is None:
@@ -712,8 +656,6 @@ def _arrived(row, medium: str, index: jellyfin.Owned,
     key = row["item_key"]
     if medium == media.MOVIE:
         return bool(radarr.arrived({key}, index.movie_tmdb))
-    if medium == media.PODCAST:
-        return podcasts.arrived(row)
     if medium == media.SERIES:
         if episodes is None:
             provider_id = key.split(":", 1)[1] if ":" in key else ""
@@ -785,17 +727,6 @@ def _described(
             described["tracksInLibrary"] = reported.get("have")
             described["tracksTotal"] = reported.get("total")
             described["detail"] = reported.get("message")
-    elif row["medium"] == media.PODCAST:
-        # How much was asked for, so the list can say it. Absent on a row
-        # from before the choice existed.
-        asked = episode_choice.decode(
-            row["episodes"] if "episodes" in row.keys() else "")
-        if asked is not None:
-            described["episodes"] = asked.as_json()
-        if state != IN_LIBRARY:
-            sentence = podcasts.describe(reported)
-            if sentence:
-                described["detail"] = sentence
     return described
 
 
@@ -860,6 +791,4 @@ def _stop(medium: str, row) -> bool:
         return radarr.cancel(backend_id)
     if medium == media.SERIES:
         return sonarr.cancel(backend_id)
-    if medium == media.PODCAST:
-        return podfetch.cancel(backend_id)
     return buskarr.cancel(backend_id)

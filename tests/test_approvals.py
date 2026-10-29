@@ -24,9 +24,8 @@ harness.setup(
     PAGES_URL="https://nextup.example",
 )
 
-from app import (approvals, arr, buskarr, config, episodes, held,  # noqa: E402
-                 jellyfin, media, podcasts, podfetch, radarr, seasons, sonarr,
-                 store, wants)
+from app import (approvals, arr, buskarr, config, held,  # noqa: E402
+                 jellyfin, media, radarr, seasons, sonarr, store, wants)
 
 check = harness.Check("approvals")
 store.init()
@@ -56,8 +55,6 @@ REGISTRY = {
     media.MOVIE: media.Medium(media.MOVIE, "Films", ("movie",), 2, ("lib-movies",)),
     media.SERIES: media.Medium(media.SERIES, "Series", ("series",), 1, ("lib-tv",)),
     media.MUSIC: media.Medium(media.MUSIC, "Music", buskarr.UNITS, 3, ("lib-music",)),
-    media.PODCAST: media.Medium(media.PODCAST, "Podcasts", ("podcast",), 1,
-                                ("lib-podcasts",)),
 }
 media.available = lambda: dict(REGISTRY)
 media.get = lambda medium: REGISTRY.get(medium)
@@ -74,9 +71,6 @@ media.episode_counts = lambda provider_ids: {}
 sonarr.acquisition_progress = lambda backend_ids: {}
 buskarr.state = lambda ref: None
 buskarr.states = lambda refs: {}
-podcasts.owned = lambda: []
-podcasts.progress = lambda row: None
-podcasts.arrived = lambda row: False
 
 added: list[tuple] = []
 #: What the next add answers, so a test can make Radarr refuse or say it
@@ -107,20 +101,8 @@ sonarr.add = fake_sonarr_add
 buskarr.add = lambda unit, hit, by, bulk=False: (
     added.append(("music", unit, hit.get("title"))) or
     arr.AddResult(True, "Sent to buskarr.", f"job:{hit.get('ref')}", hit.get("title", "")))
-podcast_choices: list = []
-podcast_organize: list = []
-
-
-def fake_podfetch_add(feed_url, title="", choice=None, organize=True):
-    added.append(("podcast", feed_url, title))
-    podcast_choices.append(choice)
-    podcast_organize.append(organize)
-    return arr.AddResult(True, "Sent to the fetcher.", "p1", title)
-
-
-podfetch.add = fake_podfetch_add
 cancelled: list = []
-radarr.cancel = sonarr.cancel = buskarr.cancel = podfetch.cancel = (
+radarr.cancel = sonarr.cancel = buskarr.cancel = (
     lambda backend_id: cancelled.append(backend_id) or True)
 
 notices: list[tuple] = []
@@ -381,30 +363,6 @@ check.equal(state, held.WAITING_FOR_APPROVAL,
 approvals.approve(MATT, media.MUSIC, "bk:artist:2")
 check.equal(added[-1], ("music", "artist", "A Band"),
             "and is handed to buskarr with the hit it was asked with")
-
-# --- a podcast keeps how much of it was asked for ---------------------------
-
-choice = episodes.Episodes(episodes.LATEST, 3)
-wants.want(KID, media.PODCAST, "pod:a", "podcast",
-           {"title": "Pod A", "feedUrl": "https://feeds.example/a"},
-           episodes_choice=choice, over_limit=True)
-state, _ = wants.want(KID, media.PODCAST, "pod:b", "podcast",
-                      {"title": "Pod B", "feedUrl": "https://feeds.example/b"},
-                      episodes_choice=choice, over_limit=True)
-check.equal(state, held.WAITING_FOR_APPROVAL, "a second podcast waits")
-approvals.approve(MATT, media.PODCAST, "pod:b")
-check.equal((added[-1], podcast_choices[-1]),
-            (("podcast", "https://feeds.example/b", "Pod B"), choice),
-            "approved, it fetches the feed it was asked for, as much as asked")
-check.equal(podcast_organize[-1], True, "and sorts it into folders, as an ask that did not say otherwise is")
-
-state, _ = wants.want(KID, media.PODCAST, "pod:c", "podcast",
-                      {"title": "Pod C", "feedUrl": "https://feeds.example/c", "organize": False},
-                      episodes_choice=choice, over_limit=True)
-check.equal(state, held.WAITING_FOR_APPROVAL, "a podcast asked for unsorted waits too")
-approvals.approve(MATT, media.PODCAST, "pod:c")
-check.equal((added[-1][1], podcast_organize[-1]), ("https://feeds.example/c", False),
-            "and approved, it is left unsorted, as asked")
 
 # --- an imported list is never held -----------------------------------------
 

@@ -1,6 +1,5 @@
 """The first search can choose a book series without an intermediate page."""
 import re
-import time
 from html import unescape
 
 import harness
@@ -15,7 +14,7 @@ harness.setup(RADARR_URL="http://radarr.invalid", RADARR_API_KEY="k",
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app import (backends, buskarr, imports, jellyfin, main, media,  # noqa: E402
-                 podfetch, podcasts, radarr, sessions, sonarr, store, wants)
+                 radarr, sessions, sonarr, store, wants)
 from app.books import adapter, series  # noqa: E402
 
 check = harness.Check("web search")
@@ -25,7 +24,6 @@ jellyfin.credential_rejected = lambda force=True: False
 jellyfin.library_ids = lambda medium: ["lib-" + medium]
 backends.status = lambda medium, force=False: backends.Status(
     medium, medium, configured=True, reachable=True)
-podfetch._presence = (True, time.monotonic())
 media.owned = lambda *args, **kwargs: jellyfin.Owned()
 wants.states = lambda user, **kwargs: []
 media.forget()
@@ -34,7 +32,6 @@ searches = []
 radarr.search = lambda query, *args: searches.append(("movie", "movie", query)) or []
 sonarr.search = lambda query, *args: searches.append(("series", "series", query)) or []
 buskarr.search = lambda query, unit, *args: searches.append(("music", unit, query)) or []
-podcasts.search = lambda query, user: searches.append(("podcast", "podcast", query)) or []
 adapter.book_search.search = lambda user, query: (
     searches.append(("book", "book", query)) or [])
 
@@ -70,8 +67,9 @@ form = search_form(first)
 options = {unescape(label): value for value, label in
            re.findall(r'<option value="([^"]+)"[^>]*>([^<]+)</option>', form)}
 check.equal(set(options), {"Films", "TV shows", "Songs", "Albums", "Artists",
-                           "Books", "Book series", "Podcasts"},
-            "every search type is offered before any search")
+                           "Books", "Book series"},
+            "every search type is offered before any search, and podcasts are "
+            "not one: a show is added in EchoFin")
 check.that('<label for="search_type">' in form
            and '<select id="search_type" name="search_type">' in form,
            "the picker has a native control and an associated label")
@@ -84,7 +82,7 @@ for label, medium, unit in [
         ("Book series", "book", "series"), ("Books", "book", "book"),
         ("TV shows", "series", "series"), ("Songs", "music", "track"),
         ("Albums", "music", "album"), ("Artists", "music", "artist"),
-        ("Films", "movie", "movie"), ("Podcasts", "podcast", "podcast")]:
+        ("Films", "movie", "movie")]:
     searches.clear()
     page = client.get("/", params={"search_type": options[label], "q": "archive"})
     check.equal(page.status_code, 200, f"{label} search renders")
@@ -115,6 +113,12 @@ for medium, unit in [("book", "series"), ("book", "book"),
     check.equal(searches, [(medium, unit, "archive")], "existing search URLs still work")
     check.equal(selected(old_link), [f"{medium}:{unit}"],
                 "existing URLs select their corresponding search type")
+
+searches.clear()
+client.get("/", params={"medium": "podcast", "unit": "podcast", "q": "archive"})
+check.equal(searches, [("movie", "movie", "archive")],
+            "an old podcast search link lands on the first search type, as any "
+            "medium the server does not offer does")
 
 searches.clear()
 client.get("/", params={"search_type": options["Books"], "medium": "music",

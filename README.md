@@ -61,8 +61,8 @@ only.
 
 ### Import a list
 
-`/import` takes a CSV file, or a pasted list, of films, series, music, books or
-podcasts and turns it into requests as it goes.
+`/import` takes a CSV file, or a pasted list, of films, series, music or books
+and turns it into requests as it goes.
 
 Each row is looked up in the same catalogue the search box uses, and an exact
 match is asked for there and then, one ordinary request each, against the same
@@ -243,10 +243,10 @@ arriving.
 | TV shows | series | Sonarr | the same |
 | Music | artist, album, track | buskarr | — |
 | Books | book, series | Listenarr | an Audible similarity graph and a local text model |
-| Podcasts | podcast | the Jellyfin fork itself | your listening, and Apple's catalogue for what to add |
+| Podcasts | none: a show is added in EchoFin, through the Jellyfin fork | — | your listening, and Apple's catalogue for what to add |
 
 One search box with a picker offering Films, TV shows, Songs, Albums, Artists,
-Books, Book series and Podcasts, limited to what this deployment supports.
+Books and Book series, limited to what this deployment supports.
 Choose any of them before the first search. Asking for a whole book series is
 the same control as asking for a music artist, with a different scope.
 

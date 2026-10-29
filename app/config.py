@@ -7,7 +7,7 @@ on any particular acquisition tool being present.
 """
 import os
 
-from . import episodes, seasons
+from . import seasons
 
 
 def _text(name: str, default: str = "") -> str:
@@ -331,25 +331,14 @@ SEARCH_LIMIT = _int("SEARCH_LIMIT", 25)
 MOVIE_DAILY_CAP = _int("MOVIE_DAILY_CAP", 3)
 SERIES_DAILY_CAP = _int("SERIES_DAILY_CAP", 1)
 MUSIC_DAILY_CAP = _int("MUSIC_DAILY_CAP", 3)
-PODCAST_DAILY_CAP = _int("PODCAST_DAILY_CAP", 3)
 
 # --- Podcasts ---------------------------------------------------------------
 #
-# The Jellyfin fork holds the podcasts library and fetches episodes itself;
-# Apple's podcast catalogue, which needs no key, answers searches and
-# suggestions. There is no separate backend to configure: podcasts are
-# offered once the fork's fetch task is seen in the server's task list.
-
-# How much of a podcast somebody gets when they have not chosen for
-# themselves: `all`, `new`, or `latest:<n>`. Empty means nobody is given one,
-# so each person is asked before their first podcast and the answers are
-# counted on the accounts page. Refused at start-up when it does not parse:
-# misread, it would quietly fetch a whole back catalogue or nothing.
-PODCAST_EPISODES_DEFAULT = _text("PODCAST_EPISODES_DEFAULT", "")
-if PODCAST_EPISODES_DEFAULT and episodes.decode(PODCAST_EPISODES_DEFAULT) is None:
-    raise ValueError(
-        f"PODCAST_EPISODES_DEFAULT={PODCAST_EPISODES_DEFAULT!r} is not a choice of "
-        "episodes; use all, new, or latest:<count>")
+# Recommended, never asked for: podcasts are added through the Jellyfin fork
+# (Matt, 2026-10-27). Apple's podcast catalogue, which needs no key, answers
+# the suggestions of shows the library does not hold.
+# PODCAST_DAILY_CAP and PODCAST_EPISODES_DEFAULT went with asking; a value
+# still set for either is ignored.
 
 # Which of Apple's storefronts answers searches. Podcasts are the same in all
 # of them but availability is per store; `us` is the largest.

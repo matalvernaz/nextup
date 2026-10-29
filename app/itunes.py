@@ -1,13 +1,13 @@
 """Apple's podcast catalogue, which needs no key.
 
-Two questions are asked of it: what podcasts a title might mean, for the
-search box, and what podcasts sit near the ones somebody already listens to,
-for the Discover shelf. Both answer with the feed address, which is the only
-identity a podcast really has -- the same feed is what the fork subscribes to
-and what the Jellyfin fork reads the podcast's own description from.
+One question is asked of it about podcasts: what sits near the ones somebody
+already listens to, for the Discover shelf. The answer carries the feed
+address, which is the only identity a podcast really has -- the same feed is
+what the Jellyfin fork follows and reads the podcast's own description from.
+(It is also asked about songs, for list imports: `songs_by_id`.)
 
-Never fatal. A catalogue that does not answer is a search that says so and a
-shelf with one section fewer, never a failed page.
+Never fatal. A catalogue that does not answer is a shelf with one section
+fewer, never a failed page.
 """
 import hashlib
 import re
@@ -103,24 +103,6 @@ def search(query: str, limit: int = SEARCH_LIMIT) -> list[dict]:
     hits = [hit for hit in (_hit(row) for row in rows) if hit]
     store.put_external(key, hits)
     return hits
-
-
-def lookup(itunes_id: str) -> dict | None:
-    """One podcast by Apple's id, as a search hit, or None."""
-    itunes_id = str(itunes_id or "").strip()
-    if not itunes_id.isdigit():
-        return None
-    key = f"itunes:lookup:{itunes_id}"
-    cached = store.get_external(key, CACHE_HOURS)
-    if cached is not None:
-        return cached or None
-    rows = _get(LOOKUP_URL, {"entity": "podcast", "id": itunes_id,
-                             "country": config.ITUNES_COUNTRY})
-    if rows is None:
-        return None
-    found = next((hit for hit in (_hit(row) for row in rows) if hit), None)
-    store.put_external(key, found or {})
-    return found
 
 
 #: Apple answers up to two hundred ids in one lookup; this stays under it.
@@ -255,9 +237,9 @@ def suggestions(genres: list[str], studios: list[str],
     first. Each of the top genres is searched by name -- Apple's search reads
     a genre word well enough to fill a page with that kind of show -- and
     every candidate is scored on how many of the listener's genres it shares,
-    with a bonus for the same maker. Owned podcasts and ones already asked for
-    are left out by feed key, and by title as well for a podcast that arrived
-    without its feed being known.
+    with a bonus for the same maker. Owned podcasts are left out by feed key,
+    and by title as well for a podcast that arrived without its feed being
+    known.
     """
     wanted = [g for g in genres if g and g.casefold() != EVERY_PODCAST_GENRE.casefold()]
     if not wanted:

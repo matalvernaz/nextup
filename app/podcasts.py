@@ -1,24 +1,27 @@
-"""The podcast medium: what the library holds, whether a request has arrived, and what to add next.
+"""The podcast medium: what the library holds, and what to add next.
+
+Podcasts are added through Jellyfin, never asked for here (Matt, 2026-10-27:
+"podcasts shouldn't go through nextup at all, they're a jellyfin feature").
+What stays is recommending them: the owned shelf, and suggestions of shows the
+library does not hold yet, which a listener adds in EchoFin.
 
 Three ways to identify one podcast, tried in order everywhere a match is made:
-the feed address (as the ledger key, a digest of it), Apple's catalogue id,
-and finally the title reduced to its letters. The first two are exact and the
-Jellyfin fork writes both onto a podcast it identified; the title is for a
-podcast that arrived before it was identified, or that no catalogue lists.
-
-Fetching is the fork's own work (see `podfetch`): it downloads into the
-folder it will read, so nothing here needs to tell it about new files.
+the feed address (as a key, a digest of it), Apple's catalogue id, and finally
+the title reduced to its letters. The first two are exact and the Jellyfin
+fork writes both onto a podcast it identified; the title is for a podcast that
+arrived before it was identified, or that no catalogue lists.
 """
 import threading
 import time
 from typing import NamedTuple
 
-from . import (config, episodes, itunes, jellyfin, logs, podcastfeed, podfetch,
-               recommendations, store)
+from . import config, itunes, jellyfin, logs, recommendations, store
 
 log = logs.get("podcasts")
 
-MEDIUM = podfetch.MEDIUM
+#: The medium's name everywhere: the recommendation block, the shelves, the
+#: library index.
+MEDIUM = "podcast"
 
 #: How long the list of owned podcasts is kept. The same lifetime as the film
 #: and series index, for the same reason: arrival can only be as fresh as this.
@@ -33,10 +36,6 @@ class OwnedPodcast(NamedTuple):
     feed_key: str
     itunes_id: str
     normalised: str
-
-
-class Unreadable(Exception):
-    """A pasted address did not yield a podcast feed. Carries a sentence to show."""
 
 
 # --- what the library holds -------------------------------------------------
@@ -118,126 +117,21 @@ def match_hit(candidates: list[OwnedPodcast], hit: dict) -> OwnedPodcast | None:
                  hit.get("title") or "")
 
 
-# --- search -----------------------------------------------------------------
-
-
-def search(query: str, user: jellyfin.User | None) -> list[dict]:
-    """Catalogue hits for some words, or the one podcast a pasted address is.
-
-    Owned podcasts are marked rather than dropped, as every other medium does;
-    ones this account has already asked for are marked too, because a podcast
-    on order looks exactly like one that could be asked for.
-    """
-    query = (query or "").strip()
-    if not query:
-        return []
-    if podcastfeed.looks_like_url(query):
-        try:
-            preview = podcastfeed.fetch(query)
-        except podcastfeed.Unreadable as exc:
-            raise Unreadable(str(exc)) from exc
-        hits = [hit_from_preview(preview)]
-    else:
-        hits = itunes.search(query)
-    return mark(hits, user)
-
-
-def hit_from_preview(preview: podcastfeed.FeedPreview) -> dict:
-    """A pasted feed as a search hit, so the page and the client treat it like any other."""
-    from . import artwork
-    hit = {
-        "itemKey": itunes.item_key(preview.url),
-        "medium": MEDIUM,
-        "unit": podfetch.UNIT,
-        "title": preview.title,
-        "year": str(preview.latest.year) if preview.latest else "",
-        "artist": preview.author,
-        "feedUrl": preview.url,
-        "itunesId": "",
-        "overview": preview.description,
-        **artwork.art(preview.image_url),
-    }
-    if preview.categories:
-        hit["genres"] = list(preview.categories)
-    if preview.episode_count:
-        hit["episodeCount"] = preview.episode_count
-    if preview.latest:
-        hit["latestEpisodeAt"] = preview.latest.isoformat()
-    return hit
-
-
 def mark(hits: list[dict], user: jellyfin.User | None) -> list[dict]:
-    """Owned and already-asked-for flags on a list of hits."""
+    """The owned flag on a list of hits.
+
+    Nothing is read about asking: a podcast is added through Jellyfin, and one
+    that has been is in the library, which is what this flag says.
+    """
     try:
         candidates = owned()
     except jellyfin.JellyfinUnavailable:
         candidates = []
-    asked = store.outstanding_keys(user.key, MEDIUM) if user is not None else set()
     out = []
     for hit in hits:
         found = match_hit(candidates, hit)
-        out.append({**hit, "owned": found is not None,
-                    "requested": hit.get("itemKey") in asked})
+        out.append({**hit, "owned": found is not None})
     return out
-
-
-# --- arrival -----------------------------------------------------------------
-
-
-def arrived(row) -> bool:
-    """Whether a request's podcast is in the library with at least one episode.
-
-    Unknown answers no. A podcast folder appears the moment the fork writes its
-    cover, before any episode; calling that arrived would close the request
-    with nothing to play. A Jellyfin that cannot be asked keeps the request
-    waiting, which costs one more look later and nothing else.
-    """
-    try:
-        candidates = owned()
-    except jellyfin.JellyfinUnavailable:
-        return False
-    found = match(candidates, feed_key=row["item_key"], title=row["title"])
-    if found is None:
-        return False
-    count = jellyfin.podcast_episode_count(found.id)
-    return bool(count and count > 0)
-
-
-def still_held(row) -> bool:
-    """Whether a fulfilled request's podcast is still in the library. Unknown counts as held."""
-    try:
-        candidates = owned()
-    except jellyfin.JellyfinUnavailable:
-        return True
-    return match(candidates, feed_key=row["item_key"], title=row["title"]) is not None
-
-
-def progress(row) -> dict | None:
-    """What the fork says about a request still on its way, or None."""
-    return podfetch.state(row["backend_id"])
-
-
-def describe(reported: dict | None) -> str:
-    """One sentence about how far a podcast has got, for the list of requests."""
-    if not reported:
-        return ""
-    downloaded, total = reported.get("downloaded", 0), reported.get("total", 0)
-    if reported.get("error"):
-        return f"Trouble fetching it: {reported['error']}"
-    if reported.get("paused"):
-        return "Not being followed any more."
-    if not reported.get("in_feed"):
-        return "Subscribed; the feed has not been read yet."
-    fetching = " Fetching now." if reported.get("downloading") else ""
-    if not total:
-        return "Subscribed; new episodes will be fetched as they come out." + fetching
-    if not downloaded:
-        return f"Subscribed; none of its {total} episodes fetched yet." + fetching
-    if downloaded >= total:
-        return (f"All {total} episode{'' if total == 1 else 's'} asked for "
-                "have been fetched.")
-    return (f"{downloaded} of {total} episode{'' if total == 1 else 's'} "
-            "fetched so far." + fetching)
 
 
 # --- what to add ----------------------------------------------------------------
@@ -285,7 +179,6 @@ def catalogue_shelf(user: jellyfin.User, force: bool = False) -> list[dict]:
     except jellyfin.JellyfinUnavailable:
         candidates = []
     exclude_keys = {c.feed_key for c in candidates if c.feed_key}
-    exclude_keys |= store.outstanding_item_keys(MEDIUM)
     rows = itunes.suggestions(ranked_genres, ranked_studios, exclude_keys,
                               {c.name for c in candidates},
                               config.PODCAST_RECOMMENDATION_LIMIT)

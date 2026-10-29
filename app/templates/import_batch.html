@@ -4,8 +4,7 @@
 
 {% set nouns = {'movie': ('film', 'films'), 'series': ('series', 'series'),
                 'album': ('album', 'albums'), 'track': ('track', 'tracks'),
-                'artist': ('artist', 'artists'), 'book': ('book', 'books'),
-                'podcast': ('podcast', 'podcasts')} %}
+                'artist': ('artist', 'artists'), 'book': ('book', 'books')} %}
 {% set noun = nouns.get(batch.unit, (batch.unit, batch.unit ~ 's')) %}
 
 <h2>{{ batch.filename or 'Pasted list' }}</h2>

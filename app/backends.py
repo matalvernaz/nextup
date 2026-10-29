@@ -22,7 +22,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from . import buskarr, config, listenarr, logs, podfetch, radarr, sonarr
+from . import buskarr, config, listenarr, logs, radarr, sonarr
 
 log = logs.get("backends")
 
@@ -135,19 +135,7 @@ def _listenarr() -> Status:
     return Status("book", "listenarr", True, ok, detail)
 
 
-def _podfetch() -> Status:
-    if not config.JELLYFIN_URL:
-        return Status("podcast", "jellyfin", False, None,
-                      "not configured: JELLYFIN_URL unset")
-    # The fork fetches podcasts itself. Its fetch task in the server's task
-    # list is what tells it from a stock Jellyfin, which has no podcasts.
-    if not podfetch.present(force=True):
-        return Status("podcast", "jellyfin", False, None,
-                      "this Jellyfin has no podcast fetcher (not the fork, or unreachable)")
-    return Status("podcast", "jellyfin", True, True, "")
-
-
-_PROBES = (_radarr, _sonarr, _buskarr, _listenarr, _podfetch)
+_PROBES = (_radarr, _sonarr, _buskarr, _listenarr)
 
 _cache: tuple[Status, ...] | None = None
 _cached_at = 0.0
