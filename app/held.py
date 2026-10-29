@@ -17,7 +17,7 @@ import time
 
 import httpx
 
-from . import artwork, config, episodes, jellyfin, logs, media, seasons, store
+from . import artwork, config, jellyfin, logs, media, seasons, store
 
 log = logs.get("held")
 
@@ -231,10 +231,6 @@ def describe(row) -> dict:
         asked = seasons.decode(row["choice"])
         if asked is not None:
             out["seasons"] = asked.as_json()
-    elif row["medium"] == media.PODCAST:
-        asked = episodes.decode(row["choice"])
-        if asked is not None:
-            out["episodes"] = asked.as_json()
     elif row["medium"] == media.BOOK and row["unit"] == "series":
         # The books of a series that did not fit, waiting as one ask.
         count = hit_of(row).get("count")

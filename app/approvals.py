@@ -11,7 +11,7 @@ Declining keeps the ask on the asker's list with the answer, for as long as an
 arrival stays there, so a no is something they hear rather than a request
 that silently vanished.
 """
-from . import episodes, held, jellyfin, logs, media, seasons, store, wants
+from . import held, jellyfin, logs, media, seasons, store, wants
 from .books import adapter as books
 
 log = logs.get("approvals")
@@ -116,10 +116,6 @@ def _ask_again(asker: jellyfin.User, row,
         choice = (seasons_choice if seasons_choice is not None
                   else seasons.decode(row["choice"]))
         return wants.want(asker, medium, item_key, unit, hit, choice=choice,
-                          approved=True)
-    if medium == media.PODCAST:
-        return wants.want(asker, medium, item_key, unit, hit,
-                          episodes_choice=episodes.decode(row["choice"]),
                           approved=True)
     return wants.want(asker, medium, item_key, unit, hit, approved=True)
 

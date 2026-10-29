@@ -144,24 +144,6 @@ def _buskarr_form() -> BackendForm:
     )
 
 
-def _podcasts_form() -> BackendForm:
-    """Podcasts have no backend of their own to point at.
-
-    The Jellyfin fork fetches episodes itself, so the only setting that
-    matters is the Jellyfin connection above. This form exists to say so, and
-    to show whether the server reached is the fork.
-    """
-    return BackendForm(
-        key="podcasts", name="jellyfin", label="Podcasts", medium="podcast",
-        status=backends.status("podcast"),
-        note=("Podcasts are fetched by Jellyfin's audiobook fork into its own "
-              "Podcasts library; there is nothing to configure here. A stock "
-              "Jellyfin has no podcasts library and no fetcher, so nothing "
-              "asked for would ever arrive on one."),
-        fields=(),
-    )
-
-
 def _recommendation_sources_form() -> BackendForm:
     """The outside catalogues a shelf may consult.
 
@@ -220,8 +202,7 @@ def forms() -> tuple[BackendForm, ...]:
         _arr_form("sonarr", "Sonarr", "series", 8989),
         _listenarr_form(),
         _buskarr_form(),
-        _podcasts_form(),
-        # Last: these change how a shelf is ordered, and the five above decide
+        # Last: these change how a shelf is ordered, and the four above decide
         # whether anything can be asked for at all.
         _recommendation_sources_form(),
     )

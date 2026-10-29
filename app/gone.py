@@ -25,8 +25,7 @@ library carries a wrong TMDB id, which this one does in places. Nothing is
 cleared while anybody is still waiting, and files are never touched on either
 side.
 """
-from . import (itunes, jellyfin, listenarr, logs, media, podcasts,
-               radarr, sonarr, store)
+from . import jellyfin, listenarr, logs, media, radarr, sonarr, store
 from .books import engine as book_engine
 from .books import store as book_store
 from .books import wants as book_wants
@@ -62,7 +61,6 @@ MEDIUM_OF_TYPE = {
     "Series": media.SERIES,
     "AudioBook": media.BOOK,
     "Book": media.BOOK,
-    "Podcast": media.PODCAST,
 }
 
 
@@ -85,43 +83,7 @@ def clear(item: dict) -> dict:
 
     if medium == media.BOOK:
         return _clear_book(item)
-    if medium == media.PODCAST:
-        return _clear_podcast(item)
     return _clear_by_provider_id(medium, item)
-
-
-# --- Podcasts ------------------------------------------------------------------
-
-
-def _clear_podcast(item: dict) -> dict:
-    """A deleted podcast: its ledger rows go; the order went with the folder.
-
-    The fork's fetch task visits only podcasts the library still holds, so a
-    deleted folder is a cancelled order by itself. What is left to clear is
-    this service's own record of having asked for it.
-    """
-    provider_ids = item.get("providerIds") or {}
-    feed = str(provider_ids.get("PodcastFeed") or "").strip()
-    name = str(item.get("name") or "").strip()
-    try:
-        candidates = podcasts.owned(force=True)
-    except jellyfin.JellyfinUnavailable as exc:
-        raise Unsettled(str(exc)) from exc
-    feed_key = itunes.item_key(feed) if feed else ""
-    if podcasts.match(candidates, feed_key=feed_key,
-                      itunes_id=str(provider_ids.get("iTunes") or ""),
-                      title=name) is not None:
-        raise StillHere(f"{name or 'That podcast'} is still in the library, "
-                        "so nothing was changed.")
-    dropped = 0
-    if feed_key:
-        _require_nobody_waiting(media.PODCAST, feed_key)
-        dropped = store.drop_settled(media.PODCAST, feed_key)
-    # Nothing to stop: the fork's fetch task visits only podcasts the library
-    # still holds, so a deleted folder is a cancelled order by itself.
-    log.info("deleted podcast name=%r: ledger rows=%d", name, dropped)
-    return _report(medium=media.PODCAST, cleared=None, item_key=feed_key,
-                   ledger_rows=dropped)
 
 
 # --- Films and series --------------------------------------------------------

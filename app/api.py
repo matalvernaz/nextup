@@ -20,9 +20,9 @@ from threading import Lock
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query
 
-from . import (approvals, arr, config, describarr, episodes, gone, held,
-               imports, jellyfin, logs, media, playlists, podcasts, podfetch,
-               recommendations, seasons, store, wants)
+from . import (approvals, arr, config, describarr, gone, held, imports,
+               jellyfin, logs, media, playlists, podcasts, recommendations,
+               seasons, store, wants)
 
 log = logs.get("api")
 
@@ -103,9 +103,9 @@ def info() -> dict:
 
 
 #: Every shape this server can answer in. 1 is what shipped: films, series and
-#: music. 2 adds books. 3 adds podcasts, which come with a question a shipped
-#: client cannot ask (how much of one to fetch) and a second recommendation
-#: surface it does not know.
+#: music. 2 adds books. 3 adds podcasts' recommendations, with a second surface
+#: a shipped client does not know (what the library could add). Podcasts are
+#: never asked for here: they are added through Jellyfin (2026-10-27).
 SUPPORTED_PROTOCOLS = (1, 2, 3)
 
 #: Media a protocol-1 client is told about. Books are withheld deliberately,
@@ -177,11 +177,6 @@ def capabilities(protocol: int = 1,
             # one -- both null is a client's cue to ask before the first
             # series. Additive, so an older client ignores it.
             blocks[-1]["seasons"] = _seasons_block(user)
-        if found.key == media.PODCAST:
-            # The same question for a podcast: how much of it to fetch. Both
-            # null means the ask is refused until the person chooses, so a
-            # client asks first.
-            blocks[-1]["episodes"] = _episodes_block(user)
     log.info("capabilities user=%s keyholder=%s media=%s",
              user.key, user.is_admin, [b["medium"] for b in blocks])
     recommendation_media = []
@@ -204,8 +199,9 @@ def capabilities(protocol: int = 1,
                 "medium": medium_key,
                 "libraryIds": recommendation_libraries,
                 # Podcasts have a second shelf, of what the library does not
-                # hold, because there is a catalogue to draw one from and a
-                # tool to ask it of. Films and shows keep one until they do.
+                # hold, because there is a catalogue to draw one from, and a
+                # listener adds what they take from it through Jellyfin.
+                # Films and shows keep one until they have the same.
                 "surfaces": (["owned", "catalogue"]
                              if medium_key == media.PODCAST else ["owned"]),
                 "limit": recommendations.limit(medium_key),
@@ -292,11 +288,6 @@ def get_search(medium: str, q: str = "", unit: str = "",
                    "already holds is not known.") from exc
     except arr.Unavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except podcasts.Unreadable as exc:
-        # A pasted address that is not a feed. 400 with the sentence, because
-        # "nothing matched" would send somebody checking their spelling of an
-        # address that answered perfectly well with a web page.
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
     log.info("search user=%s medium=%s unit=%s q=%r hits=%d",
              user.key, medium, unit or "-", query, len(results))
     return {"version": config.API_VERSION, "medium": medium,
@@ -340,7 +331,8 @@ def get_recommendations(
 
     `surface` is `owned` (what the library holds and this account has not
     started) or, for podcasts, `catalogue`: podcasts the library does not
-    hold, near what this account listens to, each askable like a search hit.
+    hold, near what this account listens to, each one a show a listener adds
+    through Jellyfin.
     """
     if medium not in recommendations.SUPPORTED_MEDIA:
         raise HTTPException(
@@ -400,11 +392,6 @@ def post_want(user: jellyfin.User = Depends(caller),
               remember: bool = Body(False, embed=True),
               image_url: str | None = Body(None, embed=True, alias="imageUrl"),
               overview: str | None = Body(None, embed=True),
-              feed_url: str = Body("", embed=True, alias="feedUrl"),
-              itunes_id: str = Body("", embed=True, alias="itunesId"),
-              episodes_asked: dict | None = Body(
-                  None, embed=True, alias="episodes"),
-              organize: bool | None = Body(None, embed=True),
               over_limit: str = Body("", embed=True, alias="overLimit")) -> dict:
     """Ask for one thing. Repeating it is free and spends no allowance.
 
@@ -432,14 +419,8 @@ def post_want(user: jellyfin.User = Depends(caller),
     request so the list of requests can show them. Radarr's and Sonarr's own
     answers are preferred where there are any; music has nothing else.
 
-    `feedUrl` is a podcast's whole identity -- the ledger key is only a digest
-    of it -- and `episodes` (podcasts only) is how much of it to fetch, as in
-    `/capabilities`; absent, the account's usual choice applies, and with none
-    the ask is refused until they choose. `remember` keeps it as usual.
-
-    `organize` (podcasts only) is whether a podcast new to the library is
-    sorted into folders by season and series as its episodes arrive (see
-    `GET /podcast/folders`); absent, it is.
+    A podcast is never asked for here: it is added through Jellyfin, and this
+    answers it as any medium the server does not offer.
     """
     log.info("api want user=%s medium=%s key=%s", user.key, medium, item_key)
     choice = None
@@ -448,25 +429,13 @@ def post_want(user: jellyfin.User = Depends(caller),
             choice = seasons.from_body(seasons_asked)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-    episodes_choice = None
-    if episodes_asked is not None and medium == media.PODCAST:
-        try:
-            episodes_choice = episodes.from_body(episodes_asked)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
     hit = {"title": title, "year": year, "artist": artist,
            "source": source, "ref": ref, "album": album,
            "durationSeconds": duration_seconds,
-           "imageUrl": image_url or "", "overview": overview or "",
-           "feedUrl": feed_url or "", "itunesId": itunes_id or ""}
-    if medium == media.PODCAST and organize is not None:
-        # Kept on the hit, so a request held for a keyholder is sorted, or
-        # not, as the asker chose when it is approved.
-        hit["organize"] = organize
+           "imageUrl": image_url or "", "overview": overview or ""}
     try:
         state, message = wants.want(user, medium, item_key, unit, hit,
                                     choice=choice, remember=remember,
-                                    episodes_choice=episodes_choice,
                                     over_limit=over_limit == OVER_LIMIT_REQUEST)
     except wants.Denied as denied:
         raise HTTPException(status_code=409, detail=str(denied)) from denied
@@ -771,65 +740,6 @@ def put_seasons(user: jellyfin.User = Depends(caller),
     store.put_user_setting(user.key, seasons.SETTING, picked.encode())
     log.info("seasons set user=%s choice=%s", user.key, picked.encode())
     return _seasons_block(user)
-
-
-@router.get("/podcast/folders")
-def get_podcast_folders(user: jellyfin.User = Depends(caller),
-                        feed_url: str = Query(..., alias="feedUrl")) -> dict:
-    """The folders a podcast would be sorted into if it were asked for now.
-
-    Each folder with how many of the feed's episodes it would hold, its first
-    and last episode's titles and the first few file names, in the order a
-    folder listing shows them; `sentence` says it all at once. A 400 is an
-    address or feed that will not do, a 501 a server that does not sort
-    podcasts, a 503 Jellyfin not answering.
-    """
-    preview, why, kind = podfetch.folders(feed_url)
-    log.info("api podcast folders user=%s url=%s kind=%s", user.key, feed_url, kind or "ok")
-    if preview is None:
-        status = {"refused": 400, "unsupported": 501}.get(kind, 503)
-        raise HTTPException(status_code=status, detail=why)
-    return dict(preview, sentence=podfetch.folders_sentence(preview))
-
-
-@router.put("/episodes")
-def put_episodes(user: jellyfin.User = Depends(caller),
-                 choice: str | None = Body(None, embed=True),
-                 count: int | None = Body(None, embed=True)) -> dict:
-    """Set how much of a podcast this account usually asks for.
-
-    The same shape `/capabilities` publishes, and a null `choice` clears it
-    back to not chosen. Kept on the server for the reason the seasons choice
-    is: so the count of who chose what is where a keyholder can read it.
-    """
-    if media.get(media.PODCAST) is None:
-        raise HTTPException(status_code=409,
-                            detail="Podcasts are not available on this server.")
-    if choice is None:
-        store.put_user_setting(user.key, episodes.SETTING, "")
-        log.info("episodes cleared user=%s", user.key)
-        return _episodes_block(user)
-    try:
-        picked = episodes.from_body({"choice": choice, "count": count}
-                                    if count is not None else {"choice": choice})
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    store.put_user_setting(user.key, episodes.SETTING, picked.encode())
-    log.info("episodes set user=%s choice=%s", user.key, picked.encode())
-    return _episodes_block(user)
-
-
-def _episodes_block(user: jellyfin.User) -> dict:
-    own = episodes.decode(store.user_setting(user.key, episodes.SETTING))
-    default = episodes.decode(config.PODCAST_EPISODES_DEFAULT)
-    return {"choices": list(episodes.CHOICES),
-            "defaultCount": episodes.DEFAULT_LATEST_COUNT,
-            "choice": own.as_json() if own else None,
-            "default": default.as_json() if default else None,
-            # New podcasts are sorted into folders by season and series
-            # unless an ask says `organize: false`; `GET /podcast/folders`
-            # previews the folders. Additive, so an older client ignores it.
-            "folders": True}
 
 
 def _seasons_block(user: jellyfin.User) -> dict:

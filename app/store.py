@@ -114,7 +114,8 @@ CREATE TABLE IF NOT EXISTS account_caps (
 --
 -- `hit` is what the ask carried, as JSON, so approving it later hands the
 -- acquisition tool exactly what it would have had at the time. `choice` is
--- a series' seasons or a podcast's episodes, in their short forms.
+-- a series' seasons, in its short form. (A podcast's episodes, on a row from
+-- before podcasts were added through Jellyfin.)
 -- `state` is 'waiting' or 'declined'; a declined row stays for the asker to
 -- read for a while and then goes.
 CREATE TABLE IF NOT EXISTS held_requests (
@@ -418,7 +419,81 @@ def init() -> None:
         conn.executescript(SCHEMA)
         conn.executescript(BOOK_SCHEMA)
         _add_missing_columns(conn)
+    _retire_podcast_requests()
     log.info("store ready at %s", config.DB_PATH)
+
+
+#: Written once the podcast requests from before podcasts were added through
+#: Jellyfin have been closed. See `_retire_podcast_requests`.
+PODCASTS_RETIRED = "podcast_requests_retired"
+
+#: What an ask for a podcast still open then, or still queued, says became of
+#: it.
+PODCASTS_ADDED_ELSEWHERE = ("Podcasts are added in EchoFin now: Library, "
+                            "Podcasts, Add a Show.")
+
+#: `podcasts.MEDIUM`, and the per-account setting that held somebody's usual
+#: choice of episodes. Spelt out because this module is read by those, and
+#: the module that named the setting is gone.
+_PODCAST = "podcast"
+_PODCAST_EPISODES_SETTING = "PODCAST_EPISODES"
+
+
+def _retire_podcast_requests() -> None:
+    """Close, once, what was asked for here when podcasts were requested here.
+
+    Podcasts are a Jellyfin feature now (Matt, 2026-10-27): a show is added in
+    EchoFin, through the Jellyfin fork, and this service only recommends them.
+    Every show a request here ordered is followed by the fork already, so
+    nothing is asked of it; the rows here are what goes. Every podcast request,
+    outstanding or arrived, is deleted, so nothing reads a podcast row the
+    media registry can no longer name. An ask waiting for a keyholder is
+    declined, and a queued imported row refused, both saying where shows are
+    added now. Somebody's usual choice of episodes, and any podcast allowance
+    or reset, are deleted.
+
+    One transaction, taken before anything is read, so it lands whole or not
+    at all: `db` closes without committing when anything raises, and start-up
+    stops with the error. The marker is read inside it, so it runs once. No
+    store helper is called from here: each opens its own connection, which
+    would wait on this one's write lock.
+    """
+    with db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if conn.execute("SELECT 1 FROM meta WHERE key=?",
+                        (PODCASTS_RETIRED,)).fetchone():
+            return
+        now = time.time()
+        requests = conn.execute(
+            "DELETE FROM requests WHERE medium=?", (_PODCAST,)).rowcount
+        declined = conn.execute(
+            "UPDATE held_requests SET state=?, reason=?, decided_at=?, "
+            "decided_by='' WHERE medium=? AND state=?",
+            (HELD_DECLINED, PODCASTS_ADDED_ELSEWHERE, now, _PODCAST,
+             HELD_WAITING)).rowcount
+        # The two statements `unqueue` runs, for every queued podcast row at
+        # once, with the outcome `imports.REFUSED` names.
+        conn.execute(
+            "UPDATE import_rows SET outcome='refused', outcome_detail=? "
+            "WHERE (import_id, line) IN (SELECT import_id, line "
+            "FROM import_queue WHERE medium=?)",
+            (PODCASTS_ADDED_ELSEWHERE, _PODCAST))
+        refused = conn.execute(
+            "DELETE FROM import_queue WHERE medium=?", (_PODCAST,)).rowcount
+        settings = conn.execute(
+            "DELETE FROM user_settings WHERE name=?",
+            (_PODCAST_EPISODES_SETTING,)).rowcount
+        caps = conn.execute(
+            "DELETE FROM account_caps WHERE medium=?", (_PODCAST,)).rowcount
+        resets = conn.execute(
+            "DELETE FROM allowance_resets WHERE medium=?", (_PODCAST,)).rowcount
+        conn.execute("INSERT INTO meta (key, value) VALUES (?, ?)",
+                     (PODCASTS_RETIRED,
+                      time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))))
+    log.info("podcast requests retired: %d request(s) deleted, %d held ask(s) "
+             "declined, %d queued import row(s) refused, %d episode "
+             "setting(s), %d cap(s) and %d reset(s) deleted",
+             requests, declined, refused, settings, caps, resets)
 
 
 def _drop_outdated_caches(conn: sqlite3.Connection) -> None:
@@ -485,8 +560,9 @@ _LATER_COLUMNS = (("authors", "TEXT NOT NULL DEFAULT ''"),
                   # every row from before they were kept.
                   ("image_url", "TEXT NOT NULL DEFAULT ''"),
                   ("overview", "TEXT NOT NULL DEFAULT ''"),
-                  # Podcasts only: how much of it was asked for, in the short
-                  # form `episodes.decode` reads.
+                  # Podcasts only, from when they were asked for here: how
+                  # much of one was asked for. Nothing writes it now; it stays
+                  # so an older image can read the ledger.
                   ("episodes", "TEXT NOT NULL DEFAULT ''"),
                   # Which daily allowance this request was charged to: empty
                   # for the ordinary one, IMPORT_POOL for an imported list.
@@ -616,7 +692,7 @@ def rekey_users(name_to_id: dict[str, str]) -> int:
 def record(user_key: str, medium: str, item_key: str, unit: str,
            title: str, year: str, cost: int, backend_id: str,
            authors: str = "", seasons: str = "", image_url: str = "",
-           overview: str = "", episodes: str = "", allowance: str = "",
+           overview: str = "", allowance: str = "",
            provisional: bool = False) -> bool:
     """Write down that this account asked for this thing. True when it is new.
 
@@ -631,12 +707,12 @@ def record(user_key: str, medium: str, item_key: str, unit: str,
         cur = conn.execute(
             "INSERT INTO requests (user_key, medium, item_key, unit, title, "
             "year, cost, backend_id, authors, seasons, image_url, overview, "
-            "episodes, allowance, provisional, requested_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+            "allowance, provisional, requested_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT (user_key, medium, item_key) DO NOTHING",
             (user_key, medium, item_key, unit, title, year, cost, backend_id,
              authors, seasons, image_url, overview[:MAX_OVERVIEW_LENGTH],
-             episodes, allowance, int(provisional), time.time()))
+             allowance, int(provisional), time.time()))
     return cur.rowcount > 0
 
 
@@ -1345,8 +1421,7 @@ def put_external(cache_key: str, payload) -> None:
 #: Only these may be written per account. The same allowlist reasoning as
 #: `settings.WRITABLE`: a table that can hold arbitrary names is one where a
 #: bug writes something load-bearing.
-USER_WRITABLE = frozenset({"HARDCOVER_TOKEN", "SERIES_SEASONS",
-                           "PODCAST_EPISODES"})
+USER_WRITABLE = frozenset({"HARDCOVER_TOKEN", "SERIES_SEASONS"})
 
 #: Never logged, never rendered back into a form field. The credential; which
 #: seasons somebody usually asks for is nobody's secret, and a keyholder page

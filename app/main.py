@@ -19,15 +19,15 @@ from contextlib import asynccontextmanager
 from urllib.parse import quote, urlsplit
 
 import httpx
-from fastapi import FastAPI, File, Form, Query, Request, Response, UploadFile
+from fastapi import FastAPI, File, Form, Request, Response, UploadFile
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from . import (api, approvals, arr, artwork, backends, compat_nextread,
-               config, episodes, held, imports, jellyfin, listenarr, logs,
-               media, playlists, podcasts, podfetch, recommendations, seasons,
-               selfcheck, sessions, settings, setup, store, throttle, wants)
+               config, held, imports, jellyfin, listenarr, logs, media,
+               playlists, podcasts, recommendations, seasons, selfcheck,
+               sessions, settings, setup, store, throttle, wants)
 from .books import audible as book_audible
 from .books import hardcover_shelf
 from .books import search as book_search
@@ -642,16 +642,12 @@ def get_accounts(request: Request, msg: str = ""):
     served = sorted(media.available().items())
     overrides = store.cap_overrides()
     series_served = media.SERIES in dict(served)
-    podcasts_served = media.PODCAST in dict(served)
     chosen = (store.setting_by_account(seasons.SETTING)
               if series_served else {})
-    chosen_episodes = (store.setting_by_account(episodes.SETTING)
-                       if podcasts_served else {})
     accounts = [{"id": account.id, "name": account.name,
                  "keyholder": account.is_admin,
                  "allowances": _allowance_rows(account, served, overrides),
-                 "seasons": _seasons_phrase(chosen.get(account.id)),
-                 "episodes": _episodes_phrase(chosen_episodes.get(account.id))}
+                 "seasons": _seasons_phrase(chosen.get(account.id))}
                 for account in sorted(jellyfin.accounts(),
                                       key=lambda a: a.name.casefold())]
     return templates.TemplateResponse(
@@ -662,11 +658,7 @@ def get_accounts(request: Request, msg: str = ""):
                  "series_served": series_served,
                  "season_counts": _season_counts(accounts, chosen),
                  "season_default": _seasons_phrase(
-                     config.SERIES_SEASONS_DEFAULT),
-                 "podcasts_served": podcasts_served,
-                 "episode_counts": _episode_counts(accounts, chosen_episodes),
-                 "episode_default": _episodes_phrase(
-                     config.PODCAST_EPISODES_DEFAULT)})
+                     config.SERIES_SEASONS_DEFAULT)})
 
 
 #: How a choice of seasons reads on the accounts page, one per kind, so a
@@ -704,41 +696,6 @@ def _season_counts(accounts: list[dict],
             unchosen += 1
             continue
         label = _SEASON_LABELS[picked.choice]
-        tally[label] = tally.get(label, 0) + 1
-    ranked = sorted(tally.items(), key=lambda item: (-item[1], item[0]))
-    return ranked + ([("Not chosen yet", unchosen)] if unchosen else [])
-
-
-#: How a choice of episodes reads on the accounts page, one per kind, so the
-#: newest few counts once whatever the number is.
-_EPISODE_LABELS = {
-    episodes.ALL: "Every episode",
-    episodes.LATEST: "The newest few",
-    episodes.NEW: "New episodes only",
-}
-
-
-def _episodes_phrase(value: str | None) -> str:
-    """One account's choice as the accounts page says it, or "" for none."""
-    picked = episodes.decode(value)
-    if picked is None:
-        return ""
-    if picked.choice == episodes.LATEST:
-        return f"The newest {picked.count}"
-    return _EPISODE_LABELS[picked.choice]
-
-
-def _episode_counts(accounts: list[dict],
-                    chosen: dict[str, str]) -> list[tuple[str, int]]:
-    """How many accounts chose each kind, most first, then those who have not."""
-    tally: dict[str, int] = {}
-    unchosen = 0
-    for account in accounts:
-        picked = episodes.decode(chosen.get(account["id"]))
-        if picked is None:
-            unchosen += 1
-            continue
-        label = _EPISODE_LABELS[picked.choice]
         tally[label] = tally.get(label, 0) + 1
     ranked = sorted(tally.items(), key=lambda item: (-item[1], item[0]))
     return ranked + ([("Not chosen yet", unchosen)] if unchosen else [])
@@ -824,26 +781,6 @@ async def post_accounts_reset(request: Request):
         f"{target.name} has today's requests back."), status_code=303)
 
 
-@app.get("/podcast/folders", response_class=HTMLResponse)
-def get_podcast_folders(request: Request, feed_url: str = Query("", alias="feedUrl"),
-                        title: str = ""):
-    """The folders a podcast would be sorted into, before it is asked for."""
-    if setup.needs_setup():
-        return RedirectResponse(url="/setup", status_code=303)
-    try:
-        user = viewer(request)
-    except LookupError as exc:
-        return _signin_page(request, detail=str(exc), status=401)
-    preview, why, kind = podfetch.folders(feed_url)
-    log.info("podcast folders page user=%s url=%s kind=%s", user.key, feed_url, kind or "ok")
-    return templates.TemplateResponse(
-        request=request, name="podcast_folders.html",
-        status_code=200 if preview else {"refused": 400, "unsupported": 501}.get(kind, 503),
-        context={"user": user, "title": title or (preview or {}).get("name") or "This podcast",
-                 "preview": preview, "why": why,
-                 "sentence": podfetch.folders_sentence(preview) if preview else ""})
-
-
 @app.get("/approvals", response_class=HTMLResponse)
 def get_approvals(request: Request, msg: str = ""):
     """What is waiting for a keyholder's yes or no. Keyholders only."""
@@ -894,17 +831,15 @@ def _kind_phrase(entry: dict) -> str:
         return "A book"
     if medium == media.MUSIC:
         return f"Music: {'an' if unit[:1] in 'aeiou' else 'a'} {unit}"
-    return {media.MOVIE: "A film", media.SERIES: "A TV series",
-            media.PODCAST: "A podcast"}.get(medium, medium.capitalize())
+    return {media.MOVIE: "A film", media.SERIES: "A TV series"}.get(
+        medium, medium.capitalize())
 
 
 def _asked_phrase(entry: dict) -> str:
-    """Which seasons or episodes it was asked with, as a sentence, or ""."""
+    """Which seasons it was asked with, as a sentence, or ""."""
     try:
         if "seasons" in entry:
             return f"Asked for {seasons.from_body(entry['seasons']).phrase()}."
-        if "episodes" in entry:
-            return f"Asked for {episodes.from_body(entry['episodes']).phrase()}."
     except ValueError:
         return ""
     return ""
@@ -1029,10 +964,9 @@ def index(request: Request, q: str = "", medium: str = "", unit: str = "",
     try:
         results = (wants.search(q.strip(), medium, unit, user)
                    if q.strip() and found else [])
-    except (podcasts.Unreadable, arr.Unavailable) as exc:
+    except arr.Unavailable as exc:
         results = []
         msg = msg or str(exc)
-    usual = wants.usual_episodes(user) if medium == media.PODCAST else None
     return templates.TemplateResponse(
         request=request, name="index.html",
         context={
@@ -1054,8 +988,6 @@ def index(request: Request, q: str = "", medium: str = "", unit: str = "",
             "allowance": {key: wants.allowance(user, key) for key in offered},
             "import_queue": (imports.queue_status(user)
                              if media.MUSIC in offered else None),
-            "episode_choices": _episode_options(),
-            "usual_episodes": usual.encode() if usual else "",
         })
 
 
@@ -1068,10 +1000,6 @@ def post_want(request: Request, medium: str = Form(...),
               duration_seconds: float | None = Form(None, alias="durationSeconds"),
               image_url: str = Form("", alias="imageUrl"),
               overview: str = Form(""),
-              feed_url: str = Form("", alias="feedUrl"),
-              itunes_id: str = Form("", alias="itunesId"),
-              episodes_asked: str = Form("", alias="episodes"),
-              organize: str = Form(""), organize_offered: str = Form(""),
               import_id: str = Form(""), import_line: int = Form(0)):
     """Ask for one thing, then send the browser back to the list.
 
@@ -1086,12 +1014,7 @@ def post_want(request: Request, medium: str = Form(...),
     hit = {"title": title, "year": year, "artist": artist,
            "source": source, "ref": ref, "album": album,
            "durationSeconds": duration_seconds,
-           "imageUrl": image_url, "overview": overview,
-           "feedUrl": feed_url, "itunesId": itunes_id}
-    if medium == media.PODCAST and organize_offered:
-        # A box left unticked sends nothing, so the form says it offered one:
-        # offered and not ticked is a no.
-        hit["organize"] = organize == "yes"
+           "imageUrl": image_url, "overview": overview}
     if import_id or import_line:
         try:
             message = imports.replace_row(user, import_id, import_line,
@@ -1106,10 +1029,6 @@ def post_want(request: Request, medium: str = Form(...),
     try:
         _, message = wants.want(
             user, medium, item_key, unit, hit,
-            episodes_choice=episodes.decode(episodes_asked),
-            # A choice made on the page is kept as usual: the page offers it
-            # on every podcast, so the next one is prefilled with it.
-            remember=bool(episodes_asked),
             # The page shows a waiting request, so past the allowance an ask
             # waits for a keyholder where the server allows it.
             over_limit=True)
@@ -1464,22 +1383,9 @@ def _podcast_shelves(user: jellyfin.User) -> dict:
         catalogue = podcasts.catalogue_shelf(user)
     except jellyfin.JellyfinUnavailable:
         catalogue = []
-    usual = wants.usual_episodes(user)
-    return context | {
-        "catalogue": catalogue,
-        "allowance": wants.allowance(user, media.PODCAST),
-        "can_request": podfetch.configured(),
-        "episode_choices": _episode_options(),
-        "usual_episodes": usual.encode() if usual else "",
-    }
-
-
-def _episode_options() -> list[tuple[str, str]]:
-    """The choices of how much of a podcast to fetch, as a form offers them."""
-    return [(episodes.ALL, "Every episode"),
-            (episodes.Episodes(episodes.LATEST, episodes.DEFAULT_LATEST_COUNT).encode(),
-             f"The newest {episodes.DEFAULT_LATEST_COUNT}, then new ones"),
-            (episodes.NEW, "Only new episodes from now on")]
+    # Nothing to ask for: a suggested show is added in EchoFin, through
+    # Jellyfin (Matt, 2026-10-27), so the page says where instead.
+    return context | {"catalogue": catalogue}
 
 
 def _book_shelves(user: jellyfin.User, undo_asin: str,

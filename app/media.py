@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass
 
 from . import (backends, buskarr, config, jellyfin, listenarr, logs,
-               podfetch, radarr, recommendations, sonarr)
+               podcasts, radarr, recommendations, sonarr)
 
 log = logs.get("media")
 
@@ -19,7 +19,9 @@ MOVIE = radarr.MEDIUM
 SERIES = sonarr.MEDIUM
 MUSIC = buskarr.MEDIUM
 BOOK = listenarr.MEDIUM
-PODCAST = podfetch.MEDIUM
+#: Recommended, never asked for: podcasts are added through Jellyfin (Matt,
+#: 2026-10-27), so this name is no medium of the registry below.
+PODCAST = podcasts.MEDIUM
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,8 +57,6 @@ _BACKENDS = (
     (MUSIC, "Music", buskarr.UNITS, buskarr.configured, lambda: config.MUSIC_DAILY_CAP),
     (BOOK, "Books", listenarr.UNITS, listenarr.configured,
      lambda: config.BOOK_DAILY_CAP),
-    (PODCAST, "Podcasts", podfetch.UNITS, podfetch.configured,
-     lambda: config.PODCAST_DAILY_CAP),
 )
 
 
