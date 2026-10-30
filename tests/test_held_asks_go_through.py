@@ -365,6 +365,59 @@ config.APPROVALS = True
 check.equal([w["itemKey"] for w in approvals.release_when_room()], ["tmdb:51", "tmdb:52"],
             "and once both are back they go")
 
+# --- one ask failing in a way nobody foresaw holds nothing back ---------------
+
+a_day_passes()
+for n in (70, 71):
+    ask_film(KID, n)
+check.equal(ask_film(KID, 72)[0], held.WAITING_FOR_APPROVAL, "film 72 waits")
+check.equal(ask_film(KID, 73)[0], held.WAITING_FOR_APPROVAL, "and 73 behind it")
+a_day_passes()
+working_add = radarr.add
+
+
+def breaks_on_72(tmdb, title="", year="", monitored=True):
+    if tmdb == "72":
+        raise RuntimeError("something nobody foresaw")
+    return working_add(tmdb, title, year, monitored)
+
+
+def one_pass():
+    """A pass, with anything it raises recorded as a failure, not a crash."""
+    try:
+        return approvals.release_when_room()
+    except Exception as exc:  # noqa: BLE001 - raising is the defect here.
+        check.that(False, f"the pass raised {exc!r} instead of carrying on")
+        return None
+
+
+radarr.add = breaks_on_72
+went = one_pass()
+radarr.add = working_add
+check.equal([w["itemKey"] for w in went or []], ["tmdb:73"],
+            "the ask behind a broken one still goes")
+check.that(waiting(KID, media.MOVIE, "tmdb:72"),
+           "and the broken one waits for a keyholder")
+check.equal(one_pass(), [], "and is left alone for a while, not retried every pass")
+approvals._refused.clear()
+
+# --- Jellyfin going quiet in the middle of a pass ------------------------------
+
+working_owned = media.owned
+
+
+def owned_but_down(*args, **kwargs):
+    raise jellyfin.JellyfinUnavailable("Jellyfin is not answering")
+
+
+media.owned = owned_but_down
+went = one_pass()
+media.owned = working_owned
+check.equal(went, [], "Jellyfin going quiet mid-pass stops the pass quietly")
+check.that(waiting(KID, media.MOVIE, "tmdb:72"), "with the ask still waiting")
+check.equal([w["itemKey"] for w in one_pass() or []], ["tmdb:72"],
+            "and not left alone: the next pass lets it through")
+
 # --- somebody made a keyholder since -------------------------------------------
 
 store.set_cap(STRICT.key, media.MOVIE, 0)
