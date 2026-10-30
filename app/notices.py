@@ -3,9 +3,9 @@
 An ask past the daily limit waits for a keyholder, and until now the only way
 to learn what became of it was to open the request list and look. Now a
 keyholder's yes or no, an ask going through by itself once the allowance had
-room, somebody else's ask settling one that waited, and a new book asked for
-from a followed series are each said to the person, on the phones where they
-use EchoFin.
+room, somebody else's ask settling one that waited, a new book asked for from a
+followed series, and what they asked for reaching the library are each said to
+the person, on the phones where they use EchoFin.
 
 Jellyfin delivers: Matt's fork keeps the phones each account signed in on,
 and the key Apple wants, for its new-episode notifications already
@@ -29,6 +29,10 @@ SETTING = "REQUEST_NOTICES"
 KIND = "requests"
 #: How long a Jellyfin that said it cannot send is left alone.
 UNAVAILABLE_RETRY_SECONDS = 3600
+#: More arrivals at once than this are said in one notice rather than one each.
+MOST_ARRIVALS_NAMED = 3
+#: How long after starting the first look for arrivals runs.
+ARRIVALS_FIRST_DELAY_SECONDS = 180
 
 _unavailable_until = 0.0
 _guard = threading.Lock()
@@ -152,6 +156,85 @@ def settled(user_key: str, medium: str, item_key: str, title: str) -> None:
     tell(user_key, "Request on its way",
          f"{_named(title, item_key)} is on its way. Somebody else asked for it "
          "too, so it no longer needs approving.", medium, item_key)
+
+
+def arrived(user_key: str, medium: str, items: list[tuple[str, str]]) -> None:
+    """Things this account asked for reached the library. `items` is (key, title).
+
+    One notice each, up to a few; more at once are one notice that names the
+    first few and counts the rest, so a busy night is one buzz.
+    """
+    if not items:
+        return
+    heading = "Ready to watch" if medium in ("movie", "series") else "Ready to listen"
+    if len(items) <= MOST_ARRIVALS_NAMED:
+        for item_key, title in items:
+            tell(user_key, heading, f"{_named(title, item_key)} is in the library.",
+                 medium, item_key)
+        return
+    named = ", ".join(_named(title, item_key)
+                      for item_key, title in items[:MOST_ARRIVALS_NAMED])
+    more = len(items) - MOST_ARRIVALS_NAMED
+    tell(user_key, heading,
+         f"{len(items)} things you asked for are in the library: {named} and "
+         f"{more} more.", medium, items[0][0])
+
+
+def check_arrivals() -> int:
+    """Look at the requests of everybody who turned notices on. Returns how many.
+
+    Reading somebody's requests is what settles an arrival, and settling one is
+    what tells them (`arrived`, called from where arrivals are settled). This
+    only makes sure that happens without them opening their list first.
+    """
+    if not supported():
+        return 0
+    wanting = [key for key, value in store.setting_by_account(SETTING).items()
+               if value == "on"]
+    if not wanting:
+        return 0
+    try:
+        accounts = {account.key: account for account in jellyfin.accounts()}
+    except jellyfin.JellyfinUnavailable:
+        return 0
+    # Here rather than at the top: the request path imports this module.
+    from . import wants
+    looked = 0
+    for user_key in wanting:
+        account = accounts.get(user_key)
+        if account is None:
+            continue
+        try:
+            wants.states(account)
+            looked += 1
+        except jellyfin.JellyfinUnavailable as exc:
+            log.info("arrivals not looked at, Jellyfin is not answering: %s", exc)
+            break
+        except Exception as exc:  # noqa: BLE001 - one account failing must not
+            # stop everybody after it hearing about their arrivals.
+            log.warning("arrivals not looked at user=%s: %r", user_key, exc)
+    return looked
+
+
+def watch() -> None:
+    """Start looking for arrivals, where this server can tell anybody about them."""
+    if not supported():
+        return
+    threading.Thread(target=_arrivals_loop, name="request-arrivals",
+                     daemon=True).start()
+    log.info("request notices: arrivals looked for every %d s",
+             config.REQUEST_NOTICE_ARRIVAL_SECONDS)
+
+
+def _arrivals_loop() -> None:
+    time.sleep(ARRIVALS_FIRST_DELAY_SECONDS)
+    while True:
+        try:
+            check_arrivals()
+        except Exception as exc:  # noqa: BLE001 - the thread must not die, or
+            # arrivals silently stop being told.
+            log.warning("arrivals pass failed: %s", exc)
+        time.sleep(config.REQUEST_NOTICE_ARRIVAL_SECONDS)
 
 
 def new_in_series(user_key: str, series_title: str, book_title: str,

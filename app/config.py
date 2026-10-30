@@ -460,6 +460,9 @@ APPROVALS = _flag("APPROVALS")
 # unless a deployment says so: only Matt's fork of Jellyfin delivers them, and
 # a stock server would be asked for something it does not have.
 REQUEST_NOTICES = _flag("REQUEST_NOTICES")
+# How often the requests of everybody who turned notices on are looked at, so
+# an arrival is told without them having to open their list first.
+REQUEST_NOTICE_ARRIVAL_SECONDS = _int("REQUEST_NOTICE_ARRIVAL_SECONDS", 900)
 
 # How often asks waiting for a keyholder are checked against their asker's
 # allowance. One that fits goes through by itself, charged like any ask, so a
