@@ -74,34 +74,52 @@ def who_approves() -> str:
     return ", ".join(names[:-1]) + " or " + names[-1]
 
 
-def held_message(label: str, cap: int | None) -> str:
+def goes_through_by_itself(cap: int | None, price: int = 1) -> bool:
+    """Whether an ask held at this limit goes ahead once the allowance has room.
+
+    It does whenever a day's allowance could ever cover it: see
+    `approvals.release_when_room`. An account whose limit is 0 has every ask
+    decided by a keyholder, and so has an ask costing more than a whole day's
+    allowance, such as a music artist on a lowered limit.
+    """
+    return cap is not None and 0 < price <= cap
+
+
+def held_message(label: str, cap: int | None, price: int = 1) -> str:
     """What somebody is told when their ask waits instead of going through."""
     noun = label.lower()
     who = who_approves()
     if cap == 0:
         return (f"Asking for {noun} needs approval on this account, so it has "
                 f"gone to {who} to approve.")
-    return (f"That is past today's limit for {noun}, so it has gone to {who} "
+    said = (f"That is past today's limit for {noun}, so it has gone to {who} "
             "to approve.")
+    if goes_through_by_itself(cap, price):
+        said += (" If it is still waiting when your allowance frees up, it goes "
+                 "through by itself.")
+    return said
 
 
-def repeat_message() -> str:
+def repeat_message(goes_through: bool = False) -> str:
     """Asking again for something already waiting.
 
     Starts the way every other repeat does. An imported list reads "Already "
     as already asked for, which is what this is.
     """
-    return f"Already asked for. It is waiting for {who_approves()} to approve it."
+    said = f"Already asked for. It is waiting for {who_approves()} to approve it"
+    return said + (", or for your allowance to free up." if goes_through else ".")
 
 
 def hold(user: jellyfin.User, medium: str, item_key: str, unit: str,
          hit: dict, choice: str, label: str, cap: int | None,
-         detail: str = "") -> tuple[str, str]:
+         detail: str = "", price: int = 1) -> tuple[str, str]:
     """Write an ask past the allowance down, and tell whoever approves.
 
     Returns the state and sentence the asker gets. `hit` is kept whole so
     approving it later hands the acquisition tool what it would have had
-    now; `detail` is how the notice describes it beyond its title.
+    now; `detail` is how the notice describes it beyond its title. `price` is
+    what it costs out of the allowance, which decides whether it can go
+    through by itself later.
     """
     title = str(hit.get("title") or "")
     is_new = store.hold(
@@ -111,8 +129,9 @@ def hold(user: jellyfin.User, medium: str, item_key: str, unit: str,
     log.info("want held user=%s medium=%s unit=%s key=%s new=%s",
              user.key, medium, unit, item_key, is_new)
     if is_new:
-        notify(user.name, title or item_key, label, detail)
-    return WAITING_FOR_APPROVAL, held_message(label, cap)
+        notify(user.name, title or item_key, label, detail,
+               goes_through=goes_through_by_itself(cap, price))
+    return WAITING_FOR_APPROVAL, held_message(label, cap, price)
 
 
 def _keepable(hit: dict) -> dict:
@@ -130,19 +149,23 @@ def hit_of(row) -> dict:
     return found if isinstance(found, dict) else {}
 
 
-def notify(asker: str, title: str, label: str,
-           detail: str = "") -> threading.Thread | None:
+def notify(asker: str, title: str, label: str, detail: str = "",
+           goes_through: bool = False) -> threading.Thread | None:
     """Say that something is waiting, beside the ask rather than in front of it.
 
     Posted in ntfy's form. A thread of its own, so a notice service that is
     down or slow costs the person asking nothing; the thread is returned so a
-    test can wait for it.
+    test can wait for it. `goes_through` says the ask will go ahead by itself
+    if nobody answers, so whoever approves knows they can leave it.
     """
     url = config.APPROVAL_NOTIFY_URL
     if not url:
         return None
     described = f"{title} ({detail})" if detail else title
     body = f"{asker} asked for {described}, past today's limit for {label.lower()}."
+    if goes_through:
+        body += (" If you leave it, it goes through by itself when their "
+                 "allowance frees up.")
     headers = {"Title": "A request to approve",
                "Content-Type": "text/plain; charset=utf-8"}
     if config.PAGES_URL:

@@ -12,6 +12,12 @@
   count against the account's allowance. Declining it tells them, with your
   reason if you give one.
 </p>
+<p>
+  Anything left here goes through by itself once the account's allowance has
+  room for it, and counts against that allowance like any ask. Only an account
+  whose limit is 0, or an ask bigger than a whole day's allowance, waits for
+  an answer whatever happens.
+</p>
 {% if not enabled %}
 <p>
   This server is not holding asks past the allowance at the moment, so nothing

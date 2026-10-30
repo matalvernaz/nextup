@@ -10,11 +10,31 @@ the same thing is settled by that one ask; see `held.ride_along`.
 Declining keeps the ask on the asker's list with the answer, for as long as an
 arrival stays there, so a no is something they hear rather than a request
 that silently vanished.
+
+Leaving it is an answer too. Once the asker's allowance has room for it, a
+waiting ask goes through by itself, as an ordinary ask of theirs; see
+`release_when_room`.
 """
-from . import held, jellyfin, logs, media, seasons, store, wants
+import threading
+import time
+
+from . import config, held, jellyfin, logs, media, seasons, store, wants
 from .books import adapter as books
+from .books import series as book_series
+from .books import wants as book_wants
 
 log = logs.get("approvals")
+
+#: How long after starting the first pass runs, so a restart is settled first.
+RELEASE_FIRST_DELAY_SECONDS = 120
+
+#: How long an ask its acquisition tool refused is left before it is tried
+#: again by itself. Kept in memory: a restart tries it once more, which costs
+#: one more refusal and nothing else.
+REFUSED_RETRY_SECONDS = 6 * 3600
+
+_refused: dict[tuple[str, str, str], float] = {}
+_refused_guard = threading.Lock()
 
 
 class NothingWaiting(LookupError):
@@ -34,9 +54,12 @@ def waiting() -> list[dict]:
 
     The earliest ask first: it has been waiting longest. Each entry is shaped
     like a request on a list, plus `askedBy`, and for a book series the
-    titles that would be asked for.
+    titles that would be asked for. Each asker says whether their ask goes
+    through by itself once their allowance frees up, which tells a keyholder
+    what can be left.
     """
-    names = _names()
+    accounts = _accounts() or {}
+    names = {key: account.name for key, account in accounts.items()}
     grouped: dict[tuple[str, str], dict] = {}
     for row in store.all_waiting():
         key = (row["medium"], row["item_key"])
@@ -50,10 +73,12 @@ def waiting() -> list[dict]:
             if row["unit"] == books.SERIES_UNIT and isinstance(titles, list):
                 entry["bookTitles"] = [t for t in titles if isinstance(t, str)]
             grouped[key] = entry
+        asker = accounts.get(row["user_key"])
         entry["askedBy"].append({
             "id": row["user_key"],
             "name": names.get(row["user_key"], "Somebody no longer here"),
             "askedAt": row["asked_at"],
+            "releasesOnItsOwn": asker is not None and _goes_through(asker, row),
         })
     return list(grouped.values())
 
@@ -108,16 +133,215 @@ def approve(keyholder: jellyfin.User, medium: str, item_key: str,
 
 
 def _ask_again(asker: jellyfin.User, row,
-               seasons_choice: seasons.Seasons | None) -> tuple[str, str]:
-    """One held ask, made again on the asker's behalf with the keyholder's yes."""
+               seasons_choice: seasons.Seasons | None = None,
+               approved: bool = True) -> tuple[str, str]:
+    """One held ask, made again on the asker's behalf.
+
+    With the keyholder's yes, free. Without it, as the asker's own ask past
+    the limit would be: charged where the allowance has room, and otherwise
+    still waiting, exactly as it was.
+    """
     medium, item_key, unit = row["medium"], row["item_key"], row["unit"]
     hit = held.hit_of(row)
+    how = {"approved": True} if approved else {"over_limit": True}
     if medium == media.SERIES:
         choice = (seasons_choice if seasons_choice is not None
                   else seasons.decode(row["choice"]))
         return wants.want(asker, medium, item_key, unit, hit, choice=choice,
-                          approved=True)
-    return wants.want(asker, medium, item_key, unit, hit, approved=True)
+                          **how)
+    return wants.want(asker, medium, item_key, unit, hit, **how)
+
+
+def release_when_room() -> list[dict]:
+    """Ask again for every waiting ask its asker's allowance now has room for.
+
+    An ask waits for a keyholder only because it was past the allowance when
+    it was made, and the allowance comes back a day after each request it
+    counted. Asked for then, the same thing would simply go through, so once
+    it fits it does: on the asker's behalf, charged like any ask of theirs,
+    whether or not a keyholder ever got to it. A no stays a no; only waiting
+    asks go.
+
+    Oldest first for each account and kind of thing, and the first one that
+    does not fit holds back the ones behind it, so an artist is not overtaken
+    for ever by single songs. An ask no day's allowance could cover is the
+    keyholder's alone, so it holds nothing back.
+
+    Returns one entry per ask that went, for the log and the tests.
+    """
+    if not held.enabled():
+        return []
+    rows = store.all_waiting()
+    if not rows:
+        # The usual case, and no reason to ask Jellyfin for anything.
+        return []
+    accounts = _accounts()
+    if accounts is None:
+        # Nobody's allowance can be read without Jellyfin. Next pass.
+        return []
+    went: list[dict] = []
+    full: set[tuple[str, str]] = set()
+    for row in rows:
+        user_key, medium = row["user_key"], row["medium"]
+        if (user_key, medium) in full or _resting(row):
+            continue
+        asker = accounts.get(user_key)
+        if asker is None or not _goes_through(asker, row):
+            # Gone from Jellyfin, which approving tidies away; or the
+            # keyholder's to decide whatever happens.
+            continue
+        room = _room(asker, medium)
+        if room is not None and room < _price(medium, row["unit"]):
+            full.add((user_key, medium))
+            continue
+        try:
+            outcome = _release(asker, row)
+        except wants.TryLater as exc:
+            log.info("held ask not released user=%s medium=%s key=%s, trying "
+                     "again next pass: %s", user_key, medium, row["item_key"], exc)
+            continue
+        except wants.Denied as exc:
+            _rest(row)
+            log.warning("held ask refused on release user=%s medium=%s key=%s, "
+                        "left for a keyholder: %s", user_key, medium,
+                        row["item_key"], exc)
+            continue
+        if outcome is None:
+            # Something else spent the room between the check and the ask.
+            full.add((user_key, medium))
+            continue
+        log.info("held ask went through user=%s medium=%s key=%s: the "
+                 "allowance had room (%s)", user_key, medium, row["item_key"],
+                 outcome)
+        went.append({"userKey": user_key, "medium": medium,
+                     "itemKey": row["item_key"], "title": row["title"],
+                     **outcome})
+    return went
+
+
+def _release(asker: jellyfin.User, row) -> dict | None:
+    """Ask again for one waiting ask, charged. None when nothing went."""
+    if row["medium"] == media.BOOK and row["unit"] == books.SERIES_UNIT:
+        return _release_series(asker, row)
+    state, _ = _ask_again(asker, row, approved=False)
+    # Every way through answers the asker's row: asked for, already in the
+    # library, or settled by somebody else's ask. Still there means it was a
+    # repeat, which is what an allowance with no room left answers.
+    if store.held(row["user_key"], row["medium"], row["item_key"]) is not None:
+        return None
+    return {"state": state}
+
+
+def _release_series(asker: jellyfin.User, row) -> dict | None:
+    """As many books of a waiting series as the allowance has room for.
+
+    Asking for the series stops by itself where the allowance does. The rest
+    go on waiting as the same ask, in the same place, carrying the smaller
+    count, so the series never asks for more books than the tap that started
+    it.
+    """
+    hit = held.hit_of(row)
+    count = hit.get("count")
+    if not isinstance(count, int) or count <= 0:
+        count = config.SERIES_WANT_LIMIT
+    try:
+        outcome = book_series.want_series(
+            asker, row["item_key"], hit.get("anchorItemId") or None,
+            limit=count)
+    except book_series.Unavailable as exc:
+        raise wants.TryLater(str(exc)) from exc
+    except (book_series.NotASeries, book_series.Unresolvable) as exc:
+        raise wants.Denied(str(exc)) from exc
+    asked = outcome["requested"] + outcome["failed"]
+    left = max(0, min(count - len(asked), outcome["heldBackCount"]))
+    if left == 0:
+        store.drop_held(row["user_key"], media.BOOK, row["item_key"])
+    else:
+        named = {book["title"] for book in asked}
+        titles = [title for title in hit.get("titles") or []
+                  if isinstance(title, str) and title not in named][:left]
+        store.rewrite_held_hit(row["user_key"], media.BOOK, row["item_key"],
+                               {**hit, "count": left, "titles": titles})
+        if not asked:
+            return None
+    return {"booksAsked": len(outcome["requested"]), "booksLeft": left}
+
+
+def _accounts() -> dict[str, jellyfin.User] | None:
+    """Every account by its ledger key, or None when Jellyfin cannot say."""
+    try:
+        return {account.key: account for account in jellyfin.accounts()}
+    except jellyfin.JellyfinUnavailable:
+        return None
+
+
+def _price(medium: str, unit: str) -> int:
+    """What one waiting ask needs from the allowance to go.
+
+    A book series goes a book at a time, so one book's worth is enough.
+    """
+    return 1 if medium == media.BOOK else media.cost(medium, unit)
+
+
+def _room(asker: jellyfin.User, medium: str) -> int | None:
+    """What is left of the asker's allowance, or None when they have no limit.
+
+    Books keep their own arithmetic, so they are asked there.
+    """
+    if medium == media.BOOK:
+        return book_wants.allowance(asker)
+    return wants.allowance(asker, medium)
+
+
+def _goes_through(asker: jellyfin.User, row) -> bool:
+    """Whether this waiting ask can ever go through without a keyholder.
+
+    An account with no limit at all (made a keyholder since) always can.
+    """
+    medium = row["medium"]
+    cap = (book_wants.daily_cap(asker) if medium == media.BOOK
+           else wants.daily_cap(asker, medium))
+    return cap is None or held.goes_through_by_itself(cap, _price(medium, row["unit"]))
+
+
+def _resting(row) -> bool:
+    """Whether this ask was refused on its last release and is left alone."""
+    key = (row["user_key"], row["medium"], row["item_key"])
+    with _refused_guard:
+        until = _refused.get(key)
+        if until is None:
+            return False
+        if time.monotonic() < until:
+            return True
+        del _refused[key]
+        return False
+
+
+def _rest(row) -> None:
+    key = (row["user_key"], row["medium"], row["item_key"])
+    with _refused_guard:
+        _refused[key] = time.monotonic() + REFUSED_RETRY_SECONDS
+
+
+def watch() -> None:
+    """Start the pass that lets waiting asks through once they fit."""
+    threading.Thread(target=_release_loop, name="held-release",
+                     daemon=True).start()
+    log.info("held asks: checked against their allowance every %d s",
+             config.HELD_RELEASE_SECONDS)
+
+
+def _release_loop() -> None:
+    time.sleep(RELEASE_FIRST_DELAY_SECONDS)
+    while True:
+        try:
+            went = release_when_room()
+            if went:
+                log.info("held asks: %d went through by themselves", len(went))
+        except Exception as exc:  # noqa: BLE001 - the thread must not die, or
+            # waiting asks silently stop going through.
+            log.warning("held asks pass failed: %s", exc)
+        time.sleep(config.HELD_RELEASE_SECONDS)
 
 
 def decline(keyholder: jellyfin.User, medium: str, item_key: str,

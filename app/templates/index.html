@@ -166,7 +166,7 @@ for by themselves at {{ import_queue.perDay }} songs a day.
     <p>
       {% if r.state == 'in_library' %}In the library.
       {% elif r.state == 'still_looking' %}Still looking.
-      {% elif r.state == 'waiting_for_approval' %}Past today's limit, so it is waiting for {{ who_approves() }} to approve it.
+      {% elif r.state == 'waiting_for_approval' %}Past today's limit, so it is waiting for {{ who_approves() }} to approve it.{% if r.releasesOnItsOwn %} If it is still waiting when your allowance frees up, it goes through by itself.{% endif %}
       {% elif r.state == 'declined' %}Declined{% if r.decidedBy %} by {{ r.decidedBy }}{% endif %}.{% if r.reason %} {{ r.reason }}{% endif %}
       {% else %}On its way.{% endif %}
       {% if r.bookCount %}{{ r.bookCount }} book{{ '' if r.bookCount == 1 else 's' }} from the series.{% endif %}

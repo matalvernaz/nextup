@@ -151,7 +151,8 @@ def _admit(user, asin, title, recommendation_id, metadata,
             # is only a repeat while the allowance is still short.
             log.info("want repeat user=%s asin=%s state=held "
                      "(no allowance spent)", user.key, asin)
-            return held.WAITING_FOR_APPROVAL, held.repeat_message()
+            return held.WAITING_FOR_APPROVAL, held.repeat_message(
+                held.goes_through_by_itself(cap))
         if not ledger.waiting(store.MEDIUM, asin):
             hit = {"title": title}
             if metadata is not None:

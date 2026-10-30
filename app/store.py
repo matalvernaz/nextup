@@ -1128,6 +1128,22 @@ def waiting_count() -> int:
     return int(row["n"] or 0)
 
 
+def rewrite_held_hit(user_key: str, medium: str, item_key: str,
+                     hit: dict) -> bool:
+    """Replace what a waiting ask carries, keeping its place in the queue.
+
+    For a book series that went through in part: the rest of it still waits,
+    from when it was first asked for. Only a waiting ask is touched, so this
+    can never bring back one somebody has answered or withdrawn meanwhile.
+    """
+    with db() as conn:
+        return conn.execute(
+            "UPDATE held_requests SET hit=? "
+            "WHERE user_key=? AND medium=? AND item_key=? AND state=?",
+            (json.dumps(hit), user_key, medium, item_key,
+             HELD_WAITING)).rowcount > 0
+
+
 def drop_held(user_key: str, medium: str, item_key: str) -> bool:
     """Take one held ask away, whatever its state. True if there was one."""
     with db() as conn:

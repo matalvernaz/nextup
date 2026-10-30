@@ -361,12 +361,14 @@ def _admit(user: jellyfin.User, found: media.Medium, medium: str,
                 # this is only a repeat while the allowance is still short.
                 log.info("want repeat user=%s medium=%s key=%s state=held "
                          "(no allowance spent)", user.key, medium, item_key)
-                return held.WAITING_FOR_APPROVAL, held.repeat_message()
+                return held.WAITING_FOR_APPROVAL, held.repeat_message(
+                    held.goes_through_by_itself(cap, price))
             if not store.waiting(medium, item_key):
                 return held.hold(
                     user, medium, item_key, unit, hit,
                     choice.encode() if choice is not None else "",
-                    found.label, cap, _held_detail(medium, unit, choice))
+                    found.label, cap, _held_detail(medium, unit, choice),
+                    price=price)
             # Already coming for somebody else in the household, so it costs
             # nothing more and there is nothing for a keyholder to decide.
             # Within the allowance a second asker is charged nothing for the
@@ -541,6 +543,13 @@ def states(user: jellyfin.User, medium: str | None = None,
     waiting = held.described_for(user, medium)
     if not waiting:
         return found
+    for entry in waiting:
+        if entry["state"] == held.WAITING_FOR_APPROVAL:
+            # Whether it goes ahead by itself once the allowance frees up, or
+            # waits for a keyholder whatever happens.
+            entry["releasesOnItsOwn"] = held.goes_through_by_itself(
+                daily_cap(user, entry["medium"]),
+                media.cost(entry["medium"], entry["unit"]))
     return sorted(found + waiting, key=lambda entry: entry["requestedAt"],
                   reverse=True)
 
