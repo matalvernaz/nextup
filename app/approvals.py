@@ -361,6 +361,11 @@ def decline(keyholder: jellyfin.User, medium: str, item_key: str,
     keys = store.decline_held(medium, item_key, reason.strip(), keyholder.name)
     if not keys:
         raise NothingWaiting("Nothing is waiting for that any more.")
+    if medium == media.BOOK:
+        # A no to the rest of a series is a no to its next books as well.
+        # Followed on, each new one would wait for the same no again.
+        for key in keys:
+            store.unfollow_series(key, item_key)
     names = _names()
     declined_for = [names.get(key, "Somebody no longer here") for key in keys]
     log.info("declined by=%s medium=%s key=%s for=%s reason=%r",

@@ -29,6 +29,7 @@ from . import (api, approvals, arr, artwork, backends, compat_nextread,
                playlists, podcasts, recommendations, seasons, selfcheck,
                sessions, settings, setup, store, throttle, wants)
 from .books import audible as book_audible
+from .books import follow as book_follow
 from .books import hardcover_shelf
 from .books import search as book_search
 from .books import shelves as book_shelves
@@ -48,6 +49,7 @@ async def lifespan(_: FastAPI):
     book_stamp.watch()
     imports.watch()
     approvals.watch()
+    book_follow.watch()
     yield
 
 
@@ -985,6 +987,7 @@ def index(request: Request, q: str = "", medium: str = "", unit: str = "",
             "import_limit": _import_limit(user) if import_context else None,
             "results": results,
             "requests": wants.states(user, include_held=True),
+            "follows": store.followed(user.key) if config.FOLLOW_SERIES else [],
             "message": msg,
             "allowance": {key: wants.allowance(user, key) for key in offered},
             "import_queue": (imports.queue_status(user)
@@ -1048,6 +1051,20 @@ def post_cancel(request: Request, medium: str = Form(...),
         return _back(medium, f"Nextup could not work out who you are. {exc}")
     _, message = wants.cancel(user, medium, item_key)
     return _back(medium, message)
+
+
+@app.post("/series/unfollow")
+def post_unfollow(request: Request, series: str = Form(...)):
+    """Stop following one book series."""
+    try:
+        user = viewer(request)
+    except LookupError as exc:
+        return _back(media.BOOK, f"Nextup could not work out who you are. {exc}")
+    if store.unfollow_series(user.key, series):
+        log.info("series unfollowed user=%s series=%r", user.key, series)
+        return _back(media.BOOK, f"Stopped following {series}. Books that come "
+                                 "out in it are no longer asked for.")
+    return _back(media.BOOK, f"You were not following {series}.")
 
 
 @app.get("/import", response_class=HTMLResponse)

@@ -260,7 +260,34 @@ def capabilities(protocol: int = 1,
         # `/want`'s `overLimit`). Additive: a client that predates it never
         # says so, and is refused at the limit as before.
         "approvals": held.capability(user),
+        # Whether asking for a whole book series follows it, so books that
+        # come out in it later are asked for by themselves. Additive.
+        "seriesFollow": {"supported": config.FOLLOW_SERIES
+                         and media.get(media.BOOK) is not None},
     }
+
+
+@router.get("/series/follows")
+def get_follows(user: jellyfin.User = Depends(caller)) -> dict:
+    """The book series this account follows, the earliest followed first."""
+    return {"version": config.API_VERSION,
+            "follows": [{"series": row["series"],
+                         "title": row["title"] or row["series"],
+                         "anchorItemId": row["anchor_item_id"] or None,
+                         "followedAt": row["followed_at"],
+                         "checkedAt": row["checked_at"]}
+                        for row in store.followed(user.key)]}
+
+
+@router.post("/series/unfollow")
+def post_unfollow(user: jellyfin.User = Depends(caller),
+                  name: str = Body(..., embed=True, alias="series")) -> dict:
+    """Stop following one book series. 404 when this account did not follow it."""
+    if not store.unfollow_series(user.key, name.strip()):
+        raise HTTPException(status_code=404,
+                            detail=f"You are not following {name.strip()}.")
+    log.info("series unfollowed user=%s series=%r", user.key, name.strip())
+    return {"series": name.strip(), "following": False}
 
 
 @router.get("/search")

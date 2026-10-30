@@ -167,7 +167,10 @@ def _want_series(user: jellyfin.User, name: str,
     try:
         outcome = book_series.want_series(
             user, name.strip(), anchor_item_id, over_limit=over_limit,
-            approved=approved, limit=limit)
+            approved=approved, limit=limit,
+            # A person asking for the series follows it; a keyholder's yes
+            # only finishes an ask they made earlier, and already followed.
+            follow=not approved)
     except book_series.NotASeries as exc:
         raise Denied(str(exc)) from exc
     except book_series.Unresolvable as exc:

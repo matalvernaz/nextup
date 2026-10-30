@@ -95,6 +95,9 @@ def capabilities(user: jellyfin.User = Depends(caller)) -> dict:
             "days": config.DISMISS_TTL_DAYS,
         },
         "seriesWant": {"supported": can_request, "limit": config.SERIES_WANT_LIMIT},
+        # Whether a series asked for whole is followed: books that come out in
+        # it later are asked for by themselves. See `/api/v1/series/follows`.
+        "seriesFollow": {"supported": can_request and config.FOLLOW_SERIES},
         # The same block as the main capabilities: whether a book asked for
         # past the day's allowance waits for a keyholder, for a client that
         # says `overLimit: "request"` on `/want` and `/series/want`.
@@ -324,7 +327,7 @@ def post_series_want(user: jellyfin.User = Depends(caller),
     try:
         outcome = series.want_series(
             user, name.strip(), anchor_item_id,
-            over_limit=over_limit == OVER_LIMIT_REQUEST)
+            over_limit=over_limit == OVER_LIMIT_REQUEST, follow=True)
     except series.NotASeries as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except series.Unresolvable as exc:
