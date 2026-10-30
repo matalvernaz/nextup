@@ -455,6 +455,12 @@ STILL_LOOKING_AFTER_HOURS = _int("STILL_LOOKING_AFTER_HOURS", 24)
 # ARRIVED_VISIBLE_HOURS.
 APPROVALS = _flag("APPROVALS")
 
+# Whether this server's Jellyfin can put a notice on somebody's phone, so
+# people may ask to be told what happens to their requests (`notices`). Off
+# unless a deployment says so: only Matt's fork of Jellyfin delivers them, and
+# a stock server would be asked for something it does not have.
+REQUEST_NOTICES = _flag("REQUEST_NOTICES")
+
 # How often asks waiting for a keyholder are checked against their asker's
 # allowance. One that fits goes through by itself, charged like any ask, so a
 # keyholder who never gets to it costs the asker a day at most.

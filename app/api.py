@@ -21,8 +21,8 @@ from threading import Lock
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query
 
 from . import (approvals, arr, config, describarr, gone, held, imports,
-               jellyfin, logs, media, playlists, podcasts, recommendations,
-               seasons, store, wants)
+               jellyfin, logs, media, notices, playlists, podcasts,
+               recommendations, seasons, store, wants)
 
 log = logs.get("api")
 
@@ -264,7 +264,23 @@ def capabilities(protocol: int = 1,
         # come out in it later are asked for by themselves. Additive.
         "seriesFollow": {"supported": config.FOLLOW_SERIES
                          and media.get(media.BOOK) is not None},
+        # Whether this account can be told on its phone what happens to its
+        # requests, and whether it asked to be. Additive.
+        "requestNotices": notices.capability(user),
     }
+
+
+@router.put("/request-notices")
+def put_request_notices(user: jellyfin.User = Depends(caller),
+                        on: bool = Body(..., embed=True)) -> dict:
+    """Turn this account's request notices on or off. 409 where the server cannot send them."""
+    if not notices.supported():
+        raise HTTPException(
+            status_code=409,
+            detail="This server cannot put notices on phones.")
+    notices.set_wanted(user.key, on)
+    log.info("request notices user=%s on=%s", user.key, on)
+    return notices.capability(user)
 
 
 @router.get("/series/follows")

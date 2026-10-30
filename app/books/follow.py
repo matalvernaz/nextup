@@ -17,7 +17,7 @@ ask's business, and the next tap's.
 import threading
 import time
 
-from .. import config, jellyfin, listenarr, logs
+from .. import config, jellyfin, listenarr, logs, notices
 from .. import store as ledger
 from . import series, wants
 
@@ -123,6 +123,8 @@ def _look(follower: jellyfin.User, row: dict,
                       "seriesTitle": row["title"] or row["series"],
                       "asin": book["asin"], "title": book["title"],
                       "state": state, "message": message})
+        notices.new_in_series(follower.key, row["title"] or row["series"],
+                              book["title"], book["asin"], state)
     ledger.series_checked(follower.key, row["series"],
                           sorted((known | published) - refused))
     return asked

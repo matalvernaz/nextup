@@ -17,7 +17,7 @@ import time
 
 import httpx
 
-from . import artwork, config, jellyfin, logs, media, seasons, store
+from . import artwork, config, jellyfin, logs, media, notices, seasons, store
 
 log = logs.get("held")
 
@@ -188,7 +188,8 @@ def _post(url: str, body: str, headers: dict) -> None:
         log.warning("approval notice not delivered: %s", exc)
 
 
-def ride_along(medium: str, item_key: str, record, except_user_key: str) -> list[str]:
+def ride_along(medium: str, item_key: str, record, except_user_key: str,
+               tell: bool = True) -> list[str]:
     """Settle everybody else waiting on something that has just been asked for.
 
     Whoever asked within their allowance, or a keyholder, has just set it
@@ -200,6 +201,9 @@ def ride_along(medium: str, item_key: str, record, except_user_key: str) -> list
     Writes directly instead of asking again on their behalf. The caller holds
     this item's lock, and asking again would take it a second time; it is not
     reentrant.
+
+    Each is told (`notices.settled`) unless `tell` is false: a keyholder's yes
+    tells everybody it answered itself, in its own words.
     """
     settled = []
     for row in store.waiting_on(medium, item_key):
@@ -208,6 +212,8 @@ def ride_along(medium: str, item_key: str, record, except_user_key: str) -> list
         record(row)
         store.drop_held(row["user_key"], medium, item_key)
         settled.append(row["user_key"])
+        if tell:
+            notices.settled(row["user_key"], medium, item_key, row["title"])
     if settled:
         log.info("held asks settled medium=%s key=%s for=%s: asked for "
                  "meanwhile", medium, item_key, settled)

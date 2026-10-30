@@ -189,7 +189,8 @@ def _admit(user, asin, title, recommendation_id, metadata,
     ledger.drop_held(user.key, store.MEDIUM, asin)
     held.ride_along(store.MEDIUM, asin, lambda row: store.record_request(
         row["user_key"], asin, recorded_title, result.authors, cost=0,
-        allowance=ledger.APPROVED_POOL), except_user_key=user.key)
+        allowance=ledger.APPROVED_POOL), except_user_key=user.key,
+        tell=not approved)
     store.record_feedback(user.key, asin, "want", recommendation_id)
     log.info("want accepted user=%s asin=%s audiobook_id=%s listenarr=%r",
              user.key, asin, result.audiobook_id, result.message)

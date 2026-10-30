@@ -18,7 +18,7 @@ waiting ask goes through by itself, as an ordinary ask of theirs; see
 import threading
 import time
 
-from . import config, held, jellyfin, logs, media, seasons, store, wants
+from . import config, held, jellyfin, logs, media, notices, seasons, store, wants
 from .books import adapter as books
 from .books import series as book_series
 from .books import wants as book_wants
@@ -126,6 +126,8 @@ def approve(keyholder: jellyfin.User, medium: str, item_key: str,
     approved_for = [names.get(key, "Somebody no longer here") for key in answered]
     log.info("approved by=%s medium=%s key=%s for=%s state=%s",
              keyholder.key, medium, item_key, answered, state)
+    notices.approved(answered, keyholder.name, medium, item_key,
+                     first[0]["title"], state)
     said = f"Approved for {_listed(approved_for)}." if approved_for else ""
     return {"medium": medium, "itemKey": item_key, "state": state,
             "message": " ".join(part for part in (said, message) if part),
@@ -227,6 +229,8 @@ def release_when_room() -> list[dict]:
         went.append({"userKey": user_key, "medium": medium,
                      "itemKey": row["item_key"], "title": row["title"],
                      **outcome})
+        notices.went_through(user_key, medium, row["item_key"], row["title"],
+                             outcome)
     return went
 
 
@@ -358,9 +362,12 @@ def _release_loop() -> None:
 def decline(keyholder: jellyfin.User, medium: str, item_key: str,
             reason: str = "") -> dict:
     """Say no to everybody waiting on one thing. Raises NothingWaiting."""
+    waiting_rows = store.waiting_on(medium, item_key)
     keys = store.decline_held(medium, item_key, reason.strip(), keyholder.name)
     if not keys:
         raise NothingWaiting("Nothing is waiting for that any more.")
+    notices.declined(keys, keyholder.name, medium, item_key,
+                     waiting_rows[0]["title"] if waiting_rows else "", reason)
     if medium == media.BOOK:
         # A no to the rest of a series is a no to its next books as well.
         # Followed on, each new one would wait for the same no again.
