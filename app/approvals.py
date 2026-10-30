@@ -206,6 +206,17 @@ def release_when_room() -> list[dict]:
                         "left for a keyholder: %s", user_key, medium,
                         row["item_key"], exc)
             continue
+        except jellyfin.JellyfinUnavailable as exc:
+            # Nothing after it would get any further. Next pass.
+            log.info("held asks pass stopped, Jellyfin is not answering: %s", exc)
+            break
+        except Exception as exc:  # noqa: BLE001 - one ask failing in a way
+            # nobody foresaw must not hold back every ask behind it for good.
+            _rest(row)
+            log.warning("held ask failed on release user=%s medium=%s key=%s, "
+                        "left for a keyholder: %r", user_key, medium,
+                        row["item_key"], exc)
+            continue
         if outcome is None:
             # Something else spent the room between the check and the ask.
             full.add((user_key, medium))
