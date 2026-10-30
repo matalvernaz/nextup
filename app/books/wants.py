@@ -68,6 +68,7 @@ def want(
     metadata: dict | None = None,
     over_limit: bool = False,
     approved: bool = False,
+    detail: str = "",
 ) -> tuple[str, str]:
     """Ask for one book. Returns (state, message). Raises Denied if refused.
 
@@ -82,6 +83,10 @@ def want(
 
     `metadata` is the add-shaped record when the caller already has it; a
     series listing does, and passing it spares Listenarr a lookup per book.
+
+    `detail` is how a keyholder's notice describes a book held past the limit,
+    when "a book" would mislead: one asked for because it came out in a series
+    the person follows was not tapped by them today.
     """
     # Same reason as the shared path: the duplicate check, the allowance check,
     # the Listenarr add and the ledger write are four steps with three
@@ -97,11 +102,11 @@ def want(
     with store.key_lock(user.key, store.MEDIUM):
         with store.key_lock("item", store.MEDIUM, asin):
             return _admit(user, asin, title, recommendation_id, metadata,
-                          over_limit, approved)
+                          over_limit, approved, detail)
 
 
 def _admit(user, asin, title, recommendation_id, metadata,
-           over_limit=False, approved=False):
+           over_limit=False, approved=False, detail=""):
     """The guarded half of `want`. Never called without its lock held."""
     already = _request_row(user.key, asin)
     if already is not None:
@@ -158,7 +163,7 @@ def _admit(user, asin, title, recommendation_id, metadata,
             if metadata is not None:
                 hit["metadata"] = metadata
             return held.hold(user, store.MEDIUM, asin, store.UNIT, hit, "",
-                             "Books", cap, "a book")
+                             "Books", cap, detail or "a book")
         # Already on order for somebody else in the household, so it costs
         # nothing more and there is nothing for a keyholder to decide.
         cost = 0

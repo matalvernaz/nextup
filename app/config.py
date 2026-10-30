@@ -249,6 +249,19 @@ MAX_SHELF = _int("MAX_SHELF", 40)
 # bounded by BOOK_DAILY_CAP as well, whichever is smaller.
 SERIES_WANT_LIMIT = _int("SERIES_WANT_LIMIT", 10)
 
+# Whether asking for a whole book series also follows it: a book that comes
+# out in it later is asked for on the asker's behalf, charged like any ask of
+# theirs, so past the day's allowance it waits like any other. See
+# `books.follow`.
+FOLLOW_SERIES = _flag("FOLLOW_SERIES", True)
+# How often each followed series is looked at again. A new book is news for
+# days rather than minutes, and every look is a catalogue listing.
+FOLLOW_CHECK_HOURS = _int("FOLLOW_CHECK_HOURS", 24)
+# The most new books one look at one series will ask for. More at once is a
+# catalogue that changed how it lists the series, not a series that published
+# that many books overnight, and is left for a person to ask for.
+FOLLOW_MOST_NEW = _int("FOLLOW_MOST_NEW", 3)
+
 # Signed rating mode -- where a low score pushes a neighbourhood away rather
 # than merely failing to pull it -- begins here and reaches full strength over
 # RATINGS_RAMP_SPAN more ratings. A hard gate was tried first and produced

@@ -139,6 +139,26 @@ CREATE TABLE IF NOT EXISTS held_requests (
 CREATE INDEX IF NOT EXISTS held_by_item
     ON held_requests(medium, item_key, state);
 
+-- A book series somebody asked for whole. New books in it are asked for on
+-- their behalf as they come out (`books.follow`). `known` is every book of the
+-- series already published when it was last looked at, as JSON, written the
+-- way `series._identity` writes a book (its position, else its title), so a
+-- book outside it is a new one. `series` is the name the ask was made under,
+-- which is also the key a held series ask and its approval use.
+--
+-- In SCHEMA rather than BOOK_SCHEMA: a version bump drops everything in that
+-- one, and this is something a person asked for.
+CREATE TABLE IF NOT EXISTS followed_series (
+    user_key       TEXT NOT NULL,
+    series         TEXT NOT NULL,
+    anchor_item_id TEXT NOT NULL DEFAULT '',
+    title          TEXT NOT NULL DEFAULT '',
+    known          TEXT NOT NULL DEFAULT '[]',
+    followed_at    REAL NOT NULL,
+    checked_at     REAL NOT NULL,
+    PRIMARY KEY (user_key, series)
+);
+
 -- What one account has told this service about itself, as opposed to what the
 -- household has told it about its wiring. Today that is one thing: a personal
 -- Hardcover token, which names a person -- `me` answers with the account that
@@ -642,7 +662,7 @@ def nothing_to_rekey() -> bool:
 #: unmigrated one.
 USER_SCOPED_TABLES = ("requests", "submitted", "dismissed", "runs",
                       "recommendation_items", "feedback_events", "shelves",
-                      "held_requests")
+                      "held_requests", "followed_series")
 
 
 def rekey_users(name_to_id: dict[str, str]) -> int:
@@ -1168,6 +1188,85 @@ def decline_held(medium: str, item_key: str, reason: str,
             (HELD_DECLINED, reason[:MAX_REASON_LENGTH], time.time(),
              decided_by, medium, item_key, HELD_WAITING))
     return keys
+
+
+def follow_series(user_key: str, series: str, anchor_item_id: str,
+                  title: str, known: list[str]) -> bool:
+    """Start following a series for one account, or refresh it. True when new.
+
+    Asking again for a series already followed keeps when it was first
+    followed, takes the newer anchor and name where there is one, and adds
+    what is published now to what was known: everything published at the time
+    of an ask is that ask's business, not a new book's.
+    """
+    now = time.time()
+    with db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT known FROM followed_series WHERE user_key=? AND series=?",
+            (user_key, series)).fetchone()
+        if row is None:
+            conn.execute(
+                "INSERT INTO followed_series (user_key, series, anchor_item_id, "
+                "title, known, followed_at, checked_at) VALUES (?,?,?,?,?,?,?)",
+                (user_key, series, anchor_item_id, title,
+                 json.dumps(sorted(set(known))), now, now))
+            return True
+        merged = set(_known(row["known"])) | set(known)
+        conn.execute(
+            "UPDATE followed_series SET anchor_item_id=CASE WHEN ?<>'' THEN ? "
+            "ELSE anchor_item_id END, title=CASE WHEN ?<>'' THEN ? ELSE title END, "
+            "known=?, checked_at=? WHERE user_key=? AND series=?",
+            (anchor_item_id, anchor_item_id, title, title,
+             json.dumps(sorted(merged)), now, user_key, series))
+    return False
+
+
+def _known(raw: str) -> list[str]:
+    try:
+        found = json.loads(raw or "[]")
+    except ValueError:
+        return []
+    return [key for key in found if isinstance(key, str)] if isinstance(found, list) else []
+
+
+def followed(user_key: str | None = None) -> list[dict]:
+    """The series followed, by everybody or by one account, oldest first."""
+    sql = "SELECT * FROM followed_series"
+    args: tuple = ()
+    if user_key is not None:
+        sql += " WHERE user_key=?"
+        args = (user_key,)
+    with db() as conn:
+        rows = conn.execute(sql + " ORDER BY followed_at", args).fetchall()
+    return [{**dict(row), "known": _known(row["known"])} for row in rows]
+
+
+def follows_due(checked_before: float) -> list[dict]:
+    """The follows last looked at before `checked_before`, longest ago first."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM followed_series WHERE checked_at < ? "
+            "ORDER BY checked_at", (checked_before,)).fetchall()
+    return [{**dict(row), "known": _known(row["known"])} for row in rows]
+
+
+def series_checked(user_key: str, series: str, known: list[str]) -> bool:
+    """Record a look at a followed series and what it found published."""
+    with db() as conn:
+        return conn.execute(
+            "UPDATE followed_series SET known=?, checked_at=? "
+            "WHERE user_key=? AND series=?",
+            (json.dumps(sorted(set(known))), time.time(), user_key,
+             series)).rowcount > 0
+
+
+def unfollow_series(user_key: str, series: str) -> bool:
+    """Stop following a series for one account. True if it was followed."""
+    with db() as conn:
+        return conn.execute(
+            "DELETE FROM followed_series WHERE user_key=? AND series=?",
+            (user_key, series)).rowcount > 0
 
 
 def prune_declined(before: float) -> int:

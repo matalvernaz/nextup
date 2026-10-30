@@ -197,4 +197,20 @@ for by themselves at {{ import_queue.perDay }} songs a day.
   {% endfor %}
 </ul>
 {% endif %}
+
+{% if follows %}
+<h2>Series you follow</h2>
+<p>When a book comes out in one of these, it is asked for by itself.</p>
+<ul class="follows">
+  {% for f in follows %}
+  <li>
+    <form method="post" action="/series/unfollow">
+      <input type="hidden" name="series" value="{{ f.series }}">
+      {{ f.title or f.series }}.
+      <button type="submit">Stop following {{ f.title or f.series }}</button>
+    </form>
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
 {% endblock %}

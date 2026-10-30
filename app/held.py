@@ -280,6 +280,9 @@ def withdraw(user: jellyfin.User, medium: str,
     if row is None:
         return None
     store.drop_held(user.key, medium, item_key)
+    if medium == media.BOOK and row["unit"] == "series":
+        # Taking back the rest of a series takes back its next books too.
+        store.unfollow_series(user.key, item_key)
     if store.get(user.key, medium, item_key) is not None:
         # A request that reached a tool as well: calling that off is the
         # caller's, and the held row should not outlive it.

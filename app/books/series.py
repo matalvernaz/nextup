@@ -912,7 +912,8 @@ def _search_row(planned: dict) -> dict:
 
 def want_series(user: jellyfin.User, name: str,
                 anchor_item_id: str | None = None, over_limit: bool = False,
-                approved: bool = False, limit: int | None = None) -> dict:
+                approved: bool = False, limit: int | None = None,
+                follow: bool = False) -> dict:
     """Ask for the books of one series the library does not hold, bounded.
 
     Only what Audible has actually published: an unreleased volume is counted
@@ -930,6 +931,11 @@ def want_series(user: jellyfin.User, name: str,
     for tomorrow. `approved` is a keyholder's yes to that ask, made again on
     the asker's behalf: the allowance no longer bounds it, `limit` (how many
     books were waiting) does, and the books are free.
+
+    `follow` is a person asking for the series themselves, rather than an
+    approval or a release finishing an earlier ask: the series is followed
+    from then on, and a book that comes out in it later is asked for on their
+    behalf (`books.follow`).
     """
     planned = plan(user, name, anchor_item_id)
     missing = planned["missing"]
@@ -988,6 +994,16 @@ def want_series(user: jellyfin.User, name: str,
     log.info("series want user=%s series=%r requested=%d failed=%d held_back=%d "
              "cap_hit=%s waiting=%d approved=%s", user.key, name, len(requested),
              len(failed), held_back, cap_hit, waiting, approved)
+    following = False
+    if follow and config.FOLLOW_SERIES:
+        # Everything published now is this ask's business: asked for, on
+        # order, held for a keyholder, or left for the next tap. Only a book
+        # that is not out yet, or not listed at all, is a new one later.
+        ledger.follow_series(user.key, name, anchor_item_id or "",
+                             planned.get("catalogueName") or name,
+                             published_keys(planned))
+        following = True
+        log.info("series followed user=%s series=%r", user.key, name)
     owned_count = _distinct_books(planned["have"])
     on_order_count = _distinct_books(planned["onOrder"])
     left_out_count = _distinct_books(planned["leftOut"])
@@ -1007,6 +1023,8 @@ def want_series(user: jellyfin.User, name: str,
         "heldBackCount": held_back,
         # How many of those wait for a keyholder rather than for tomorrow.
         "waitingForApprovalCount": waiting,
+        # Whether books that come out in it later are asked for by themselves.
+        "following": following,
         "message": sentence(
             name, owned_count=owned_count, on_order=on_order_count,
             left_out=left_out_count, not_out=not_out_count,
@@ -1014,8 +1032,24 @@ def want_series(user: jellyfin.User, name: str,
             failed=[c["title"] for c in failed],
             held_back=held_back, cap_hit=cap_hit, missing=len(missing),
             other_version=other_version, other_reason=planned["otherVersionReason"],
-            waiting=waiting, goes_through=goes_through),
+            waiting=waiting, goes_through=goes_through)
+        + (" " + FOLLOWING_SENTENCE if following else ""),
     }
+
+
+#: Said after whatever else an ask for a whole series says, once it is followed.
+FOLLOWING_SENTENCE = "New books in this series are asked for as they come out."
+
+
+def published_keys(planned: dict) -> list[str]:
+    """Every book of a planned series that is out, as `_identity` names it.
+
+    A book not out yet is left off on purpose: the day it comes out it is a
+    new book, which is what following a series is for.
+    """
+    return sorted({book["key"] for group in ("have", "onOrder", "leftOut",
+                                             "missing", "otherVersion")
+                   for book in planned.get(group) or []})
 
 
 def _distinct_books(candidates: list[dict]) -> int:
