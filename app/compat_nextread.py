@@ -21,6 +21,7 @@ phone.
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 
 from . import arr, artwork, config, held, jellyfin, listenarr, logs
+from . import wants as asks
 from .api import OVER_LIMIT_REQUEST, caller
 from .books import search, series, shelves, wants
 
@@ -152,7 +153,7 @@ def get_shelves(force: bool = False,
         # `capabilities.approvals.states` names.
         requests = sorted(
             requests + [_held_request(row)
-                        for row in held.described_for(user, "book")],
+                        for row in asks.held_states(user, "book")],
             key=lambda row: row.get("requested_at") or 0, reverse=True)
     return {
         "version": LEGACY_PROTOCOL,
@@ -184,7 +185,7 @@ def _held_request(described: dict) -> dict:
            "requested_at": described["requestedAt"],
            "state": described["state"], "unit": described["unit"]}
     for key in ("imageUrl", "thumbnailUrl", "reason", "decidedBy",
-                "decidedAt", "bookCount"):
+                "decidedAt", "bookCount", "releasesOnItsOwn"):
         if key in described:
             out[key] = described[key]
     return out

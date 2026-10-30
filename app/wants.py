@@ -541,18 +541,27 @@ def states(user: jellyfin.User, medium: str | None = None,
     found = _ledger_states(user, medium)
     if not include_held:
         return found
-    waiting = held.described_for(user, medium)
+    waiting = held_states(user, medium)
     if not waiting:
         return found
+    return sorted(found + waiting, key=lambda entry: entry["requestedAt"],
+                  reverse=True)
+
+
+def held_states(user: jellyfin.User, medium: str | None = None) -> list[dict]:
+    """This account's held asks as its lists show them.
+
+    Each waiting one says whether it goes ahead by itself once the allowance
+    frees up, or waits for a keyholder whatever happens. Here, for every list
+    that shows held asks, so the books route cannot say less than this one.
+    """
+    waiting = held.described_for(user, medium)
     for entry in waiting:
         if entry["state"] == held.WAITING_FOR_APPROVAL:
-            # Whether it goes ahead by itself once the allowance frees up, or
-            # waits for a keyholder whatever happens.
             entry["releasesOnItsOwn"] = held.goes_through_by_itself(
                 daily_cap(user, entry["medium"]),
                 media.cost(entry["medium"], entry["unit"]))
-    return sorted(found + waiting, key=lambda entry: entry["requestedAt"],
-                  reverse=True)
+    return waiting
 
 
 def _ledger_states(user: jellyfin.User, medium: str | None = None) -> list[dict]:
