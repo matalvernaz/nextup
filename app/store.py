@@ -1536,7 +1536,7 @@ def put_external(cache_key: str, payload) -> None:
 #: Only these may be written per account. The same allowlist reasoning as
 #: `settings.WRITABLE`: a table that can hold arbitrary names is one where a
 #: bug writes something load-bearing.
-USER_WRITABLE = frozenset({"HARDCOVER_TOKEN", "SERIES_SEASONS"})
+USER_WRITABLE = frozenset({"HARDCOVER_TOKEN", "SERIES_SEASONS", "REQUEST_NOTICES"})
 
 #: Never logged, never rendered back into a form field. The credential; which
 #: seasons somebody usually asks for is nobody's secret, and a keyholder page

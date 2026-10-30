@@ -175,6 +175,43 @@ def _users() -> list[dict]:
         raise JellyfinUnavailable("Jellyfin could not load its accounts. Try again later.") from exc
 
 
+class PushUnavailable(Exception):
+    """This Jellyfin cannot put a notification on anybody's phone.
+
+    A stock server has no such thing at all, and Matt's fork answers the same
+    way while its sending key is not set up or cannot be read.
+    """
+
+
+def notify_user(user_id: str, payload: dict) -> dict:
+    """Ask Jellyfin to put one notification on every phone an account uses.
+
+    The fork's `POST /Podcasts/Push/Users/{id}/Notify`, with this service's own
+    credential, which counts as an administrator's. Returns its counts
+    (`Sent`, `Failed`, `Dropped`). Raises PushUnavailable when the server
+    cannot send, LookupError when it has no such account, and
+    JellyfinUnavailable when it does not answer or turns the request away.
+    """
+    try:
+        with _client() as client:
+            resp = client.post(f"/Podcasts/Push/Users/{user_id}/Notify", json=payload)
+    except httpx.HTTPError as exc:
+        raise JellyfinUnavailable(f"Jellyfin did not answer: {exc}") from exc
+    if resp.status_code == 404:
+        said = resp.text[:200]
+        if "does not send" in said or not said.strip():
+            # An empty 404 is a server with no such route: a stock Jellyfin.
+            raise PushUnavailable(said.strip() or "no notification route")
+        raise LookupError(f"Jellyfin has no account {user_id}: {said}")
+    if resp.status_code >= 400:
+        raise JellyfinUnavailable(f"Jellyfin answered {resp.status_code}: {resp.text[:200]}")
+    try:
+        found = resp.json()
+    except ValueError:
+        return {}
+    return found if isinstance(found, dict) else {}
+
+
 def all_users() -> dict[str, str]:
     """Every Jellyfin account, as casefolded display name to account id.
 

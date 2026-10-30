@@ -427,7 +427,8 @@ def _admit(user: jellyfin.User, found: media.Medium, medium: str,
         row["year"], 0, backend_id, seasons=result.seasons,
         image_url=row["image_url"] or image_url,
         overview=row["overview"] or overview,
-        allowance=store.APPROVED_POOL), except_user_key=user.key)
+        allowance=store.APPROVED_POOL), except_user_key=user.key,
+        tell=not approved)
     log.info("want accepted user=%s key=%s backend_id=%s message=%r%s",
              user.key, item_key, result.backend_id, result.message,
              " (approved)" if approved else "")
