@@ -965,6 +965,7 @@ def want_series(user: jellyfin.User, name: str,
 
     held_back = len(missing) - len(requested) - len(failed)
     waiting = 0
+    goes_through = False
     if approved:
         ledger.drop_held(user.key, store.MEDIUM, name)
     elif cap_hit and held_back and over_limit and held.enabled():
@@ -980,6 +981,7 @@ def want_series(user: jellyfin.User, name: str,
             "titles": [c["title"] for c in left[:waiting]],
         }, "", "Books", wants.daily_cap(user),
             f"{_plural(waiting, 'more book')} of the series")
+        goes_through = held.goes_through_by_itself(wants.daily_cap(user))
     if cap_hit and not requested and not failed and not waiting:
         log.warning("series want denied user=%s series=%r reason=daily-cap",
                     user.key, name)
@@ -1012,7 +1014,7 @@ def want_series(user: jellyfin.User, name: str,
             failed=[c["title"] for c in failed],
             held_back=held_back, cap_hit=cap_hit, missing=len(missing),
             other_version=other_version, other_reason=planned["otherVersionReason"],
-            waiting=waiting),
+            waiting=waiting, goes_through=goes_through),
     }
 
 
@@ -1048,7 +1050,7 @@ def sentence(name: str, *, owned_count: int, on_order: int, left_out: int,
              cap_hit: bool, missing: int, not_out: int = 0,
              other_version: list[str] | None = None,
              other_reason: str = OTHER_VERSION_REASON,
-             waiting: int = 0) -> str:
+             waiting: int = 0, goes_through: bool = False) -> str:
     """What to say about the outcome, in full, because the row that would have
     carried it is on another screen and the tap has nothing else to show for
     itself."""
@@ -1088,6 +1090,12 @@ def sentence(name: str, *, owned_count: int, on_order: int, left_out: int,
                      f"{_plural(waiting, 'book')} "
                      f"{'has' if waiting == 1 else 'have'} gone to "
                      f"{held.who_approves()} to approve.")
+        if goes_through:
+            parts.append("If they are still waiting when your allowance frees "
+                         "up, they go through by themselves, as many at a time "
+                         "as it has room for." if waiting > 1 else
+                         "If it is still waiting when your allowance frees up, "
+                         "it goes through by itself.")
         if held_back > waiting:
             more = held_back - waiting
             parts.append(f"{more} more {'book' if more == 1 else 'books'} "

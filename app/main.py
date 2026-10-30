@@ -47,6 +47,7 @@ async def lifespan(_: FastAPI):
     upkeep.watch()
     book_stamp.watch()
     imports.watch()
+    approvals.watch()
     yield
 
 

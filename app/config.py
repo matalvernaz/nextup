@@ -442,6 +442,11 @@ STILL_LOOKING_AFTER_HOURS = _int("STILL_LOOKING_AFTER_HOURS", 24)
 # ARRIVED_VISIBLE_HOURS.
 APPROVALS = _flag("APPROVALS")
 
+# How often asks waiting for a keyholder are checked against their asker's
+# allowance. One that fits goes through by itself, charged like any ask, so a
+# keyholder who never gets to it costs the asker a day at most.
+HELD_RELEASE_SECONDS = _int("HELD_RELEASE_SECONDS", 600)
+
 # Where to say that something is waiting for a keyholder. Optional. Posted in
 # ntfy's form -- the message as the body, `Title` and `Click` headers -- which
 # an ntfy topic URL or anything that speaks the same takes as it is. A failure
