@@ -93,7 +93,8 @@ def _as_request(row) -> dict:
     return {"asin": row["item_key"], "title": row["title"],
             "authors": _authors_of(row["authors"]),
             "requested_at": row["requested_at"],
-            "fulfilled_at": row["fulfilled_at"]}
+            "fulfilled_at": row["fulfilled_at"],
+            "allowance": row["allowance"]}
 
 
 def requests_for(user_key: str) -> list[dict]:

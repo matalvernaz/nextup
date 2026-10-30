@@ -8,7 +8,7 @@ later that quietly skips half of it.
 import re
 import time
 
-from .. import artwork, config, held, jellyfin, listenarr, logs
+from .. import artwork, config, held, jellyfin, listenarr, logs, notices
 from .. import store as ledger
 from . import engine, store
 
@@ -323,6 +323,10 @@ def states(user_key: str, owned: tuple[set, dict] | None) -> list[dict]:
             from . import stamp
             stamp.soon([r for r in rows if r["asin"] in arrived])
         store.fulfil_requests(user_key, arrived)
+        # Told once, here, where an arrival is settled; not an imported row.
+        notices.arrived(user_key, "book", [
+            (r["asin"], r["title"]) for r in rows
+            if r["asin"] in arrived and r.get("allowance") != ledger.IMPORT_POOL])
     else:
         log.warning("reporting %d book request(s) unsettled user=%s: the "
                     "library index could not be read", len(rows), user_key)

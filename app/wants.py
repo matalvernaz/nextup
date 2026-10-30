@@ -7,8 +7,8 @@ quietly skips half of it.
 """
 import time
 
-from . import (artwork, buskarr, config, held, jellyfin, logs, media, radarr,
-               seasons, sonarr, store)
+from . import (artwork, buskarr, config, held, jellyfin, logs, media, notices,
+               radarr, seasons, sonarr, store)
 from .books import adapter as books
 
 log = logs.get("wants")
@@ -620,6 +620,12 @@ def _ledger_states(user: jellyfin.User, medium: str | None = None) -> list[dict]
         store.mark_arrived(user.key, medium_key, keys)
         log.info("arrived user=%s medium=%s count=%d",
                  user.key, medium_key, len(keys))
+        # Told once, here, where an arrival is settled. Not a row of an
+        # imported list: nobody asked for those one at a time.
+        notices.arrived(user.key, medium_key, [
+            (row["item_key"], row["title"]) for row in rows
+            if row["medium"] == medium_key and row["item_key"] in keys
+            and row["allowance"] != store.IMPORT_POOL])
     if not book_states:
         return out
     # One list, newest first, however many paths settled it.

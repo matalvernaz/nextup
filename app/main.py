@@ -26,8 +26,8 @@ from fastapi.templating import Jinja2Templates
 
 from . import (api, approvals, arr, artwork, backends, compat_nextread,
                config, held, imports, jellyfin, listenarr, logs, media,
-               playlists, podcasts, recommendations, seasons, selfcheck,
-               sessions, settings, setup, store, throttle, wants)
+               notices, playlists, podcasts, recommendations, seasons,
+               selfcheck, sessions, settings, setup, store, throttle, wants)
 from .books import audible as book_audible
 from .books import follow as book_follow
 from .books import hardcover_shelf
@@ -50,6 +50,7 @@ async def lifespan(_: FastAPI):
     imports.watch()
     approvals.watch()
     book_follow.watch()
+    notices.watch()
     yield
 
 
