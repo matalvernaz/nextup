@@ -333,7 +333,9 @@ def _check_descriptions(accounts: list[jellyfin.User]) -> None:
     describarr says what became of each title, by the file Jellyfin has for
     it. Either of them not answering ends this look with every ask kept, for
     the next pass to ask again. Anything else going wrong with one title costs
-    only that title, and only this time.
+    only that title, and only this time: describarr answering with an error
+    about one file is that file's trouble, not describarr being away, and
+    ending the look there would hold up every title after it on every pass.
     """
     if not describarr.configured():
         return
@@ -345,7 +347,7 @@ def _check_descriptions(accounts: list[jellyfin.User]) -> None:
                 log.info("descriptions not looked at, Jellyfin is not answering: %s",
                          exc)
                 return
-            except httpx.HTTPError as exc:
+            except httpx.TransportError as exc:
                 log.info("descriptions not looked at, describarr is not answering: %s",
                          exc)
                 return
@@ -375,7 +377,10 @@ def _check_description(account: jellyfin.User, ask) -> None:
             store.drop_description_ask(account.key, item_id)
         return
     if state in DESCRIPTION_GAVE_UP:
-        store.drop_description_ask(account.key, item_id)
+        # Only the ask this answer was about: somebody asking again meanwhile
+        # sent describarr a new request, which may yet succeed. A ready
+        # description answers any ask for it, so that branch drops whichever.
+        store.drop_description_ask(account.key, item_id, ask["asked_at"])
         log.info("description ask forgotten, describarr said %s user=%s item=%s "
                  "detail=%s", state, account.key, item_id, found["detail"])
     # Anything else is working, queued or not known yet, and waits.

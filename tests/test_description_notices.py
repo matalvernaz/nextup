@@ -62,7 +62,9 @@ for film_id, film_name in (("m-heat", "Heat"), ("m-up", "Up"), ("m-ghost", "Ghos
                            ("m-jaws", "Jaws"), ("m-brazil", "Brazil"), ("m-rocky", "Rocky"),
                            ("m-tron", "Tron"), ("m-broken", "Broken"), ("m-later", "Later"),
                            ("m-other", "Other Film"), ("m-old", "Old"),
-                           ("m-recent", "Recent")):
+                           ("m-recent", "Recent"), ("m-flaky", "Flaky"),
+                           ("m-fine", "Fine"), ("m-third", "Third Film"),
+                           ("m-retry", "Retry")):
     LIBRARY[film_id] = film(film_name)
 for item_id, item in LIBRARY.items():
     item["Id"] = item_id
@@ -94,6 +96,11 @@ OUTCOMES: dict[str, str] = {}
 #: File names describarr will not take, the way it refuses a title it cannot place.
 REFUSED: set[str] = set()
 describarr_up = {"now": True}
+#: File names describarr's /outcome answers with a 500: up, but in trouble with that one file.
+FAILING: set[str] = set()
+#: File names whose outcome is looked up while the same person asks for them again:
+#: file name -> (account, item id) to ask with, once.
+ASKED_AGAIN_DURING: dict[str, tuple] = {}
 #: Every path describarr's /outcome was asked about, empty ones included.
 asked_about: list[str] = []
 
@@ -133,6 +140,12 @@ class FakeDescribarr:
         asked_about.append(path)
         if not path:
             return httpx.Response(400, text="path is required.", request=request)
+        name = path.rsplit("/", 1)[-1]
+        if name in FAILING:
+            return httpx.Response(500, text="Internal Server Error", request=request)
+        if name in ASKED_AGAIN_DURING:
+            again_user, again_id = ASKED_AGAIN_DURING.pop(name)
+            ask(again_user, again_id)
         state = OUTCOMES.get(path.rsplit("/", 1)[-1], "")
         if not state:
             return httpx.Response(200, json={"state": "unknown", "detail": "", "at": ""},
@@ -405,6 +418,36 @@ check.equal(told(OTHER), ["Other Film has audio description now."],
             "nor the next account's")
 check.that("m-broken" in waiting_ids(KID), "and the one that failed is tried again next time")
 UNREADABLE.clear()
+
+# --- describarr answering with an error about one title -------------------------------------
+
+delivered.clear()
+ask(KID, "m-flaky")
+ask(KID, "m-fine")
+ask(OTHER, "m-third")
+OUTCOMES[file_of("m-fine")] = "described"
+OUTCOMES[file_of("m-third")] = "described"
+FAILING.add(file_of("m-flaky"))
+notices.check_arrivals()
+check.equal(told(KID), ["Fine has audio description now."],
+            "describarr answering one title with an error does not stop the same account's next")
+check.equal(told(OTHER), ["Third Film has audio description now."], "nor the next account's")
+check.that("m-flaky" in waiting_ids(KID), "and the title it could not answer waits for the next pass")
+FAILING.clear()
+
+# --- an answer about an ask made again meanwhile -------------------------------------------
+
+delivered.clear()
+ask(KID, "m-retry")
+days_ago(KID, "m-retry", 1)
+before = asked_at(KID, "m-retry")
+OUTCOMES[file_of("m-retry")] = "no_match"
+ASKED_AGAIN_DURING[file_of("m-retry")] = (KID, "m-retry")
+notices.check_arrivals()
+check.that(asked_at(KID, "m-retry") > before + 3600,
+           "describarr giving up on the old ask does not take away the ask made again meanwhile")
+check.equal(told(KID), [], "and nothing is said")
+OUTCOMES.pop(file_of("m-retry"))
 
 # --- 30 days ---------------------------------------------------------------------------------------
 

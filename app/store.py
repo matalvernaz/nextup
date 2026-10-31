@@ -1315,12 +1315,21 @@ def description_asks(user_key: str) -> list[sqlite3.Row]:
             (user_key,)).fetchall()
 
 
-def drop_description_ask(user_key: str, item_id: str) -> bool:
-    """Stop waiting on one title for one account. True if it was waited on."""
+def drop_description_ask(user_key: str, item_id: str,
+                         asked_at: float | None = None) -> bool:
+    """Stop waiting on one title for one account. True if it was waited on.
+
+    Given `asked_at`, only the ask made then: one made again while describarr
+    was being asked about the old one is a new ask, and an answer about the
+    old one says nothing about it.
+    """
+    sql = "DELETE FROM description_asks WHERE user_key=? AND item_id=?"
+    args: tuple = (user_key, item_id)
+    if asked_at is not None:
+        sql += " AND asked_at=?"
+        args += (asked_at,)
     with db() as conn:
-        return conn.execute(
-            "DELETE FROM description_asks WHERE user_key=? AND item_id=?",
-            (user_key, item_id)).rowcount > 0
+        return conn.execute(sql, args).rowcount > 0
 
 
 def prune_description_asks(before: float) -> int:
