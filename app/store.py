@@ -159,6 +159,22 @@ CREATE TABLE IF NOT EXISTS followed_series (
     PRIMARY KEY (user_key, series)
 );
 
+-- A film or an episode somebody asked to have described, so they can be told
+-- when it is (`notices`). describarr keeps what became of the work; this keeps
+-- who asked, which it does not know. `item_id` is the Jellyfin item they asked
+-- about, and `title` what the notice calls it. Asking again for the same title
+-- moves `asked_at` on rather than adding a row.
+--
+-- In SCHEMA rather than BOOK_SCHEMA: a version bump drops everything in that
+-- one, and this is something a person asked for.
+CREATE TABLE IF NOT EXISTS description_asks (
+    user_key TEXT NOT NULL,
+    item_id  TEXT NOT NULL,
+    title    TEXT NOT NULL DEFAULT '',
+    asked_at REAL NOT NULL,
+    PRIMARY KEY (user_key, item_id)
+);
+
 -- What one account has told this service about itself, as opposed to what the
 -- household has told it about its wiring. Today that is one thing: a personal
 -- Hardcover token, which names a person -- `me` answers with the account that
@@ -662,7 +678,7 @@ def nothing_to_rekey() -> bool:
 #: unmigrated one.
 USER_SCOPED_TABLES = ("requests", "submitted", "dismissed", "runs",
                       "recommendation_items", "feedback_events", "shelves",
-                      "held_requests", "followed_series")
+                      "held_requests", "followed_series", "description_asks")
 
 
 def rekey_users(name_to_id: dict[str, str]) -> int:
@@ -1275,6 +1291,53 @@ def prune_declined(before: float) -> int:
         return conn.execute(
             "DELETE FROM held_requests WHERE state=? AND decided_at < ?",
             (HELD_DECLINED, before)).rowcount
+
+
+def ask_description(user_key: str, item_id: str, title: str) -> None:
+    """Remember that this account asked for this title's audio description.
+
+    Asking again for one already remembered starts its wait over and takes the
+    newer name, and never adds a second row: one ask is one notice.
+    """
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO description_asks (user_key, item_id, title, asked_at) "
+            "VALUES (?,?,?,?) ON CONFLICT (user_key, item_id) DO UPDATE SET "
+            "title=excluded.title, asked_at=excluded.asked_at",
+            (user_key, item_id, title, time.time()))
+
+
+def description_asks(user_key: str) -> list[sqlite3.Row]:
+    """The titles this account is waiting to hear are described, oldest ask first."""
+    with db() as conn:
+        return conn.execute(
+            "SELECT * FROM description_asks WHERE user_key=? ORDER BY asked_at",
+            (user_key,)).fetchall()
+
+
+def drop_description_ask(user_key: str, item_id: str,
+                         asked_at: float | None = None) -> bool:
+    """Stop waiting on one title for one account. True if it was waited on.
+
+    Given `asked_at`, only the ask made then: one made again while describarr
+    was being asked about the old one is a new ask, and an answer about the
+    old one says nothing about it.
+    """
+    sql = "DELETE FROM description_asks WHERE user_key=? AND item_id=?"
+    args: tuple = (user_key, item_id)
+    if asked_at is not None:
+        sql += " AND asked_at=?"
+        args += (asked_at,)
+    with db() as conn:
+        return conn.execute(sql, args).rowcount > 0
+
+
+def prune_description_asks(before: float) -> int:
+    """Forget the asks for a description made before `before`. Returns how many."""
+    with db() as conn:
+        return conn.execute(
+            "DELETE FROM description_asks WHERE asked_at < ?",
+            (before,)).rowcount
 
 
 

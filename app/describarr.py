@@ -10,9 +10,11 @@ It queues, it does not describe. describarr holds a persistent queue and works
 through it one title at a time behind a single lock, so a request here is a
 request, and the result turns up as a new audio track some time later.
 
-Nothing is stored on this side. describarr's queue is the record of what was
-asked for, and duplicating it here would be a second answer to the same
-question that could disagree with the first.
+What became of a request is not stored on this side. describarr's queue and
+its record of outcomes are the answer, and a copy here would be a second answer
+to the same question that could disagree with the first. Who asked is kept
+(`notices`), because describarr does not know it, and only so they can be told
+when the description is ready.
 """
 import httpx
 

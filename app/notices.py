@@ -4,8 +4,9 @@ An ask past the daily limit waits for a keyholder, and until now the only way
 to learn what became of it was to open the request list and look. Now a
 keyholder's yes or no, an ask going through by itself once the allowance had
 room, somebody else's ask settling one that waited, a new book asked for from a
-followed series, and what they asked for reaching the library are each said to
-the person, on the phones where they use EchoFin.
+followed series, what they asked for reaching the library, and the audio
+description they asked for being ready are each said to the person, on the
+phones where they use EchoFin.
 
 Jellyfin delivers: Matt's fork keeps the phones each account signed in on,
 and the key Apple wants, for its new-episode notifications already
@@ -19,7 +20,9 @@ slow or absent Jellyfin costs the request nothing.
 import threading
 import time
 
-from . import config, jellyfin, logs, store
+import httpx
+
+from . import config, describarr, jellyfin, logs, store
 
 log = logs.get("notices")
 
@@ -33,6 +36,18 @@ UNAVAILABLE_RETRY_SECONDS = 3600
 MOST_ARRIVALS_NAMED = 3
 #: How long after starting the first look for arrivals runs.
 ARRIVALS_FIRST_DELAY_SECONDS = 180
+#: The kind of notice that says a description somebody asked for is ready. Not
+#: KIND: the phone opens the request list for that one, and a description is
+#: not on it.
+DESCRIBED_KIND = "described"
+#: How long a title somebody asked to have described is watched for. One not
+#: done by then is forgotten rather than asked about for ever.
+DESCRIPTION_WAIT_DAYS = 30
+#: What describarr says of a file whose description is there.
+DESCRIPTION_READY = ("described", "already_described")
+#: What it says once it has given up on one: no source had it, the one found
+#: was refused, or the work failed. Anything else is still to come.
+DESCRIPTION_GAVE_UP = ("no_match", "rejected", "error")
 
 _unavailable_until = 0.0
 _guard = threading.Lock()
@@ -71,14 +86,24 @@ def tell(user_key: str, title: str, body: str, medium: str,
     Returns the thread sending it, so a test can wait for it, or None when
     nothing is sent.
     """
+    return _deliver(user_key, KIND, title, body,
+                    {"medium": medium[:200], "itemKey": item_key[:200]})
+
+
+def _deliver(user_key: str, kind: str, title: str, body: str,
+             data: dict) -> threading.Thread | None:
+    """Send one notice of this kind, the way every notice here is sent.
+
+    Nothing where the server cannot send or the account did not ask, nothing
+    for an hour after Jellyfin said it cannot send, and on a thread of its own.
+    """
     if not supported() or not wanted(user_key):
         return None
     with _guard:
         if time.monotonic() < _unavailable_until:
             return None
-    payload = {"Title": title[:120], "Body": body[:600], "Kind": KIND,
-               "ThreadId": KIND,
-               "Data": {"medium": medium[:200], "itemKey": item_key[:200]}}
+    payload = {"Title": title[:120], "Body": body[:600], "Kind": kind,
+               "ThreadId": kind, "Data": data}
     thread = threading.Thread(target=_send, args=(user_key, payload),
                               name="request-notice", daemon=True)
     thread.start()
@@ -185,10 +210,12 @@ def check_arrivals() -> int:
 
     Reading somebody's requests is what settles an arrival, and settling one is
     what tells them (`arrived`, called from where arrivals are settled). This
-    only makes sure that happens without them opening their list first.
+    only makes sure that happens without them opening their list first. The
+    descriptions they asked for are looked at after their requests.
     """
     if not supported():
         return 0
+    _forget_old_description_asks()
     wanting = [key for key, value in store.setting_by_account(SETTING).items()
                if value == "on"]
     if not wanting:
@@ -209,10 +236,12 @@ def check_arrivals() -> int:
             looked += 1
         except jellyfin.JellyfinUnavailable as exc:
             log.info("arrivals not looked at, Jellyfin is not answering: %s", exc)
-            break
+            # The descriptions below need it too, so the pass ends here.
+            return looked
         except Exception as exc:  # noqa: BLE001 - one account failing must not
             # stop everybody after it hearing about their arrivals.
             log.warning("arrivals not looked at user=%s: %r", user_key, exc)
+    _check_descriptions([accounts[key] for key in wanting if key in accounts])
     return looked
 
 
@@ -249,3 +278,109 @@ def new_in_series(user_key: str, series_title: str, book_title: str,
     else:
         return
     tell(user_key, f"New in {series_title}", body, "book", asin)
+
+
+def asked_for_description(user_key: str, item_id: str, item: dict) -> None:
+    """Remember who asked for a title's description, to tell them when it is ready.
+
+    A film or an episode only. describarr says what became of one file
+    (`describarr.OUTCOME_TYPES`), and a series or a season is a folder with an
+    answer for each episode, which no one notice could follow. Remembered
+    whether or not this account has turned notices on yet, so turning them on
+    after asking still tells them; never where this server sends none at all.
+    """
+    if not supported():
+        return
+    kind = item.get("Type", "")
+    if kind not in describarr.OUTCOME_TYPES:
+        return
+    title = item.get("Name", "")
+    series = item.get("SeriesName", "")
+    if kind == "Episode" and series:
+        title = f"{series}, {title}"
+    store.ask_description(user_key, item_id, title)
+
+
+def description_ready(user_key: str, item_id: str,
+                      title: str) -> threading.Thread | None:
+    """The description this account asked for is there.
+
+    Returns the thread sending it, or None when nothing is sent. The item goes
+    as `item`, because the fork refuses `itemId` from any service but itself.
+    """
+    return _deliver(user_key, DESCRIBED_KIND, "Audio description is ready",
+                    f"{_named(title, item_id)} has audio description now.",
+                    {"item": item_id[:200]})
+
+
+def _forget_old_description_asks() -> None:
+    """Forget every ask for a description older than DESCRIPTION_WAIT_DAYS.
+
+    Every account's, not only those the pass looks at: an ask from somebody
+    who never turned notices on, or whose account is gone, would otherwise be
+    kept for ever.
+    """
+    cutoff = time.time() - DESCRIPTION_WAIT_DAYS * 24 * 3600
+    forgotten = store.prune_description_asks(cutoff)
+    if forgotten:
+        log.info("description asks forgotten after %d days of waiting: %d",
+                 DESCRIPTION_WAIT_DAYS, forgotten)
+
+
+def _check_descriptions(accounts: list[jellyfin.User]) -> None:
+    """Tell these accounts about the descriptions they asked for that are ready.
+
+    describarr says what became of each title, by the file Jellyfin has for
+    it. Either of them not answering ends this look with every ask kept, for
+    the next pass to ask again. Anything else going wrong with one title costs
+    only that title, and only this time: describarr answering with an error
+    about one file is that file's trouble, not describarr being away, and
+    ending the look there would hold up every title after it on every pass.
+    """
+    if not describarr.configured():
+        return
+    for account in accounts:
+        for ask in store.description_asks(account.key):
+            try:
+                _check_description(account, ask)
+            except jellyfin.JellyfinUnavailable as exc:
+                log.info("descriptions not looked at, Jellyfin is not answering: %s",
+                         exc)
+                return
+            except httpx.TransportError as exc:
+                log.info("descriptions not looked at, describarr is not answering: %s",
+                         exc)
+                return
+            except Exception as exc:  # noqa: BLE001 - one title failing must not
+                # stop everybody after it hearing about theirs.
+                log.warning("description not looked at user=%s item=%s: %r",
+                            account.key, ask["item_id"], exc)
+
+
+def _check_description(account: jellyfin.User, ask) -> None:
+    """Tell, forget, or keep waiting on one title somebody asked to have described."""
+    item_id = ask["item_id"]
+    item = jellyfin.item_with_path(item_id, account.id)
+    # Gone from the library, or from the disk: nothing will be described, and
+    # describarr answers a file with no path with an error, not an outcome.
+    if item is None or not (item.get("Path") or "").strip():
+        store.drop_description_ask(account.key, item_id)
+        log.info("description ask forgotten, no longer in the library user=%s item=%s",
+                 account.key, item_id)
+        return
+    found = describarr.outcome(item)
+    state = found["state"]
+    if state in DESCRIPTION_READY:
+        # Kept when nothing could be sent, so the hour after Jellyfin said it
+        # cannot send puts the notice off rather than losing it.
+        if description_ready(account.key, item_id, ask["title"]) is not None:
+            store.drop_description_ask(account.key, item_id)
+        return
+    if state in DESCRIPTION_GAVE_UP:
+        # Only the ask this answer was about: somebody asking again meanwhile
+        # sent describarr a new request, which may yet succeed. A ready
+        # description answers any ask for it, so that branch drops whichever.
+        store.drop_description_ask(account.key, item_id, ask["asked_at"])
+        log.info("description ask forgotten, describarr said %s user=%s item=%s "
+                 "detail=%s", state, account.key, item_id, found["detail"])
+    # Anything else is working, queued or not known yet, and waits.

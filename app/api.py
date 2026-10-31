@@ -502,6 +502,10 @@ def post_describe(user: jellyfin.User = Depends(caller),
 
     The path comes from this service because `Path` is administrator-only in
     Jellyfin, and a listener's client cannot see it.
+
+    Where this server sends notices, who asked for a film is remembered once
+    describarr has taken it, so they can be told when its description is
+    ready (`notices.asked_for_description`).
     """
     if not describarr.configured():
         raise HTTPException(
@@ -540,6 +544,7 @@ def post_describe(user: jellyfin.User = Depends(caller),
         raise HTTPException(
             status_code=503,
             detail=f"describarr could not be reached: {exc}")
+    notices.asked_for_description(user.key, item_id, item)
     return {"queued": True, "detail": detail}
 
 
