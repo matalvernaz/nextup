@@ -8,9 +8,17 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    # Every Python update in one weekly PR, so the set is tested and deployed together
+    # instead of one build per package (fastapi and uvicorn used to collide).
+    groups:
+      python:
+        patterns: ["*"]
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns: ["*"]
