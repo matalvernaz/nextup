@@ -365,9 +365,14 @@ attempt("by its publisher alone",
         lambda: dramatized_row({"title": "Book", "publisher": "Graphic Audio LLC"}), True)
 attempt("anybody's performance by Audible's content type",
         lambda: dramatized_row({"title": "Book", "contentType": "Performance"}), True)
-attempt("a cast list by its first name",
+# A cast credit was a dramatization here until 2026-11-01. Redwall's unabridged
+# readings by Brian Jacques with a cast are credited "Full Cast", "full cast",
+# "a full cast" and "A Full Cast", so the same recordings came out as both
+# kinds and half the series was held back. A credit alone now says nothing;
+# see test_books_series_full_cast_readings.py.
+attempt("a cast list alone does not say which kind it is",
         lambda: dramatized_row({"title": "Book", "narrators": [{"name": "Full Cast"}]}),
-        True)
+        None)
 attempt("a full-cast edition by its title",
         lambda: dramatized_row(
             {"title": "Harry Potter and the Chamber of Secrets (Full-Cast Edition)"}), True)
