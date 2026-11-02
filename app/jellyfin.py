@@ -35,6 +35,15 @@ def _headers() -> dict:
 
 _TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 
+# Listing an account's whole book library is the one request here that can
+# take longer than that on a healthy server. Matt's two book libraries took 15
+# and 22 seconds on a quiet server and 55 and 61 while Jellyfin ran a library
+# scan (2026-11-01), so every scan made the listing time out: arrivals went
+# unnoticed, followed series went unlooked-at, and the shelves went stale until
+# the next quiet read. Two minutes covers a scan with room to spare; every
+# other request keeps the ordinary timeout.
+_LISTING_TIMEOUT = httpx.Timeout(120.0, connect=10.0)
+
 #: How many items one listing request asks for. Every library this has been
 #: pointed at fits in one page, so the paging below costs nothing on them; it
 #: exists so that a library which does not still gets a right answer instead of
@@ -105,9 +114,11 @@ class Owned:
     series_item_ids: dict[str, str] = field(default_factory=dict)
 
 
-def _client() -> httpx.Client:
+def _client(timeout: httpx.Timeout | None = None) -> httpx.Client:
+    if timeout is None:
+        timeout = _TIMEOUT
     return httpx.Client(base_url=config.JELLYFIN_URL, headers=_headers(),
-                        timeout=_TIMEOUT)
+                        timeout=timeout)
 
 
 def _to_user(dto: dict) -> User:
@@ -651,7 +662,8 @@ def books(uid: str) -> list[dict]:
     if not libraries:
         return out
     try:
-        with _client() as c:
+        # The longer wait: see `_LISTING_TIMEOUT`.
+        with _client(_LISTING_TIMEOUT) as c:
             for lib in libraries:
                 out.extend(_all_items(c, {
                     "parentId": lib,

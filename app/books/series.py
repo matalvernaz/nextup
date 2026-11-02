@@ -191,8 +191,10 @@ DRAMATIZATION_PUBLISHERS = ("graphicaudio",)
 #: ordinary "Product" -- but a dramatization from anybody else carries it.
 PERFORMANCE = "performance"
 
-#: What stands first in a cast list where a reader's name would be.
-FULL_CAST = "full cast"
+#: How a cast is credited where a reader's name would be, once `_norm` has had
+#: it. Audible spells it all four ways across Redwall alone ("Full Cast", "full
+#: cast", "a full cast", "A Full Cast"), before the author and after.
+CAST_CREDITS = frozenset({"full cast", "a full cast", "the full cast"})
 
 #: What a book left out for being in another recording is said to be, when the
 #: books left out are not all left out for the same reason.
@@ -226,23 +228,49 @@ def _names_a_dramatization(text: str) -> bool:
     return any(f" {marker} " in norm for marker in DRAMATIZATION_MARKERS)
 
 
+def _is_cast_credit(name: str) -> bool:
+    """Whether a narrator credit is the cast rather than a person."""
+    return engine._norm(name) in CAST_CREDITS
+
+
 def _readers(names) -> frozenset[str]:
-    """Who reads a recording, folded the way authors are, with the cast-list
-    placeholder left out: it is on every dramatization and names nobody."""
-    folded = {engine._norm_author(name) for name in names if isinstance(name, str)}
-    return frozenset(name for name in folded if name and name != FULL_CAST)
+    """Who reads a recording, folded the way authors are, with the cast credit
+    left out: it names nobody, so two recordings sharing it share no reader."""
+    folded = {engine._norm_author(name) for name in names
+              if isinstance(name, str) and not _is_cast_credit(name)}
+    return frozenset(name for name in folded if name)
 
 
 def _row_version(row: dict) -> Version:
-    """The recording one catalogue row is."""
+    """The recording one catalogue row is.
+
+    A cast credit among the narrators is deliberately not evidence either way.
+    It is on GraphicAudio's dramatizations, and it is just as much on readings
+    where a cast does the voices: Redwall's unabridged recordings by Brian
+    Jacques carry it, and while it counted as a dramatization, eight of them
+    were held back from a whole-series ask beside two identical ones that
+    went through because Audible spelled their credit "a full cast". What does
+    say is a title or subtitle that names a dramatization, a publisher that
+    makes nothing else, or Audible's "Performance" type. Without any of those
+    the kind is unknown, which agrees with either (see `Version`), and
+    `_choose` still prefers a recording of exactly the kind wanted where a
+    book has one.
+    """
     names = [_text(n.get("name")) if isinstance(n, dict) else _text(n)
              for n in (row.get("narrators") or [])]
     publisher = engine._norm(_text(row.get("publisher"))).replace(" ", "")
-    dramatized = (
+    said = (
         _names_a_dramatization(f"{_text(row.get('title'))} {_text(row.get('subtitle'))}")
         or any(name in publisher for name in DRAMATIZATION_PUBLISHERS)
-        or _text(row.get("contentType")).casefold() == PERFORMANCE
-        or any(engine._norm(name) == FULL_CAST for name in names))
+        or _text(row.get("contentType")).casefold() == PERFORMANCE)
+    # A reading is a reading by default; only a cast credit with nothing else
+    # to go on leaves the kind open.
+    if said:
+        dramatized = True
+    elif any(_is_cast_credit(name) for name in names):
+        dramatized = None
+    else:
+        dramatized = False
     book_format = _text(row.get("bookFormat")).casefold()
     abridged = {"abridged": True, "unabridged": False}.get(book_format)
     return Version(dramatized, abridged, _text(row.get("language")).casefold() or None,
@@ -255,8 +283,9 @@ def _member_version(book: dict, by_asin: dict[str, Version],
 
     Its Audible id decides where the listing carries it. Failing that, its
     reader: the recording at the same position that one of its narrators
-    reads. Failing both, what its own name and cast list say, which is enough
-    to tell a dramatization from a reading and no more.
+    reads. Failing both, what its own name says, which is enough to tell a
+    dramatization from a reading and no more. A cast among its narrators says
+    nothing here either, for the reason given on `_row_version`.
     """
     asin = (engine._asin(book) or "").upper()
     if asin in by_asin:
@@ -268,8 +297,7 @@ def _member_version(book: dict, by_asin: dict[str, Version],
         for version in at_key.get(_identity(position, ""), ()):
             if version.narrators & readers:
                 return version
-    if (_names_a_dramatization(book.get("Name") or "")
-            or any(engine._norm(name) == FULL_CAST for name in names)):
+    if _names_a_dramatization(book.get("Name") or ""):
         return Version(True, None, None, readers)
     return Version(None, None, None, readers) if readers else None
 
@@ -352,19 +380,30 @@ def _choose(editions: list[dict], wanted: Version, coverage: Counter) -> dict | 
     """The row to ask for, out of every listing of one missing book.
 
     Only a recording of the kind wanted, and of those the one with a reader
-    the library already has, then the one whose reader reads most of the
-    series -- so a series nobody holds any of stays in one voice where the
-    catalogue offers a choice. Then the first listed, as before: the two
-    marketplaces' copies of one reading are the same recording. None when the
-    book is only listed in another kind.
+    the library already has, then one of exactly the kind wanted over one
+    that only agrees with it because the catalogue is silent, then the one
+    whose reader reads most of the series -- so a series nobody holds any of
+    stays in one voice where the catalogue offers a choice. Then the first
+    listed, as before: the two marketplaces' copies of one reading are the
+    same recording. None when the book is only listed in another kind.
+
+    The exact-kind step comes before the reader count on purpose. A cast the
+    catalogue says nothing about agrees with a reading, and a radio drama
+    performs every book of its series with the same named cast, so on reader
+    count alone it would take the whole series from readers who each read one
+    book. Where the drama is the only recording of a book, it is still asked
+    for: there is nothing exact to prefer.
     """
     eligible = [c for c in editions if _compatible(c["version"], wanted)]
     if not eligible:
         return None
 
-    def preference(candidate: dict) -> tuple[int, int]:
-        readers = candidate["version"].narrators
+    def preference(candidate: dict) -> tuple[int, int, int]:
+        version = candidate["version"]
+        readers = version.narrators
+        same_kind = version.dramatized == wanted.dramatized
         return (len(readers & wanted.narrators),
+                1 if same_kind else 0,
                 max((coverage[name] for name in readers), default=0))
 
     # `max` keeps the first of equals, which is the listing's order.
