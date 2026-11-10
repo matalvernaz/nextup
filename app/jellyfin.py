@@ -58,6 +58,10 @@ _CREDENTIAL_TIMEOUT = httpx.Timeout(5.0, connect=3.0)
 #: Collection type of a Jellyfin view, per medium this service serves.
 COLLECTION_TYPES = {"movie": "movies", "series": "tvshows",
                     "music": "music", "book": "books",
+                    # BBC downloads are hardlinked into the household's TV
+                    # library by the importer on dockge, so the BBC medium
+                    # reads the same libraries as series do.
+                    "bbc": "tvshows",
                     # The audiobook fork's own library kind. A stock Jellyfin
                     # has no such view, so podcasts are simply never offered
                     # against one.
@@ -344,6 +348,8 @@ def library_ids(medium: str) -> list[str]:
     configured = {
         "movie": config.MOVIE_LIBRARY_IDS,
         "series": config.SERIES_LIBRARY_IDS,
+        # The same libraries as series, for the reason COLLECTION_TYPES gives.
+        "bbc": config.SERIES_LIBRARY_IDS,
         "music": config.MUSIC_LIBRARY_IDS,
         "book": config.BOOK_LIBRARY_IDS,
         "podcast": config.PODCAST_LIBRARY_IDS,

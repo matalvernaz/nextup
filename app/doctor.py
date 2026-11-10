@@ -24,7 +24,7 @@ _LIBRARY_KIND = {"movie": "Movies", "series": "Shows",
 #: What a medium is called in a sentence about it. Not the medium key with an
 #: "s" on the end, which gives "Seriess" and "Musics".
 _PLURAL = {"movie": "Films", "series": "Series", "music": "Music",
-           "book": "Books"}
+           "book": "Books", "bbc": "BBC programmes"}
 
 
 def _jellyfin_line() -> tuple[str, bool]:

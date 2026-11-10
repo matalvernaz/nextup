@@ -135,7 +135,44 @@ def _listenarr() -> Status:
     return Status("book", "listenarr", True, ok, detail)
 
 
-_PROBES = (_radarr, _sonarr, _buskarr, _listenarr)
+def _bbc() -> Status:
+    """bbc-ui, through the client's own health call.
+
+    Named "bbc" because the Backends page matches a saved form to its probe by
+    the settings' prefix, and these are BBC_UI_URL and BBC_UI_TOKEN.
+
+    Through `client.health` rather than `_probe`, so the reply is read by the
+    contract: a 200 in a schema this nextup does not share is a skew, and a skew
+    is not healthy. With this module's short timeout, not the client's, because
+    this is asked while somebody waits on a page.
+
+    A bbc-ui whose UK tunnel is down reads as not reachable. It answered, but
+    nothing asked of it could reach iPlayer, so a request now would only wait.
+    The medium stays offered either way, carrying this sentence, as every other
+    backend's does.
+    """
+    # Imported here: `bbc.client` reads config at call time and this module is
+    # imported by `media` very early.
+    from . import bbc
+    from .bbc import client
+    if not bbc.configured():
+        return Status(bbc.MEDIUM, "bbc", False, None,
+                      "not configured: BBC_UI_URL unset")
+    try:
+        health = client.health(timeout=PROBE_TIMEOUT)
+    except client.BbcUnavailable as exc:
+        return Status(bbc.MEDIUM, "bbc", True, False, str(exc))
+    if not health.ok:
+        return Status(bbc.MEDIUM, "bbc", True, False,
+                      "bbc-ui answered but says it is not working.")
+    if not health.tunnel_ok:
+        return Status(bbc.MEDIUM, "bbc", True, False,
+                      "bbc-ui answered, but its UK tunnel is down, so nothing "
+                      "can be fetched from iPlayer until it is back.")
+    return Status(bbc.MEDIUM, "bbc", True, True)
+
+
+_PROBES = (_radarr, _sonarr, _buskarr, _listenarr, _bbc)
 
 _cache: tuple[Status, ...] | None = None
 _cached_at = 0.0

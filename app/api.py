@@ -105,8 +105,11 @@ def info() -> dict:
 #: Every shape this server can answer in. 1 is what shipped: films, series and
 #: music. 2 adds books. 3 adds podcasts' recommendations, with a second surface
 #: a shipped client does not know (what the library could add). Podcasts are
-#: never asked for here: they are added through Jellyfin (2026-10-27).
-SUPPORTED_PROTOCOLS = (1, 2, 3)
+#: never asked for here: they are added through Jellyfin (2026-10-27). 4 adds
+#: BBC iPlayer to the media a client is told about. Only capabilities knows 4
+#: so far; every other route still serves what `media.available()` answers, so
+#: BBC is listed but cannot yet be searched, asked for or cancelled.
+SUPPORTED_PROTOCOLS = (1, 2, 3, 4)
 
 #: Media a protocol-1 client is told about. Books are withheld deliberately,
 #: and not because a fourth medium would fail to decode -- it decodes fine. A
@@ -145,7 +148,8 @@ def capabilities(protocol: int = 1,
             detail=f"This server speaks protocol "
                    f"{', '.join(str(v) for v in SUPPORTED_PROTOCOLS)}, "
                    f"not {protocol}.")
-    offered = media.available()
+    # BBC only for a client that asked for 4; 1 to 3 get exactly what they did.
+    offered = media.offered(protocol)
     if protocol == 1:
         offered = {key: value for key, value in offered.items()
                    if key in PROTOCOL_1_MEDIA}

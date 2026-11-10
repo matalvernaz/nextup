@@ -10,7 +10,7 @@ import threading
 import time
 from dataclasses import dataclass
 
-from . import (backends, buskarr, config, jellyfin, listenarr, logs,
+from . import (backends, bbc, buskarr, config, jellyfin, listenarr, logs,
                podcasts, radarr, recommendations, sonarr)
 
 log = logs.get("media")
@@ -22,6 +22,21 @@ BOOK = listenarr.MEDIUM
 #: Recommended, never asked for: podcasts are added through Jellyfin (Matt,
 #: 2026-10-27), so this name is no medium of the registry below.
 PODCAST = podcasts.MEDIUM
+BBC = bbc.MEDIUM
+
+#: The newest protocol every route outside `offered` was written for.
+LEGACY_PROTOCOL = 3
+
+#: The first protocol that knows a medium, for the media a shipped client does
+#: not. BBC is registered like any other medium but kept out of `available()`,
+#: so `get("bbc")` answers None, and searching for or asking for a medium this
+#: server does not serve is refused before anything is called. Cancelling and
+#: listing do not ask the registry: they read stored requests, and they find
+#: no BBC ones only because nothing can store one yet. The request path that
+#: does store them has to route BBC's cancelling and listing itself, and keep
+#: BBC rows out of what a protocol 1 to 3 client is shown. Only code written
+#: for protocol 4 asks `offered(4)`.
+FIRST_PROTOCOL = {BBC: 4}
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,10 +72,12 @@ _BACKENDS = (
     (MUSIC, "Music", buskarr.UNITS, buskarr.configured, lambda: config.MUSIC_DAILY_CAP),
     (BOOK, "Books", listenarr.UNITS, listenarr.configured,
      lambda: config.BOOK_DAILY_CAP),
+    (BBC, "BBC iPlayer", (bbc.UNIT,), bbc.configured,
+     lambda: config.BBC_DAILY_CAP),
 )
 
 
-def _build() -> tuple[dict[str, Medium], bool]:
+def _build(later: bool = False) -> tuple[dict[str, Medium], bool]:
     """The registry, and whether it is complete enough to keep.
 
     An incomplete build is one where Jellyfin could not be asked which
@@ -68,10 +85,17 @@ def _build() -> tuple[dict[str, Medium], bool]:
     library listing timed out would be worse -- but it is not cached, because
     empty library ids are exactly what tells a client to show no control at
     all, and this box has started services before Jellyfin was up.
+
+    Two separate builds: the media every protocol knows, and, with `later`,
+    the ones in `FIRST_PROTOCOL`. Each is cached on its own, so a BBC outage
+    never shortens how long the films, series, music and books registry is
+    kept, and an older client's answer cannot depend on bbc-ui at all.
     """
     found: dict[str, Medium] = {}
     complete = True
     for key, label, units, is_configured, cap in _BACKENDS:
+        if (key in FIRST_PROTOCOL) != later:
+            continue
         if not is_configured():
             log.info("%s is not offered: its backend is not configured", key)
             continue
@@ -134,9 +158,18 @@ _registry_built_at = 0.0
 _registry_settled = False
 _registry_guard = threading.Lock()
 
+#: The same three facts for the media in `FIRST_PROTOCOL`, kept apart.
+_later: dict[str, Medium] | None = None
+_later_built_at = 0.0
+_later_settled = False
+
 
 def available() -> dict[str, Medium]:
-    """The media this server serves.
+    """The media this server serves to every route written before protocol 4.
+
+    That is every route there is, today. BBC is not here: it is built and
+    cached separately (see `FIRST_PROTOCOL`), and a new route that means to
+    serve it asks `offered`.
 
     Cached, because it costs a Jellyfin round trip and a settled answer changes
     rarely. An unsettled one -- Jellyfin could not be asked, or a configured
@@ -160,6 +193,52 @@ def available() -> dict[str, Medium]:
         return built
 
 
+def _later_media() -> dict[str, Medium]:
+    """The media in `FIRST_PROTOCOL`, cached by the same rules as `available`."""
+    global _later, _later_built_at, _later_settled
+    with _registry_guard:
+        lifetime = (SETTLED_TTL_SECONDS if _later_settled
+                    else PROVISIONAL_TTL_SECONDS)
+        if (_later is not None
+                and time.monotonic() - _later_built_at < lifetime):
+            return _later
+    built, settled = _build(later=True)
+    with _registry_guard:
+        _later = built
+        _later_built_at = time.monotonic()
+        _later_settled = settled
+        if settled and built:
+            log.info("serving later media: %s", ", ".join(sorted(built)))
+        return built
+
+
+def offered(protocol: int) -> dict[str, Medium]:
+    """The media a client speaking `protocol` may be told about.
+
+    Built on `available()` rather than beside it, so `offered(3)` is always
+    exactly what `available()` answers, and a newer medium is only ever added
+    on top for a protocol that knows it.
+    """
+    found = dict(available())
+    if protocol > LEGACY_PROTOCOL:
+        for key, medium in _later_media().items():
+            if FIRST_PROTOCOL[key] <= protocol:
+                found[key] = medium
+    return found
+
+
+def lookup(medium: str) -> Medium | None:
+    """One medium from the whole registry, BBC included.
+
+    For reads that are safe to answer about any medium, such as what an
+    account's daily cap is. Searching and asking use `get`, which leaves BBC
+    out until its own request path exists.
+    """
+    if medium in FIRST_PROTOCOL:
+        return _later_media().get(medium)
+    return available().get(medium)
+
+
 def forget() -> None:
     """Drop everything derived from a connection setting.
 
@@ -168,10 +247,12 @@ def forget() -> None:
     server, and which media can be ranked is the same question as which
     libraries exist.
     """
-    global _registry, _registry_settled
+    global _registry, _registry_settled, _later, _later_settled
     with _registry_guard:
         _registry = None
         _registry_settled = False
+        _later = None
+        _later_settled = False
     _owned.forget()
     backends.forget()
     recommendations.forget()

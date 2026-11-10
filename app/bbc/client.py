@@ -101,15 +101,18 @@ def _read(path: str, params: dict) -> dict:
             "bbc-ui answered a body that is not JSON.") from exc
 
 
-def health() -> contract.Health:
+def health(timeout: httpx.Timeout = TIMEOUT) -> contract.Health:
     """bbc-ui's liveness. The one call that needs no shared secret.
 
     A 200 with a schema this nextup cannot read is unhealthy, not healthy, which
     is why it parses through the contract rather than trusting the status code.
+
+    `timeout` is for the backends probe, which asks with its own shorter limit
+    while somebody waits on a page; every other caller keeps this module's.
     """
     try:
         resp = httpx.get(_base() + "/api/health",
-                         headers={"Accept": "application/json"}, timeout=TIMEOUT)
+                         headers={"Accept": "application/json"}, timeout=timeout)
     except httpx.HTTPError as exc:
         raise BbcUnavailable(
             f"bbc-ui health could not be reached: {type(exc).__name__}") from exc

@@ -151,7 +151,9 @@ def daily_cap(user: jellyfin.User, medium: str) -> int | None:
     """
     if user.is_admin:
         return None
-    found = media.get(medium)
+    # The whole registry, BBC included: a cap is safe to state for any medium,
+    # and a protocol 4 client is told BBC's before BBC can be asked for.
+    found = media.lookup(medium)
     if found is None:
         return 0
     return store.daily_cap(user.key, medium, found.daily_cap)
@@ -816,4 +818,12 @@ def _stop(medium: str, row) -> bool:
         return radarr.cancel(backend_id)
     if medium == media.SERIES:
         return sonarr.cancel(backend_id)
-    return buskarr.cancel(backend_id)
+    if medium == media.MUSIC:
+        return buskarr.cancel(backend_id)
+    # Music used to be what everything else fell through to. Cancelling reads a
+    # stored row rather than the registry, so a medium with its own path (BBC,
+    # once it can be asked for) must never land here and have its id handed to
+    # buskarr.
+    log.error("cancel medium=%s backend_id=%s: no acquisition tool to tell",
+              medium, backend_id)
+    return False

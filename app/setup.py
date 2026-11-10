@@ -144,6 +144,22 @@ def _buskarr_form() -> BackendForm:
     )
 
 
+def _bbc_form() -> BackendForm:
+    return BackendForm(
+        key="bbc", name="bbc", label="BBC iPlayer (bbc-ui)", medium="bbc",
+        status=backends.status("bbc"),
+        fields=(
+            _field("BBC_UI_URL", "bbc-ui address",
+                   help_text="Where this reaches bbc-ui on the Docker network, "
+                             "for example http://bbc-ui:8080."),
+            _field("BBC_UI_TOKEN", "bbc-ui shared secret", secret=True,
+                   help_text="The same secret bbc-ui was started with. Without "
+                             "it this refuses to ask bbc-ui for anything but "
+                             "whether it is up."),
+        ),
+    )
+
+
 def _recommendation_sources_form() -> BackendForm:
     """The outside catalogues a shelf may consult.
 
@@ -202,7 +218,8 @@ def forms() -> tuple[BackendForm, ...]:
         _arr_form("sonarr", "Sonarr", "series", 8989),
         _listenarr_form(),
         _buskarr_form(),
-        # Last: these change how a shelf is ordered, and the four above decide
+        _bbc_form(),
+        # Last: these change how a shelf is ordered, and the five above decide
         # whether anything can be asked for at all.
         _recommendation_sources_form(),
     )

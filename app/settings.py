@@ -35,6 +35,7 @@ WRITABLE = frozenset({
     "SONARR_ROOT_FOLDER",
     "BUSKARR_URL", "BUSKARR_API_KEY",
     "LISTENARR_URL", "LISTENARR_QUALITY_PROFILE_ID",
+    "BBC_UI_URL", "BBC_UI_TOKEN",
     "MOVIE_LIBRARY_IDS", "SERIES_LIBRARY_IDS", "MUSIC_LIBRARY_IDS",
     "BOOK_LIBRARY_IDS", "PODCAST_LIBRARY_IDS",
     "TMDB_API_KEY", "GOOGLE_BOOKS_API_KEY", "HARDCOVER_TOKEN",
@@ -48,6 +49,8 @@ SECRET = frozenset({
     # access token -- `me` answers with the account that issued it -- so it is
     # a credential that names somebody, not just one that opens a door.
     "TMDB_API_KEY", "GOOGLE_BOOKS_API_KEY", "HARDCOVER_TOKEN",
+    # bbc-ui's shared secret. Whoever holds it can make bbc-ui run get_iplayer.
+    "BBC_UI_TOKEN",
 })
 
 _PREFIX = "setting:"
