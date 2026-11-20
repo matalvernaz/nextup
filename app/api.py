@@ -23,6 +23,7 @@ from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query
 from . import (approvals, arr, config, describarr, gone, held, imports,
                jellyfin, logs, media, notices, playlists, podcasts,
                recommendations, seasons, store, wants)
+from .books import acquisition
 
 log = logs.get("api")
 
@@ -356,7 +357,7 @@ def get_requests(medium: str | None = None, held_asks: bool = Query(
                    "arrived is not known.") from exc
     return {
         "version": config.API_VERSION,
-        "requests": rows,
+        "requests": acquisition.enrich(rows, key="itemKey"),
         "remainingToday": {found.key: wants.allowance(user, found.key)
                            for found in media.available().values()},
     }
