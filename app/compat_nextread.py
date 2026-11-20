@@ -23,7 +23,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from . import arr, artwork, config, held, jellyfin, listenarr, logs
 from . import wants as asks
 from .api import OVER_LIMIT_REQUEST, caller
-from .books import search, series, shelves, wants
+from .books import acquisition, search, series, shelves, wants
 
 log = logs.get("compat.nextread")
 
@@ -171,7 +171,7 @@ def get_shelves(force: bool = False,
         # The index rather than the shelf's own view of what is owned: a book
         # arrives under the ASIN the other marketplace issued for it, so
         # arrival is decided on title and author too.
-        "requests": requests,
+        "requests": acquisition.enrich(requests),
     }
 
 

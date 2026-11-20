@@ -297,9 +297,9 @@ def states(user_key: str, owned: tuple[set, dict] | None) -> list[dict]:
     """This account's requests, each with its current state.
 
     `owned` is the library index -- ASINs, and normalised titles to author sets
-    -- which the engine builds on every run anyway. There is still no status to
-    fetch from Listenarr and nothing to poll: a book has either reached the
-    library or it has not.
+    -- which the engine builds on every run anyway. Only Jellyfin settles an
+    arrival. The response boundaries may add optional acquisition explanations;
+    this shared read never fetches them for search or background sweeps.
 
     `None` means the index could not be had. The rows are still reported, with
     the state their age implies, and nothing is settled: a book that has

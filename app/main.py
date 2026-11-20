@@ -29,6 +29,7 @@ from . import (api, approvals, arr, artwork, backends, compat_nextread,
                notices, playlists, podcasts, recommendations, seasons,
                selfcheck, sessions, settings, setup, store, throttle, wants)
 from .books import audible as book_audible
+from .books import acquisition as book_acquisition
 from .books import follow as book_follow
 from .books import hardcover_shelf
 from .books import search as book_search
@@ -51,6 +52,7 @@ async def lifespan(_: FastAPI):
     approvals.watch()
     book_follow.watch()
     notices.watch()
+    book_acquisition.warm()
     yield
 
 
@@ -987,7 +989,8 @@ def index(request: Request, q: str = "", medium: str = "", unit: str = "",
             "import_context": import_context,
             "import_limit": _import_limit(user) if import_context else None,
             "results": results,
-            "requests": wants.states(user, include_held=True),
+            "requests": book_acquisition.enrich(
+                wants.states(user, include_held=True), key="itemKey"),
             "follows": store.followed(user.key) if config.FOLLOW_SERIES else [],
             "message": msg,
             "allowance": {key: wants.allowance(user, key) for key in offered},
