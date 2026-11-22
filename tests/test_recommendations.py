@@ -6,7 +6,11 @@ harness.setup()
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app import api, config, jellyfin, media, recommendations  # noqa: E402
+from app import api, config, jellyfin, media, recommendations, store  # noqa: E402
+
+# A shelf is read against this account's marks (app/taste.py), which live in
+# the store like everything else an account says.
+store.init()
 
 check = harness.Check("recommendations")
 config.SERIES_RECOMMENDATION_LIMIT = 10

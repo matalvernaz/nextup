@@ -462,9 +462,15 @@ check.equal(top["source"], "neighbour", "the row says where it came from")
 check.that(any("Fight Club" in reason for reason in top["reason"]),
            "and names the film somebody actually watched")
 
-check.that(built["ranker_version"].endswith("v2"),
+def version_number(version: str) -> int:
+    return int(version.rsplit("v", 1)[1])
+
+
+# At least the versions the TMDb neighbours brought in; later changes move
+# them on again (the marks did).
+check.that(version_number(built["ranker_version"]) >= 2,
            "the movie ranker version moved, so cached shelves are rebuilt")
-check.that(recommendations.ranker_version("series").endswith("v3"),
+check.that(version_number(recommendations.ranker_version("series")) >= 3,
            "and so did the series one")
 
 

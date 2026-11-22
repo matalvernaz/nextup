@@ -302,6 +302,28 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+-- What one account has said about one suggestion: more like this, less like
+-- this, already had it (app/taste.py). The person's own statement, kept until
+-- they take it back, so it is ledger and not cache. A mark taken back keeps its
+-- row with no opinion and had=0: `revision` is a counter across the whole
+-- table, and a deleted row could make an account's newest revision go
+-- backwards, which is what a shelf compares itself against to know it is stale.
+CREATE TABLE IF NOT EXISTS taste_marks (
+    user_key   TEXT NOT NULL,
+    medium     TEXT NOT NULL,
+    item_key   TEXT NOT NULL,
+    surface    TEXT NOT NULL,
+    opinion    TEXT NOT NULL DEFAULT '',
+    had        INTEGER NOT NULL DEFAULT 0,
+    title      TEXT NOT NULL DEFAULT '',
+    details    TEXT NOT NULL DEFAULT '{}',
+    marked_at  REAL NOT NULL,
+    revision   INTEGER NOT NULL,
+    PRIMARY KEY (user_key, medium, item_key)
+);
+CREATE INDEX IF NOT EXISTS taste_marks_by_revision
+    ON taste_marks(user_key, medium, revision);
 """
 
 #: The audiobook engine's caches and its own user-scoped state. Separate from
@@ -678,7 +700,8 @@ def nothing_to_rekey() -> bool:
 #: unmigrated one.
 USER_SCOPED_TABLES = ("requests", "submitted", "dismissed", "runs",
                       "recommendation_items", "feedback_events", "shelves",
-                      "held_requests", "followed_series", "description_asks")
+                      "held_requests", "followed_series", "description_asks",
+                      "taste_marks")
 
 
 def rekey_users(name_to_id: dict[str, str]) -> int:
@@ -1546,6 +1569,91 @@ def restore(user_key: str, asin: str) -> bool:
         cur = conn.execute("DELETE FROM dismissed WHERE user_key=? AND asin=?",
                            (user_key, asin))
     return cur.rowcount > 0
+
+
+# --- what an account has said about suggestions (app/taste.py) ---------------
+
+
+def taste_mark(user_key: str, medium: str, item_key: str) -> sqlite3.Row | None:
+    """One account's mark on one thing, taken back or not, or None."""
+    with db() as conn:
+        return conn.execute(
+            "SELECT * FROM taste_marks WHERE user_key=? AND medium=? AND item_key=?",
+            (user_key, medium, item_key)).fetchone()
+
+
+class StaleMark(Exception):
+    """A change that names a revision the mark has moved on from."""
+
+
+def put_taste_mark(user_key: str, medium: str, item_key: str, surface: str,
+                   opinion: str, had: bool, title: str, details: str,
+                   if_revision: int | None = None
+                   ) -> tuple[sqlite3.Row | None, sqlite3.Row]:
+    """Write one mark and answer the row it replaced and the row it is now.
+
+    One write transaction from the first read to the last, so two changes to
+    the same mark arriving together cannot both answer the same "before":
+    that answer is what Undo puts back.
+
+    `if_revision` makes the write conditional on the mark still being at that
+    revision, which is what Undo sends: a mark changed since, on another
+    phone, is left as it is and `StaleMark` is raised.
+
+    The revision is one more than the largest anywhere in the table, taken in
+    the same statement that writes the row, so two marks can never share one.
+    An empty title or details keeps what the row already had: taking a mark
+    back sends neither, and the details of a book that is not in the library
+    are what let it count as evidence if the mark is put back.
+    """
+    with db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        previous = conn.execute(
+            "SELECT * FROM taste_marks WHERE user_key=? AND medium=? AND item_key=?",
+            (user_key, medium, item_key)).fetchone()
+        if if_revision is not None and (
+                previous is None or int(previous["revision"]) != if_revision):
+            conn.rollback()
+            raise StaleMark(item_key)
+        conn.execute(
+            "INSERT INTO taste_marks(user_key,medium,item_key,surface,opinion,had,"
+            "title,details,marked_at,revision) VALUES(?,?,?,?,?,?,?,?,?,"
+            "(SELECT COALESCE(MAX(revision),0)+1 FROM taste_marks)) "
+            "ON CONFLICT(user_key,medium,item_key) DO UPDATE SET "
+            "surface=excluded.surface, opinion=excluded.opinion, had=excluded.had, "
+            "title=CASE WHEN excluded.title!='' THEN excluded.title ELSE taste_marks.title END, "
+            "details=CASE WHEN excluded.details!='{}' THEN excluded.details "
+            "ELSE taste_marks.details END, "
+            "marked_at=excluded.marked_at, revision=excluded.revision",
+            (user_key, medium, item_key, surface, opinion, 1 if had else 0,
+             title, details, time.time()))
+        current = conn.execute(
+            "SELECT * FROM taste_marks WHERE user_key=? AND medium=? AND item_key=?",
+            (user_key, medium, item_key)).fetchone()
+    return previous, current
+
+
+def taste_marks(user_key: str, medium: str) -> list[sqlite3.Row]:
+    """Every mark one account has made in one medium, oldest first.
+
+    Marks taken back are included: a mark taken back is the newest thing said
+    about its item, and has to override an older mark that reaches the same
+    item another way (see `taste.Mark.active`).
+    """
+    with db() as conn:
+        return conn.execute(
+            "SELECT * FROM taste_marks WHERE user_key=? AND medium=? "
+            "ORDER BY revision",
+            (user_key, medium)).fetchall()
+
+
+def taste_revision(user_key: str, medium: str) -> int:
+    """The newest revision among one account's marks in one medium, or 0."""
+    with db() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(MAX(revision),0) AS revision FROM taste_marks "
+            "WHERE user_key=? AND medium=?", (user_key, medium)).fetchone()
+    return int(row["revision"])
 
 
 # --- outside catalogues that are not Audible ---------------------------------

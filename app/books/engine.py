@@ -18,10 +18,12 @@ one early score reorder the whole shelf.
 """
 import math
 import re
+import threading
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 
 from .. import arr, config, external_books, jellyfin, listenarr, logs
+from .. import taste as marking
 from . import audible, hardcover_shelf, store, textmodel
 
 log = logs.get("engine")
@@ -107,7 +109,8 @@ MAX_REASONS = 2
 SERIES_REPEAT_PENALTY = 0.8
 AUTHOR_REPEAT_PENALTY = 0.35
 
-RANKER_VERSION = "5"
+# "6": marks (app/taste.py). With none, a shelf is what "5" made.
+RANKER_VERSION = "6"
 
 GENERIC_GENRE_REASONS = {
     "audiobooks",
@@ -964,6 +967,287 @@ def shelf_entry(index: dict[str, list[str]], title: str, authors) -> bool:
     return bool(wanted & external_books.surnames(found))
 
 
+class BookMarks:
+    """This account's marks on books, findable however the book is known now.
+
+    A mark is made on a library book (its Jellyfin id) or on a suggestion (its
+    ASIN), and the book it names can move: a suggestion asked for arrives in
+    the library under an id the mark never saw, and the other marketplace's
+    edition of the same book has another ASIN. So a mark is looked for by id
+    and ASIN first, and only when neither finds one by title and authors.
+
+    A mark is kept until it is taken back, so a match by title has to be sure:
+    the same main title AND an author in common by full name, both sides
+    having one. A mark with no authors recorded, or a book with none, matches
+    by its ids alone; two Smiths are not one author. Where several marks name
+    one book the same way, the newest is what the person thinks now.
+    """
+
+    def __init__(self, marks: list["marking.Mark"],
+                 library: list[dict] | None = None) -> None:
+        self.marks = marks
+        self._by_key: dict[str, marking.Mark] = {}
+        self._by_asin: dict[str, marking.Mark] = {}
+        self._by_title: dict[str, list[tuple[list[str], marking.Mark]]] = {}
+        library_by_id = {jellyfin.normalise_id(item.get("Id") or ""): item
+                         for item in library or []}
+        for mark in marks:
+            details = mark.details
+            title = mark.title or str(details.get("title") or "")
+            authors = [str(name) for name in details.get("authors") or [] if name]
+            asin = str(details.get("asin") or "").strip().upper()
+            if mark.surface == marking.OWNED:
+                key = jellyfin.normalise_id(mark.item_key)
+                item = library_by_id.get(key)
+                if item is not None:
+                    title = item.get("Name") or title
+                    authors = _authors(item) or authors
+                    asin = (_asin(item) or asin).strip().upper()
+            else:
+                key = mark.item_key.strip().upper()
+            self._by_key[key] = marking.newest(self._by_key.get(key), mark)
+            # A library book's own ASIN, so its other editions and the
+            # suggestion it once was are found by an exact id too.
+            if asin and asin != key:
+                self._by_asin[asin] = marking.newest(self._by_asin.get(asin), mark)
+            main = external_books.main_title(title)
+            if main and authors:
+                self._by_title.setdefault(main, []).append((authors, mark))
+
+    def __bool__(self) -> bool:
+        return bool(self.marks)
+
+    def _titled(self, title: str, authors) -> "marking.Mark | None":
+        main = external_books.main_title(title or "")
+        found = self._by_title.get(main) if main else None
+        wanted = {_norm_author(name) for name in authors or [] if name}
+        if not found or not wanted:
+            return None
+        return marking.newest(*(
+            mark for marked_authors, mark in found
+            if wanted & {_norm_author(name) for name in marked_authors}))
+
+    def _exact(self, item_id: str, asin: str) -> "marking.Mark | None":
+        asin = (asin or "").strip().upper()
+        return marking.newest(
+            self._by_key.get(jellyfin.normalise_id(item_id)) if item_id else None,
+            self._by_key.get(asin) if asin else None,
+            self._by_asin.get(asin) if asin else None)
+
+    def _find(self, item_id: str, asin: str, title: str,
+              authors) -> "marking.Mark | None":
+        """By id or ASIN, and by title and author only when neither names one."""
+        exact = self._exact(item_id, asin)
+        if exact is not None:
+            return exact
+        return self._titled(title, authors)
+
+    def for_item(self, item: dict) -> "marking.Mark | None":
+        """The mark on a library book."""
+        return self._find(item.get("Id") or "", _asin(item) or "",
+                          item.get("Name") or "", _authors(item))
+
+    def for_own_row(self, row: dict) -> "marking.Mark | None":
+        """The mark on a row of the owned shelf."""
+        return self._find(row.get("id") or "", row.get("asin") or "",
+                          row.get("title") or "", row.get("authors") or [])
+
+    def for_candidate(self, cand: dict) -> "marking.Mark | None":
+        """The mark on a book the library does not hold."""
+        return self._find("", cand.get("asin") or "",
+                          cand.get("title") or "", cand.get("authors") or [])
+
+
+def _library_identities(library: list[dict]) -> tuple[set[str], dict[str, list[set[str]]]]:
+    """Every library book's ASIN, and its main title with its authors by full name.
+
+    What a marked suggestion is checked against to know whether the library
+    holds it now, by the same rule `BookMarks` applies a mark by: so a mark is
+    never treated as held by a book it would not be applied to, which would
+    leave it neither a seed nor a book anywhere.
+    """
+    asins = {(_asin(item) or "").strip().upper() for item in library if _asin(item)}
+    titles: dict[str, list[set[str]]] = {}
+    for item in library:
+        main = external_books.main_title(item.get("Name") or "")
+        authors = {_norm_author(name) for name in _authors(item) if name}
+        if main and authors:
+            titles.setdefault(main, []).append(authors)
+    return asins, titles
+
+
+def _held(mark: "marking.Mark",
+          identities: tuple[set[str], dict[str, list[set[str]]]]) -> bool:
+    """Whether the library holds the book a suggestion was marked on."""
+    asins, titles = identities
+    if mark.item_key.strip().upper() in asins:
+        return True
+    main = external_books.main_title(
+        mark.title or str(mark.details.get("title") or ""))
+    wanted = {_norm_author(name) for name in mark.details.get("authors") or [] if name}
+    return bool(main and wanted) and any(
+        wanted & authors for authors in titles.get(main, []))
+
+
+def _marked_book(mark: "marking.Mark") -> dict:
+    """A marked suggestion the library does not hold, as a library book reads.
+
+    Built from what the suggestion said when it was marked, so it can be a seed
+    like any book listened to here: its authors and narrators, its blurb for
+    the text model, and its ASIN for Audible's neighbours. Never a candidate,
+    and never mistaken for a library item: its id says where it came from.
+    """
+    details = mark.details
+    asin = mark.item_key.strip().upper()
+    people = ([{"Name": name, "Type": "Author"}
+               for name in details.get("authors") or [] if name]
+              + [{"Name": name, "Type": "Narrator"}
+                 for name in details.get("narrators") or [] if name])
+    book = {
+        "Id": f"asin:{asin}",
+        "Name": mark.title or str(details.get("title") or ""),
+        "Overview": str(details.get("description") or ""),
+        "Genres": [str(genre) for genre in details.get("genres") or [] if genre],
+        "People": people,
+        "ProviderIds": {"Audible": asin},
+        "UserData": {},
+    }
+    series = str(details.get("series") or "").strip()
+    position = _candidate_series_position(
+        {"series_position": details.get("series_position")})
+    if series and position is not None:
+        book["SeriesName"] = series
+        book["IndexNumber"] = position
+    return book
+
+
+def _keep_asked(shelf: list[dict], considered: list[dict], key: str) -> list[dict]:
+    """A cut shelf with every book marked "more like this" still on it.
+
+    Kept past the cut: the mark is standing, and the row is where its "Undo
+    more like this" lives, so losing the row would leave a mark nobody can
+    see or take back. The private flag goes from every row either way.
+    """
+    kept = {row.get(key) for row in shelf}
+    shelf = shelf + [row for row in considered
+                     if row.get("_asked") and row.get(key) not in kept]
+    for row in considered:
+        row.pop("_asked", None)
+    for row in shelf:
+        row.pop("_asked", None)
+    return shelf
+
+
+def _marked_suggestion(mark: "marking.Mark") -> dict:
+    """A suggestion row for a marked book, from what it said when it was marked."""
+    details = mark.details
+    return {
+        "asin": mark.item_key.strip().upper(),
+        "title": mark.title or str(details.get("title") or ""),
+        "authors": list(details.get("authors") or []),
+        "narrators": list(details.get("narrators") or []),
+        "series": details.get("series") or None,
+        "series_position": details.get("series_position"),
+        "runtime_min": details.get("runtime_min"),
+        "description": str(details.get("description") or ""),
+        "image": details.get("image"),
+        "score": 0.0,
+        "why": [ASKED_FOR_IT_REASON],
+        "because_of": [],
+        "source": "asked",
+    }
+
+
+def _series_library(library: list[dict], mark_of: dict[str, "marking.Mark"],
+                    unheld: list["marking.Mark"]) -> list[dict]:
+    """The library as reading order sees it once "already read" is counted.
+
+    A library book marked already read counts as finished, without anything
+    written to Jellyfin, and so does a marked suggestion the library does not
+    hold, at its place in its series. That is what lets book two through when
+    book one was read somewhere else. The same list feeds both the owned
+    shelf's series plan and the frontier the suggestions are held to, so the
+    two never disagree. With no such marks it is the library unchanged.
+    """
+    had_held = {item_id for item_id, mark in mark_of.items() if mark.had}
+    had_unheld = [mark for mark in unheld if mark.had]
+    if not had_held and not had_unheld:
+        return library
+    listed = []
+    for item in library:
+        if item.get("Id") in had_held and (
+                _listening_progress(item) < SERIES_COMPLETION_PROGRESS):
+            item = {**item,
+                    "UserData": {**(item.get("UserData") or {}), "Played": True}}
+        listed.append(item)
+    for mark in had_unheld:
+        book = _marked_book(mark)
+        if "SeriesName" in book:
+            listed.append({**book, "UserData": {"Played": True}})
+    return listed
+
+
+_playlist_locks: dict[str, "threading.Lock"] = {}
+_playlist_guard = threading.Lock()
+
+
+def _playlist_lock(user_key: str) -> "threading.Lock":
+    with _playlist_guard:
+        return _playlist_locks.setdefault(user_key, threading.Lock())
+
+
+def publish_playlist(user: "jellyfin.User", own: list[dict],
+                     still_current=lambda: True) -> tuple[str | None, bool]:
+    """Write one account's book playlist from an owned shelf, one write at a time.
+
+    Answers the playlist's id and whether the write settles what was owed.
+    Every writer comes through here, so two can never interleave. Before
+    writing, `still_current` says whether the shelf is still the newest one;
+    a writer holding an older shelf writes nothing. The rows are filtered
+    against the marks as they stand, and if a mark is made while the write is
+    on its way the answer is "not settled", so the next read writes it again.
+    """
+    with _playlist_lock(user.key):
+        if not still_current():
+            return None, False
+        revision = marking.revision(user.key, store.MEDIUM)
+        shown = present(user.key, {"own": own})["own"]
+        playlist_id = jellyfin.set_playlist(
+            user.id, _playlist_name(user), [row["id"] for row in shown])
+        settled = (still_current()
+                   and marking.revision(user.key, store.MEDIUM) == revision)
+        return playlist_id, settled
+
+
+def present(user_key: str, data: dict) -> dict:
+    """A built shelf as it stands against this account's marks right now.
+
+    Applied on every read and before every playlist write: a shelf built a
+    minute before somebody said "already read" must not offer it to them
+    again, nor publish it to their playlist, while the rebuild runs. Rows
+    marked "more like this" say so.
+    """
+    marks = marking.marks(user_key, store.MEDIUM)
+    if not marks:
+        return data
+    book_marks = BookMarks(marks)
+
+    def shown(rows: list[dict], find) -> list[dict]:
+        kept = []
+        for row in rows:
+            found = find(row)
+            if found is not None and found.hides:
+                continue
+            if found is not None and found.opinion == marking.MORE:
+                row = {**row, "opinion": marking.MORE}
+            kept.append(row)
+        return kept
+
+    return {**data,
+            "own": shown(data.get("own") or [], book_marks.for_own_row),
+            "discover": shown(data.get("discover") or [], book_marks.for_candidate)}
+
+
 #: Jellyfin scores out of ten and Hardcover out of five, so a Hardcover rating
 #: is doubled on the way in. The weight table above is written in Jellyfin's
 #: scale -- 9 is "loved it", 5 is indifferent -- and a 4.5 arriving as 4.5
@@ -1087,14 +1371,39 @@ def apply_ratings(rows: list[dict], budget: int,
     return budget
 
 
+#: Reasons for evidence that comes only from "more like this" on books nobody
+#: here has listened to. "Who you've listened to" would be untrue of them.
+ASKED_AUTHOR_REASON = "by {names}, like a book you asked for more of"
+ASKED_GENRE_REASON = "in {label}, like books you asked for more of"
+ASKED_TEXT_REASON = "matches themes in books you asked for more of"
+TEXT_REASON = "matches themes in books you've enjoyed"
+ASKED_FOR_IT_REASON = "you asked for more like this"
+
+
+def _author_reason(shared: list[str], had_taste: dict | None,
+                   item_authors: list[str]) -> str:
+    """"By X, who you've listened to", unless only a "more like this" says so."""
+    names = ", ".join(shared[:2])
+    if had_taste is None or _matched_names(
+            item_authors, had_taste["authors"], _norm_author):
+        return "by " + names + ", who you've listened to"
+    return ASKED_AUTHOR_REASON.format(names=names)
+
+
 def _score_owned(
     item: dict,
     taste: dict,
     votes: Counter,
     text: float,
     similarity_titles: list[str] | None = None,
+    had_taste: dict | None = None,
 ) -> tuple[float, list[str]]:
-    """Score an owned, unplayed book. Returns (score, human-readable reasons)."""
+    """Score an owned, unplayed book. Returns (score, human-readable reasons).
+
+    `had_taste` is the taste profile without anything only asked for more of,
+    which decides whether a reason may say "you've listened to". None when
+    there is no such evidence, and then it is `taste` itself.
+    """
     score = 0.0
     why: list[str] = []
 
@@ -1119,7 +1428,7 @@ def _score_owned(
     if shared_authors:
         score += W_AUTHOR * _affinity_weight(
             item_authors, taste["authors"], _norm_author)
-        why.append("by " + ", ".join(shared_authors[:2]) + ", who you've listened to")
+        why.append(_author_reason(shared_authors, had_taste, item_authors))
 
     item_narrators = _people(item, "Narrator")
     shared_narrators = _matched_names(item_narrators, taste["narrators"])
@@ -1135,10 +1444,15 @@ def _score_owned(
             genre for genre in shared_genres
             if _norm(genre) not in GENERIC_GENRE_REASONS
         ]
-        if informative:
-            label = ", ".join(informative[:2])
-            noun = "a genre" if len(informative) == 1 else "genres"
+        listened = (informative if had_taste is None else
+                    [genre for genre in informative
+                     if _matched_names([genre], had_taste["genres"])])
+        if listened:
+            label = ", ".join(listened[:2])
+            noun = "a genre" if len(listened) == 1 else "genres"
             why.append(f"in {label}, {noun} you often listen to")
+        elif informative:
+            why.append(ASKED_GENRE_REASON.format(label=", ".join(informative[:2])))
 
     score += W_TEXT * text
     if score > 0 and _recently_added(item):
@@ -1149,8 +1463,12 @@ def _score_owned(
 def _score_candidate(
     cand: dict, taste: dict, votes: Counter, text: float,
     similarity_titles: list[str] | None = None,
+    had_taste: dict | None = None,
 ) -> tuple[float, list[str]]:
-    """Score a book not on disk. Less metadata to work with than an owned book."""
+    """Score a book not on disk. Less metadata to work with than an owned book.
+
+    `had_taste` as for `_score_owned`.
+    """
     score = W_SIMS_VOTE * min(
         MAX_SIMILARITY_WEIGHT, votes.get(cand["asin"], 0))
     why: list[str] = []
@@ -1169,7 +1487,7 @@ def _score_candidate(
     if shared:
         score += W_AUTHOR * _affinity_weight(
             candidate_authors, taste["authors"], _norm_author)
-        why.append("by " + ", ".join(shared[:2]) + ", who you've listened to")
+        why.append(_author_reason(shared, had_taste, candidate_authors))
 
     candidate_narrators = cand.get("narrators") or []
     shared_n = _matched_names(candidate_narrators, taste["narrators"])
@@ -1333,6 +1651,10 @@ def run(user: jellyfin.User, update_playlist: bool = True) -> dict:
     """Build one user's shelves and update only that user's playlist."""
     run_id = store.start_run(user.key)
     library = jellyfin.books(user.id)
+    # Read before the marks are, so a mark landing during this build leaves
+    # the shelf reading as older than it and rebuilt again.
+    marks_revision = marking.revision(user.key, store.MEDIUM)
+    marks = marking.marks(user.key, store.MEDIUM)
 
     # This listener's own Hardcover shelf, if they have connected one. Never
     # the household's token: a reading history read with somebody else's
@@ -1345,7 +1667,20 @@ def run(user: jellyfin.User, update_playlist: bool = True) -> dict:
     # worked out, or it is not a rating at all.
     library = with_shelf_ratings(library, hardcover_shelf.rated(shelf))
 
-    seeds = [i for i in library if _is_seed(i, user)]
+    # What this account has said about its suggestions. A mark on a library
+    # book changes its weight; one on a suggestion the library still does not
+    # hold becomes a seed of its own, built from what the suggestion said.
+    book_marks = BookMarks(marks, library)
+    # The newest mark on each book, which may be one taken back: that one
+    # overrides an older mark and then counts for nothing itself.
+    mark_of = {item["Id"]: found for item in library
+               if (found := book_marks.for_item(item)) is not None and found.active}
+    owned_asins, owned_titles = _owned_index(library)
+    identities = _library_identities(library)
+    unheld = [mark for mark in marks
+              if mark.surface == marking.CATALOGUE and not _held(mark, identities)]
+
+    seeds = [i for i in library if _is_seed(i, user) or i["Id"] in mark_of]
 
     # Signed mode -- where a bad rating pushes rather than merely failing to pull
     # -- needs enough ratings that no single one can steer the result. Counted
@@ -1354,16 +1689,40 @@ def run(user: jellyfin.User, update_playlist: bool = True) -> dict:
     rating_count = sum(1 for i in library if _rating(i, user) is not None)
     blend = rating_blend(rating_count)
     weights = {
-        i["Id"]: (_seed_weight(i, blend, user)
-                  * _engagement_weight(i, blend, user))
+        i["Id"]: marking.weight(
+            _seed_weight(i, blend, user) * _engagement_weight(i, blend, user),
+            mark_of.get(i["Id"]))
         for i in seeds
     }
+    # Seeds that are evidence only because somebody asked for more like them,
+    # with nothing to say they have listened. See `had_taste` below.
+    asked: set[str] = {
+        i["Id"] for i in seeds
+        if (found := mark_of.get(i["Id"])) is not None
+        and found.asked_only and not _is_seed(i, user)}
+    for mark in unheld:
+        weight = marking.weight(0.0, mark)
+        if weight == 0:
+            continue
+        book = _marked_book(mark)
+        seeds.append(book)
+        weights[book["Id"]] = weight
+        if mark.asked_only:
+            asked.add(book["Id"])
     taste = _taste(seeds, weights)
-    series_next, series_blocked = _series_plan(library, user)
-    taste["series"] = _series_frontiers(library)
+    # The same profile without anything only asked for more of. A book marked
+    # "more like this" is scored against it, so it cannot vote for itself, and
+    # it decides whether a reason may say "you've listened to". None when there
+    # is nothing to leave out, which is every account without such a mark.
+    had_seeds = [i for i in seeds if i["Id"] not in asked]
+    had_taste = _taste(had_seeds, weights) if asked else None
+    series_library = _series_library(library, mark_of, unheld)
+    series_next, series_blocked = _series_plan(series_library, user)
+    taste["series"] = _series_frontiers(series_library)
     taste["series_next"] = series_next
-
-    owned_asins, owned_titles = _owned_index(library)
+    if had_taste is not None:
+        had_taste["series"] = taste["series"]
+        had_taste["series_next"] = series_next
 
     def owned_check(cand: dict) -> bool:
         return _already_owned(cand, owned_asins, owned_titles)
@@ -1371,6 +1730,11 @@ def run(user: jellyfin.User, update_playlist: bool = True) -> dict:
     # Audible similarity votes, seeded only from books actually listened to.
     votes: Counter = Counter()
     seed_of: dict[str, list[str]] = defaultdict(list)
+    # The same from listened books alone, which is all a book marked "more
+    # like this" is scored by: another book only asked about is not evidence
+    # for it. The same objects when nothing is only asked about.
+    had_votes: Counter = Counter() if asked else votes
+    had_seed_of: dict[str, list[str]] = defaultdict(list) if asked else seed_of
     unowned: dict[str, dict] = {}
     similarity_seeds = 0
     catalogue = _CatalogueLookups()
@@ -1389,6 +1753,10 @@ def run(user: jellyfin.User, update_playlist: bool = True) -> dict:
             source_title = seed.get("Name") or ""
             if source_title and source_title not in seed_of[sim["asin"]]:
                 seed_of[sim["asin"]].append(source_title)
+            if asked and seed["Id"] not in asked:
+                had_votes[sim["asin"]] += _similarity_vote(weight, position)
+                if source_title and source_title not in had_seed_of[sim["asin"]]:
+                    had_seed_of[sim["asin"]].append(source_title)
             if not owned_check(sim):
                 unowned.setdefault(
                     sim["asin"], {**sim, "source": "audible_sims"})
@@ -1402,6 +1770,10 @@ def run(user: jellyfin.User, update_playlist: bool = True) -> dict:
     # "farmstead", "caldan" -- series names, not themes -- and the keyword channel
     # then searched Audible for them.
     corpus: dict[str, str] = {i["Id"]: (i.get("Overview") or "") for i in library}
+    # Marked suggestions the library does not hold, in the same vocabulary.
+    for seed in seeds:
+        if seed["Id"] not in corpus:
+            corpus[seed["Id"]] = seed.get("Overview") or ""
     # Keyword candidates are not known yet -- they come from the profile this
     # corpus produces -- so they are vectorised afterwards against the same idf.
     for asin, cand in unowned.items():
@@ -1414,6 +1786,16 @@ def run(user: jellyfin.User, update_playlist: bool = True) -> dict:
     profile = textmodel.taste_vector(
         [(vectors.get(i["Id"], {}), weights[i["Id"]]) for i in seeds]
     )
+    had_profile = (textmodel.taste_vector(
+        [(vectors.get(i["Id"], {}), weights[i["Id"]]) for i in had_seeds])
+        if asked else profile)
+
+    def text_reason(vector: dict) -> str:
+        """Which books a theme match is with: listened to, or only asked about."""
+        if had_profile is profile or (
+                textmodel.similarity(vector, had_profile) >= TEXT_REASON_THRESHOLD):
+            return TEXT_REASON
+        return ASKED_TEXT_REASON
 
     # Keyword discovery runs after the profile exists, because the profile is
     # what supplies the queries. Its candidates are vectorised against the same
@@ -1426,9 +1808,6 @@ def run(user: jellyfin.User, update_playlist: bool = True) -> dict:
             vectors[key] = textmodel.vectorise(
                 textmodel.tokenise(cand.get("description") or ""), idf)
 
-    def text_score(key: str) -> float:
-        return textmodel.similarity(vectors.get(key, {}), profile)
-
     # --- own shelf: on disk, unplayed, ranked ---
     own = []
     for item in library:
@@ -1436,6 +1815,11 @@ def run(user: jellyfin.User, update_playlist: bool = True) -> dict:
         # back as a suggestion would be nonsense.
         if _is_seed(item, user):
             continue
+        found = mark_of.get(item["Id"])
+        # Already read, or "less like this": never offered again.
+        if found is not None and found.hides:
+            continue
+        asked_for = found is not None and found.asked_only
         if item.get("Id") in series_blocked:
             continue
         # Finished on Hardcover -- read, abandoned or ignored. Offering it back
@@ -1449,14 +1833,19 @@ def run(user: jellyfin.User, update_playlist: bool = True) -> dict:
         # then trip the `score <= 0` drop below -- silently removing a book by an
         # author they like because its blurb shares words with one they rated low.
         # The discover shelf keeps the negative, where filtering is the point.
-        text = max(0.0, text_score(item["Id"]))
+        vector = vectors.get(item["Id"], {})
+        text = max(0.0, textmodel.similarity(
+            vector, had_profile if asked_for else profile))
         asin = _asin(item)
         score, why = _score_owned(
-            item, taste, votes, text, seed_of.get(asin, []) if asin else [])
-        if score <= 0:
+            item, had_taste if (asked_for and had_taste) else taste,
+            had_votes if asked_for else votes, text,
+            (had_seed_of if asked_for else seed_of).get(asin, []) if asin else [],
+            had_taste)
+        if score <= 0 and not asked_for:
             continue
         if text >= TEXT_REASON_THRESHOLD:
-            why.append("matches themes in books you've enjoyed")
+            why.append(text_reason(vector))
         # A book they shelved that this library already holds. It is not
         # something to acquire -- it is already here -- so it belongs on this
         # shelf rather than the discover one, with the same reason and the same
@@ -1473,6 +1862,11 @@ def run(user: jellyfin.User, update_playlist: bool = True) -> dict:
             else "affinity"
         )
         reasons = _curate_reasons(why)
+        if not reasons and asked_for:
+            # Kept, though nothing else points at it: this account asked for
+            # more like it, and taking it away for that would be the app
+            # arguing with them.
+            reasons = [ASKED_FOR_IT_REASON]
         if not reasons:
             # A weak text score or a catalogue-wide genre can help order a
             # supported recommendation, but neither is enough to justify a row
@@ -1483,9 +1877,12 @@ def run(user: jellyfin.User, update_playlist: bool = True) -> dict:
             "title": item.get("Name") or "",
             "authors": _authors(item),
             "series": item.get("SeriesName"),
+            # Not sent to any client; what a later read matches marks by.
+            "asin": asin,
             "score": round(score, 1),
             "why": reasons,
             "source": source,
+            **({"_asked": True} if asked_for else {}),
         })
     # Ratings last, after the cheap signals have decided which rows are worth
     # the requests, and before the cut -- so a well-rated book can still reach
@@ -1498,7 +1895,9 @@ def run(user: jellyfin.User, update_playlist: bool = True) -> dict:
     # serving everybody. The answer is a public number either way.
     rating_token = store.user_setting(user.key, "HARDCOVER_TOKEN")
     rating_budget = apply_ratings(own, rating_budget, rating_token)
-    own = _diversify(_dedupe_works(own), config.MAX_SHELF)
+    considered_own = own
+    own = _keep_asked(_diversify(_dedupe_works(own), config.MAX_SHELF),
+                      considered_own, key="id")
 
     # With no history there is no honest taste claim to make. A recent-arrivals
     # shelf is still useful, deterministic, and clearly labelled as neutral.
@@ -1540,22 +1939,35 @@ def run(user: jellyfin.User, update_playlist: bool = True) -> dict:
             # is the app arguing with a decision they already made.
             if not wanted_here and not _is_reading_order_candidate(cand, taste):
                 continue
-            text = text_score(f"asin:{asin}")
+            found = book_marks.for_candidate(cand)
+            # Already read, or "less like this", under any edition.
+            if found is not None and found.hides:
+                continue
+            asked_for = found is not None and found.asked_only
+            vector = vectors.get(f"asin:{asin}", {})
+            text = textmodel.similarity(vector, had_profile if asked_for else profile)
             score, why = _score_candidate(
-                cand, taste, votes, text, seed_of.get(asin, []))
+                cand, had_taste if (asked_for and had_taste) else taste,
+                had_votes if asked_for else votes, text,
+                (had_seed_of if asked_for else seed_of).get(asin, []), had_taste)
             # Applied after the scorer and before the drop, so a book they
             # asked for reaches the shelf even when nothing else about it
             # matches: being told outranks anything inferred.
             if wanted_here:
                 score += W_WANT_TO_READ
                 why.insert(0, "on your Hardcover want-to-read shelf")
-            if score <= 0:
+            if score <= 0 and not asked_for:
                 continue
             if text >= TEXT_REASON_THRESHOLD:
-                why.append("matches themes in books you've enjoyed")
-            out.append({**cand, "score": round(score, 1),
-                        "why": _curate_reasons(why),
-                        "because_of": seed_of.get(asin, [])[:3]})
+                why.append(text_reason(vector))
+            reasons = _curate_reasons(why)
+            if not reasons and asked_for:
+                reasons = [ASKED_FOR_IT_REASON]
+            row = {**cand, "score": round(score, 1), "why": reasons,
+                   "because_of": (had_seed_of if asked_for else seed_of).get(asin, [])[:3]}
+            if asked_for:
+                row["_asked"] = True
+            out.append(row)
         out.sort(key=lambda r: -r["score"])
         nonlocal rating_budget
         rating_budget = apply_ratings(out, rating_budget, rating_token)
@@ -1591,7 +2003,29 @@ def run(user: jellyfin.User, update_playlist: bool = True) -> dict:
     sims_selected = _diversify(
         sims_picks, config.MAX_SHELF - len(keyword_selected))
     discover_pool = sims_selected + keyword_selected
-    discover = _diversify(discover_pool, config.MAX_SHELF)
+    discover = _keep_asked(_diversify(discover_pool, config.MAX_SHELF),
+                           sims_picks + keyword_picks, key="asin")
+    # A book marked "more like this" that no seed's neighbours or search
+    # brought back this time, still not held, asked for or hidden: kept from
+    # what the suggestion said when it was marked, so it and its way back
+    # stay on the list.
+    offered = {row.get("asin") for row in discover}
+    for mark in unheld:
+        asin = mark.item_key.strip().upper()
+        if (not mark.asked_only or asin in offered or asin in suppressed
+                or not mark.details.get("title")):
+            continue
+        kept_book = _marked_suggestion(mark)
+        title, people = kept_book["title"], kept_book["authors"]
+        # The checks every other suggestion passes: not on disk under any
+        # edition, not read elsewhere, and in reading order unless they put
+        # it on their own want-to-read shelf.
+        if owned_check(kept_book) or shelf_entry(read_elsewhere, title, people):
+            continue
+        if (not shelf_entry(wants_elsewhere, title, people)
+                and not _is_reading_order_candidate(kept_book, taste)):
+            continue
+        discover.append(kept_book)
 
     store.prune_attribution()
     for surface, rows in (("owned", own), ("discover", discover)):
@@ -1603,6 +2037,7 @@ def run(user: jellyfin.User, update_playlist: bool = True) -> dict:
             run_id, user.key, surface, rows, RANKER_VERSION)
 
     playlist_id = None
+    playlist_owed = False
     playlist_name = _playlist_name(user)
     if update_playlist:
         # Best-effort: the playlist is a second way of reading a shelf that has
@@ -1610,9 +2045,10 @@ def run(user: jellyfin.User, update_playlist: bool = True) -> dict:
         # Losing it costs one account its Jellyfin-side list; raising here
         # would cost them the shelf as well, and throw away the build.
         try:
-            playlist_id = jellyfin.set_playlist(
-                user.id, playlist_name, [r["id"] for r in own]
-            )
+            # Against the marks as they stand now, not as this build read
+            # them: one made while it ran must not be published.
+            playlist_id, settled = publish_playlist(user, own)
+            playlist_owed = not settled
         except Exception as exc:  # noqa: BLE001
             log.warning("could not write the playlist user=%s: %s", user.key, exc)
 
@@ -1649,4 +2085,10 @@ def run(user: jellyfin.User, update_playlist: bool = True) -> dict:
         "queries": queries,
         "playlist_id": playlist_id,
         "playlist_name": playlist_name,
+        # The newest mark this was built from. Older than the account's newest
+        # means a mark has outdated it, however young it is.
+        "marks_revision": marks_revision,
+        # A mark was made while the playlist write was on its way, so the
+        # write settled nothing and the next read owes it again.
+        "playlist_owed": playlist_owed,
     }

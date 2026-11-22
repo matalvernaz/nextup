@@ -230,7 +230,14 @@ def _date(text) -> datetime | None:
 
 def suggestions(genres: list[str], studios: list[str],
                 exclude_keys: set[str], exclude_titles: set[str],
-                limit: int) -> list[dict]:
+                limit: int, *,
+                avoid_genres: set[str] | None = None,
+                avoid_makers: set[str] | None = None,
+                asked_genres: set[str] | None = None,
+                asked_makers: set[str] | None = None,
+                asked_keys: set[str] | None = None,
+                own_genres: list[str] | None = None,
+                own_makers: list[str] | None = None) -> list[dict]:
     """Podcasts near somebody's listening that the library does not hold.
 
     `genres` and `studios` are what the listener's own podcasts carry, best
@@ -240,12 +247,33 @@ def suggestions(genres: list[str], studios: list[str],
     with a bonus for the same maker. Owned podcasts are left out by feed key,
     and by title as well for a podcast that arrived without its feed being
     known.
+
+    The keyword arguments come from "less like this" and "more like this"
+    (app/taste.py), all casefolded. `avoid_genres` and `avoid_makers` count
+    against a show, each as much as the listener's favourite genre counts for
+    one. `asked_genres` and `asked_makers` are liked only on the strength of
+    "more like this" about shows nobody here has heard, so a reason naming one
+    says so instead of "podcasts you listen to". All empty is the search as it
+    always was.
+
+    `asked_keys` are the shows themselves marked "more like this". Their own
+    genres and maker are in `genres` and `studios` because of that mark, so a
+    search can find one of them again; it is then scored only against
+    `own_genres` and `own_makers`, the taste without anything only asked for,
+    so it never counts as like itself. It stays on the list either way: being
+    asked about is why it is there.
     """
-    wanted = [g for g in genres if g and g.casefold() != EVERY_PODCAST_GENRE.casefold()]
+    avoid_genres = avoid_genres or set()
+    avoid_makers = avoid_makers or set()
+    asked_genres = asked_genres or set()
+    asked_makers = asked_makers or set()
+    asked_keys = asked_keys or set()
+    wanted = _wanted(genres)
     if not wanted:
         return []
-    profile = {g.casefold(): len(wanted) - position for position, g in enumerate(wanted)}
-    makers = {s.casefold() for s in studios if s}
+    taste = _Taste(wanted, studios, avoid_genres, avoid_makers, asked_genres, asked_makers)
+    own = _Taste(_wanted(own_genres or []), own_makers or [], avoid_genres,
+                 avoid_makers, set(), set())
     excluded_titles = {normalise_title(t) for t in exclude_titles}
     seen: dict[str, dict] = {}
     for genre in wanted[:SUGGESTION_GENRES]:
@@ -253,22 +281,69 @@ def suggestions(genres: list[str], studios: list[str],
             key = hit["itemKey"]
             if key in exclude_keys or normalise_title(hit["title"]) in excluded_titles:
                 continue
-            shared = [g for g in hit.get("genres", []) if g.casefold() in profile]
-            if not shared:
-                continue
-            score = sum(profile[g.casefold()] for g in shared)
-            reasons = [_genre_reason(shared[:2])]
-            if hit.get("artist", "").casefold() in makers:
-                score += len(wanted)
-                reasons.insert(0, f"from {hit['artist']}, whose podcasts you listen to")
+            if key in asked_keys:
+                score, reasons = own.score(hit)
+                if score is None or score <= 0:
+                    score, reasons = 0.0, ["you asked for more like this"]
+            else:
+                score, reasons = taste.score(hit)
+                if score is None or score <= 0:
+                    continue
             row = seen.get(key)
             if row is None or score > row["score"]:
                 seen[key] = {**hit, "score": round(score, 2), "reason": reasons}
     ranked = sorted(seen.values(), key=lambda row: (-row["score"], row["title"].casefold()))
-    return ranked[:limit]
+    # A show marked "more like this" stays past the limit: the mark is
+    # standing, and its row is where "Undo more like this" lives.
+    return ranked[:limit] + [row for row in ranked[limit:] if row["itemKey"] in asked_keys]
 
 
-def _genre_reason(shared: list[str]) -> str:
+def _wanted(genres: list[str]) -> list[str]:
+    """Genres worth searching and scoring by: every one but Apple's catch-all."""
+    return [g for g in genres if g and g.casefold() != EVERY_PODCAST_GENRE.casefold()]
+
+
+class _Taste:
+    """One set of liked genres and makers, and how a catalogue hit scores against it."""
+
+    def __init__(self, wanted: list[str], studios: list[str], avoid_genres: set[str],
+                 avoid_makers: set[str], asked_genres: set[str],
+                 asked_makers: set[str]) -> None:
+        self.size = len(wanted)
+        self.profile = {g.casefold(): len(wanted) - position
+                        for position, g in enumerate(wanted)}
+        self.makers = {s.casefold() for s in studios if s}
+        self.avoid_genres = avoid_genres
+        self.avoid_makers = avoid_makers
+        self.asked_genres = asked_genres
+        self.asked_makers = asked_makers
+
+    def score(self, hit: dict) -> tuple[float | None, list[str]]:
+        """A hit's score and reasons, or None for one that shares no genre."""
+        shared = [g for g in hit.get("genres", []) if g.casefold() in self.profile]
+        if not shared:
+            return None, []
+        score = sum(self.profile[g.casefold()] for g in shared)
+        avoided = [g for g in hit.get("genres", []) if g.casefold() in self.avoid_genres]
+        score -= self.size * len(avoided)
+        listened = [g for g in shared if g.casefold() not in self.asked_genres]
+        reasons = ([_genre_reason(listened[:2])] if listened
+                   else [_genre_reason(shared[:2], asked=True)])
+        maker = hit.get("artist", "").casefold()
+        if maker in self.avoid_makers:
+            score -= self.size
+        elif maker in self.makers:
+            score += self.size
+            if maker in self.asked_makers:
+                reasons.insert(
+                    0, f"from {hit['artist']}, like a podcast you asked for more of")
+            else:
+                reasons.insert(0, f"from {hit['artist']}, whose podcasts you listen to")
+        return score, reasons
+
+
+def _genre_reason(shared: list[str], asked: bool = False) -> str:
     noun = "genre" if len(shared) == 1 else "genres"
     joined = shared[0] if len(shared) == 1 else f"{shared[0]} and {shared[1]}"
-    return f"shares the {joined} {noun} with podcasts you listen to"
+    whose = "podcasts you asked for more of" if asked else "podcasts you listen to"
+    return f"shares the {joined} {noun} with {whose}"

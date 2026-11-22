@@ -20,9 +20,9 @@ from threading import Lock
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query
 
-from . import (approvals, arr, config, describarr, gone, held, imports,
-               jellyfin, logs, media, notices, playlists, podcasts,
-               recommendations, seasons, store, wants)
+from . import (approvals, arr, config, describarr, feedback, gone, held,
+               imports, jellyfin, logs, media, notices, playlists, podcasts,
+               recommendations, seasons, store, taste, wants)
 from .books import acquisition
 
 log = logs.get("api")
@@ -268,7 +268,47 @@ def capabilities(protocol: int = 1,
         # Whether this account can be told on its phone what happens to its
         # requests, and whether it asked to be. Additive.
         "requestNotices": notices.capability(user),
+        # Whether a suggestion can be marked "more like this", "less like
+        # this" or "already had it" (POST /feedback). Additive: a client that
+        # predates it offers none of the three, and a recommendation row
+        # carries `opinion` only when it has one.
+        "feedback": {"supported": True},
     }
+
+
+@router.post("/feedback")
+def post_feedback(user: jellyfin.User = Depends(caller),
+                  medium: str = Body(..., embed=True),
+                  item_key: str = Body(..., embed=True, alias="itemKey"),
+                  surface: str = Body(taste.OWNED, embed=True),
+                  opinion: str = Body(taste.NO_OPINION, embed=True),
+                  had: bool = Body(False, embed=True),
+                  title: str = Body("", embed=True),
+                  recommendation_id: str | None = Body(
+                      None, embed=True, alias="recommendationId"),
+                  if_revision: int | None = Body(
+                      None, embed=True, alias="ifRevision")) -> dict:
+    """Say "more like this", "less like this" or "already had it" about one suggestion.
+
+    `itemKey` is the id the suggestion came with: a Jellyfin item id on a
+    shelf of what the library holds (`surface` "owned"), a catalogue key on a
+    shelf of what it does not ("catalogue": an ASIN for a book, a podcast's
+    item key). `opinion` is "more", "less" or "" and `had` says whether it has
+    already been watched, read or heard. Both empty takes the mark back.
+
+    The answer carries the state before as `previous`: posting that back, with
+    `ifRevision` set to the `revision` this answer gave, is Undo, and a mark
+    changed since somewhere else is left alone (409). The shelves a mark
+    changes are rebuilt behind the answer; what was just hidden is already
+    gone from the next read of any of them.
+    """
+    try:
+        return feedback.take(user, medium, item_key, surface, opinion, had,
+                             title, recommendation_id, if_revision)
+    except taste.Invalid as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except taste.Changed as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.put("/request-notices")

@@ -20,7 +20,7 @@ phone.
 """
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 
-from . import arr, artwork, config, held, jellyfin, listenarr, logs
+from . import arr, artwork, config, feedback, held, jellyfin, listenarr, logs, taste
 from . import wants as asks
 from .api import OVER_LIMIT_REQUEST, caller
 from .books import acquisition, search, series, shelves, wants
@@ -103,6 +103,9 @@ def capabilities(user: jellyfin.User = Depends(caller)) -> dict:
         # past the day's allowance waits for a keyholder, for a client that
         # says `overLimit: "request"` on `/want` and `/series/want`.
         "approvals": held.capability(user),
+        # Whether a book can be marked "more like this", "less like this" or
+        # "already read" (POST /feedback here). Additive, like the two above.
+        "feedback": {"supported": True},
     }
 
 
@@ -165,6 +168,9 @@ def get_shelves(force: bool = False,
             "reason": row["why"],
             "recommendationId": row.get("recommendation_id"),
             "source": row.get("source"),
+            # Additive: "more" on a book marked "more like this", absent
+            # otherwise, which is all a build that predates marks ever sees.
+            **({"opinion": row["opinion"]} if row.get("opinion") else {}),
         }
                   for row in data["own"]],
         "suggestions": [_suggestion(row) for row in data["discover"]],
@@ -308,6 +314,34 @@ def post_restore(user: jellyfin.User = Depends(caller),
     return {"asin": asin, "restored": True}
 
 
+@router.post("/feedback")
+def post_feedback(user: jellyfin.User = Depends(caller),
+                  item_key: str = Body(..., embed=True, alias="itemKey"),
+                  surface: str = Body(taste.OWNED, embed=True),
+                  opinion: str = Body(taste.NO_OPINION, embed=True),
+                  had: bool = Body(False, embed=True),
+                  title: str = Body("", embed=True),
+                  recommendation_id: str | None = Body(
+                      None, embed=True, alias="recommendationId"),
+                  if_revision: int | None = Body(
+                      None, embed=True, alias="ifRevision")) -> dict:
+    """Mark one book "more like this", "less like this" or "already read".
+
+    The request API's `/feedback` for books, here because the book screen
+    speaks this protocol and nothing else: `itemKey` is a library book's id
+    ("owned") or a suggestion's ASIN ("catalogue"). Answers the state before
+    as `previous`, which posted back is Undo.
+    """
+    try:
+        return {"version": LEGACY_PROTOCOL,
+                **feedback.take(user, "book", item_key, surface, opinion, had,
+                                title, recommendation_id, if_revision)}
+    except taste.Invalid as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except taste.Changed as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @router.post("/series/want")
 def post_series_want(user: jellyfin.User = Depends(caller),
                      name: str = Body(..., embed=True, alias="series"),
@@ -354,6 +388,8 @@ def _suggestion(row: dict) -> dict:
         "recommendationId": row.get("recommendation_id"),
         "source": row.get("source"),
         "state": "available",
+        # Additive, as on the owned rows.
+        **({"opinion": row["opinion"]} if row.get("opinion") else {}),
         # Additive: a build that predates covers ignores both names.
         **artwork.art(row.get("image")),
     }

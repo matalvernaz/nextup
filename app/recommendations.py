@@ -10,13 +10,14 @@ import time
 from collections import Counter
 from dataclasses import dataclass
 
-from . import config, jellyfin, logs, tmdb
+from . import config, itunes, jellyfin, logs, taste, tmdb
 
 log = logs.get("recommendations")
 
-SERIES_RANKER_VERSION = "series-owned-v3"
-MOVIE_RANKER_VERSION = "movie-owned-v2"
-PODCAST_RANKER_VERSION = "podcast-owned-v1"
+# Bumped for the marks (app/taste.py): with none, a shelf is what it was.
+SERIES_RANKER_VERSION = "series-owned-v4"
+MOVIE_RANKER_VERSION = "movie-owned-v3"
+PODCAST_RANKER_VERSION = "podcast-owned-v2"
 SUPPORTED_MEDIA = ("series", "movie", "podcast")
 
 #: What one of each medium is called in a reason, and how having had it is put.
@@ -25,6 +26,19 @@ _HAD_LABEL = {"movie": "films you've watched", "series": "shows you've watched",
               "podcast": "podcasts you've listened to"}
 _HAD_ONE = {"movie": "a film you've seen", "series": "a show you've seen",
             "podcast": "a podcast you've listened to"}
+#: The same, for evidence that comes only from "more like this" on something
+#: nobody here has seen. Saying "you've seen" about it would be untrue.
+_ASKED_LABEL = {"movie": "films you asked for more of",
+                "series": "shows you asked for more of",
+                "podcast": "podcasts you asked for more of"}
+_ASKED_ONE = {"movie": "a film you asked for more of",
+              "series": "a show you asked for more of",
+              "podcast": "a podcast you asked for more of"}
+
+#: Where evidence came from: something this account has had, or only something
+#: it asked for more of.
+HAD = "had"
+ASKED = "asked"
 
 # What one TMDb neighbour vote is worth against the metadata evidence beside
 # it.
@@ -220,9 +234,11 @@ def _watched_label(medium: str) -> str:
     return _HAD_LABEL.get(medium, "things you've watched")
 
 
-def _genre_reason(values: list[str], medium: str) -> str:
+def _genre_reason(values: list[str], medium: str, asked: bool = False) -> str:
     noun = "genre" if len(values) == 1 else "genres"
-    return f"shares the {_joined(values)} {noun} with {_watched_label(medium)}"
+    label = (_ASKED_LABEL.get(medium, "things you asked for more of") if asked
+             else _watched_label(medium))
+    return f"shares the {_joined(values)} {noun} with {label}"
 
 
 def _tmdb_id(item: dict) -> str:
@@ -233,8 +249,15 @@ def _tmdb_id(item: dict) -> str:
 def _tmdb_votes(
     seeds: list[tuple[dict, float]],
     medium: str,
-) -> tuple[Counter, dict[str, list[str]]]:
-    """Neighbour votes from TMDb, and which watched title earned each one.
+    asked_ids: frozenset[str] = frozenset(),
+) -> tuple[Counter, dict[str, list[tuple[str, str]]], Counter]:
+    """Neighbour votes from TMDb, and which title earned each one, and how.
+
+    Each voter is kept with where it came from -- watched, or only asked for
+    more of -- so the reason can name one somebody has actually seen whenever
+    there is one, and never call the other kind "a film you've seen". The
+    third answer is the votes from seen titles alone, which is all a title
+    marked "more like this" is scored by.
 
     The signal a Jellyfin-only ranker cannot derive: genre, cast and studio all
     come out of this library's own metadata, and every one of them is a
@@ -246,10 +269,11 @@ def _tmdb_votes(
     what it was before.
     """
     votes: Counter = Counter()
-    because: dict[str, list[str]] = {}
+    had_votes: Counter = Counter()
+    because: dict[str, list[tuple[str, str]]] = {}
     # TMDb knows films and television; a podcast has no TMDb id to ask about.
     if not tmdb.configured() or medium not in ("movie", "series"):
-        return votes, because
+        return votes, because, had_votes
 
     ranked = sorted(
         ((seed, weight) for seed, weight in seeds if weight > 0),
@@ -260,20 +284,40 @@ def _tmdb_votes(
             continue
         neighbours = tmdb.recommendations(seed_id, medium)
         title = seed.get("Name") or ""
+        origin = ASKED if seed.get("Id") in asked_ids else HAD
         for position, neighbour in enumerate(neighbours, start=1):
             votes[neighbour] += weight / (position + TMDB_RANK_OFFSET)
-            if title and title not in because.setdefault(neighbour, []):
-                because[neighbour].append(title)
-    return votes, because
+            if origin == HAD:
+                had_votes[neighbour] += weight / (position + TMDB_RANK_OFFSET)
+            voters = because.setdefault(neighbour, [])
+            if title and all(title != named for named, _ in voters):
+                voters.append((title, origin))
+    return votes, because, had_votes
 
 
 def _score_candidates(
     library: list[dict],
     seeds: list[tuple[dict, float]],
     medium: str,
+    marks: dict[str, "taste.Mark"] | None = None,
+    asked_ids: frozenset[str] = frozenset(),
 ) -> list[dict]:
+    marks = marks or {}
     profiles, displays = _profiles(seeds)
-    votes, vote_because = _tmdb_votes(seeds, medium)
+    # The same evidence without anything only asked for more of. Two jobs: a
+    # thing marked "more like this" is scored against it, so it cannot vote
+    # for itself, and a reason only says "you've watched" about evidence that
+    # is in here. With no such marks it is the same profile.
+    if asked_ids:
+        had_profiles, _ = _profiles(
+            [(seed, weight) for seed, weight in seeds
+             if seed.get("Id") not in asked_ids])
+    else:
+        had_profiles = profiles
+    votes, vote_because, had_votes = _tmdb_votes(seeds, medium, asked_ids)
+
+    def had_evidence(kind: str, name: str) -> bool:
+        return had_profiles[kind].get(_normalise(name), 0.0) > 0
 
     rows = []
     for item in library:
@@ -283,22 +327,30 @@ def _score_candidates(
         if (_seed_weight(item) > 0 or _progress(item) > 0
                 or _rating(item) is not None or data.get("IsFavorite")):
             continue
+        mark = marks.get(_key(item))
+        # Already had, or "less like this": never offered again.
+        if mark is not None and mark.hides:
+            continue
+        asked_for = mark is not None and mark.asked_only
+        scoring = had_profiles if asked_for else profiles
 
         genre_matches = _matches(
-            _genres(item), profiles["genres"], displays["genres"])
+            _genres(item), scoring["genres"], displays["genres"])
         people_matches = _matches(
-            _people(item), profiles["people"], displays["people"])
+            _people(item), scoring["people"], displays["people"])
         studio_matches = _matches(
-            _studios(item), profiles["studios"], displays["studios"])
+            _studios(item), scoring["studios"], displays["studios"])
 
-        evidence = _evidence(item, profiles)
+        evidence = _evidence(item, scoring)
         # A neighbour vote is evidence in its own right, so it can carry a
         # title the metadata says nothing about -- which is the point of having
         # a source outside the library. Added before the gate, not after it.
-        neighbour = votes.get(_tmdb_id(item), 0.0)
+        # Only votes from seen titles for one asked about: another title only
+        # asked about is not evidence that people who liked it liked this.
+        neighbour = (had_votes if asked_for else votes).get(_tmdb_id(item), 0.0)
         if neighbour:
             evidence += W_TMDB_VOTE * min(MAX_TMDB_WEIGHT, neighbour)
-        if evidence <= 0:
+        if evidence <= 0 and not asked_for:
             continue
 
         community = item.get("CommunityRating")
@@ -310,34 +362,57 @@ def _score_candidates(
         # First, where there is one. It is the most specific thing that can be
         # said about a candidate -- a named title somebody actually watched --
         # and the two metadata reasons below are true of dozens of rows each.
-        if neighbour and (watched := vote_because.get(_tmdb_id(item))):
-            reasons.append(
-                f"watched by people who liked {watched[0]}, "
-                f"{_HAD_ONE.get(medium, 'one you have seen')}")
+        if neighbour and (voters := vote_because.get(_tmdb_id(item))):
+            watched = [title for title, origin in voters if origin == HAD]
+            if watched:
+                reasons.append(
+                    f"watched by people who liked {watched[0]}, "
+                    f"{_HAD_ONE.get(medium, 'one you have seen')}")
+            elif not asked_for:
+                # A title only asked about cannot explain another one asked
+                # about: it was not counted for it.
+                reasons.append(
+                    f"watched by people who liked {voters[0][0]}, "
+                    f"which you asked for more of")
         if people_matches:
             name = people_matches[0][0]
-            reasons.append(
-                f"{_credit(item, name)} {name}, from {_HAD_ONE.get(medium, 'one you have seen')}")
+            one = (_HAD_ONE.get(medium, 'one you have seen')
+                   if had_evidence("people", name)
+                   else _ASKED_ONE.get(medium, "one you asked for more of"))
+            reasons.append(f"{_credit(item, name)} {name}, from {one}")
         if genre_matches:
             names = [name for name, _ in genre_matches[:2]]
-            reasons.append(_genre_reason(names, medium))
+            had_names = [name for name in names if had_evidence("genres", name)]
+            if had_names:
+                reasons.append(_genre_reason(had_names, medium))
+            else:
+                reasons.append(_genre_reason(names, medium, asked=True))
         if studio_matches and len(reasons) < 2:
-            reasons.append(
-                f"from {studio_matches[0][0]}, whose {_watched_label(medium)}")
+            studio = studio_matches[0][0]
+            label = (_watched_label(medium) if had_evidence("studios", studio)
+                     else _ASKED_LABEL.get(medium, "things you asked for more of"))
+            reasons.append(f"from {studio}, whose {label}")
+        if not reasons and asked_for:
+            # Kept, though nothing else here points at it: this account asked
+            # for more like it, and taking it away for that would be the app
+            # arguing with them.
+            reasons.append("you asked for more like this")
 
         source = (
             "neighbour" if neighbour
             else "person" if people_matches
             else "genre" if genre_matches
-            else "studio"
+            else "studio" if studio_matches
+            else "asked"
         )
         rows.append({
             "id": item["Id"],
             "title": item.get("Name") or "",
-            "score": round(evidence + quality_tiebreak, 2),
+            "score": round(max(0.0, evidence) + quality_tiebreak, 2),
             "reason": reasons[:2],
             "source": source,
             "_genres": [name for name, _ in genre_matches[:2]],
+            **({"_asked": True} if asked_for else {}),
         })
 
     # A small greedy penalty prevents one broad genre from occupying the whole
@@ -356,9 +431,13 @@ def _score_candidates(
         selected.append(chosen)
         for genre in chosen["_genres"]:
             genre_counts[_normalise(genre)] += 1
+    # Anything marked "more like this" stays past the cut: the mark is
+    # standing, and its row is where "Undo more like this" lives.
+    selected += [row for row in remaining if row.get("_asked")]
 
     for row in selected:
         row.pop("_genres", None)
+        row.pop("_asked", None)
     return selected
 
 
@@ -366,13 +445,16 @@ def _recent(
     library: list[dict],
     medium: str,
     negative_seeds: list[tuple[dict, float]],
+    marks: dict[str, "taste.Mark"] | None = None,
 ) -> list[dict]:
+    marks = marks or {}
     candidates = [
         item for item in library
         if _seed_weight(item) <= 0
         and _progress(item) <= 0
         and _rating(item) is None
         and not (item.get("UserData") or {}).get("IsFavorite")
+        and not ((mark := marks.get(_key(item))) is not None and mark.hides)
     ]
     candidates.sort(key=lambda item: (
         _normalise(item.get("Name") or ""), item.get("Id") or ""))
@@ -423,26 +505,172 @@ def seed_weight(item: dict) -> float:
     return _seed_weight(item)
 
 
-def build(library: list[dict], medium: str = "series") -> dict:
-    """Build one owned shelf from an already user-scoped library."""
+def _key(item: dict) -> str:
+    """A library item's id, the one way marks and rows are compared."""
+    return jellyfin.normalise_id(item.get("Id") or "")
+
+
+def _podcast_names(item: dict) -> dict[str, str]:
+    """The three names a podcast can be recognised by: feed, Apple id, title.
+
+    The order `podcasts.match` tries them in. A podcast taken from the
+    catalogue shelf is marked under its feed, and once it has been added it is
+    a library item the fork wrote the same feed onto.
+    """
+    provider_ids = item.get("ProviderIds") or {}
+    feed = str(provider_ids.get("PodcastFeed") or "").strip()
+    return {
+        "feed": itunes.item_key(feed) if feed else "",
+        "itunes": str(provider_ids.get("iTunes") or "").strip(),
+        "title": itunes.normalise_title(item.get("Name")),
+    }
+
+
+def _podcast_holding(names_by_id: dict[str, dict[str, str]],
+                     mark: "taste.Mark") -> str | None:
+    """Which held podcast a catalogue mark is about, exact ids before the title."""
+    itunes_id = str(mark.details.get("itunesId") or "").strip()
+    title = itunes.normalise_title(mark.title or mark.details.get("title"))
+    for field, wanted in (("feed", mark.item_key), ("itunes", itunes_id),
+                          ("title", title)):
+        if not wanted:
+            continue
+        for item_id, names in names_by_id.items():
+            if names[field] and names[field] == wanted:
+                return item_id
+    return None
+
+
+def _catalogue_seed(mark: "taste.Mark") -> dict:
+    """A podcast the library does not hold, as the ranker reads a library item.
+
+    What the catalogue said about it when it was marked: its genres, and its
+    maker as the studio, which is where a podcast's publisher lives here.
+    """
+    details = mark.details
+    artist = str(details.get("artist") or "").strip()
+    return {
+        "Id": f"catalogue:{mark.item_key}",
+        "Name": mark.title or str(details.get("title") or ""),
+        "Genres": [str(genre) for genre in details.get("genres") or []
+                   if str(genre).strip()],
+        "People": [],
+        "Studios": [{"Name": artist}] if artist else [],
+        "UserData": {},
+    }
+
+
+def place_marks(
+    medium: str,
+    marks: list["taste.Mark"],
+    names_by_id: dict[str, dict[str, str]] | None = None,
+) -> tuple[dict[str, "taste.Mark"], list["taste.Mark"]]:
+    """Each mark against the held item it is about, and the marks about nothing held.
+
+    `names_by_id` is how a held podcast is recognised (see `_podcast_names`),
+    by normalised id. Films and shows are only ever marked from the library,
+    so for them a mark's key is the item's id and nothing else.
+    """
+    by_id: dict[str, taste.Mark] = {}
+    unheld: list[taste.Mark] = []
+    for mark in marks:
+        if mark.surface == taste.OWNED:
+            key = jellyfin.normalise_id(mark.item_key)
+            by_id[key] = taste.newest(by_id.get(key), mark)
+            continue
+        found = (_podcast_holding(names_by_id, mark)
+                 if medium == "podcast" and names_by_id else None)
+        if found is None:
+            unheld.append(mark)
+        else:
+            by_id[found] = taste.newest(by_id.get(found), mark)
+    return by_id, unheld
+
+
+def build(library: list[dict], medium: str = "series",
+          marks: list["taste.Mark"] | None = None) -> dict:
+    """Build one owned shelf from an already user-scoped library.
+
+    `marks` are what this account has said about its suggestions. With none,
+    the shelf is exactly what it was before they existed.
+    """
     if medium not in SUPPORTED_MEDIA:
         raise ValueError(f"unsupported recommendation medium {medium!r}")
-    seeds = [(item, weight) for item in library
-             if (weight := _seed_weight(item)) != 0]
+    names_by_id = ({_key(item): _podcast_names(item) for item in library}
+                   if medium == "podcast" else {})
+    by_id, unheld = place_marks(medium, marks or [], names_by_id)
+
+    seeds: list[tuple[dict, float]] = []
+    asked: set[str] = set()
+    for item in library:
+        base = _seed_weight(item)
+        mark = by_id.get(_key(item))
+        weight = taste.weight(base, mark)
+        if weight == 0:
+            continue
+        seeds.append((item, weight))
+        # Asked-only evidence: "more like this" on something with nothing
+        # else to say this account has had it.
+        if mark is not None and mark.asked_only and base <= 0:
+            asked.add(item["Id"])
+    # Podcasts this account marked on the catalogue shelf that the library
+    # still does not hold. Evidence about taste all the same.
+    if medium == "podcast":
+        for mark in unheld:
+            weight = taste.weight(0.0, mark)
+            if weight == 0:
+                continue
+            seed = _catalogue_seed(mark)
+            seeds.append((seed, weight))
+            if mark.asked_only:
+                asked.add(seed["Id"])
+
     positive = any(weight > 0 for _, weight in seeds)
-    rows = (_score_candidates(library, seeds, medium)
-            if positive else _recent(library, medium, seeds))
-    return {
+    rows = (_score_candidates(library, seeds, medium, by_id, frozenset(asked))
+            if positive else _recent(library, medium, seeds, by_id))
+    built = {
         "ranker_version": ranker_version(medium),
         "seed_count": len(seeds),
         "recommendations": rows,
     }
+    if medium == "podcast":
+        # Kept beside the shelf, never sent: what lets a later read recognise
+        # a row by the catalogue mark made on it before it was added.
+        offered = {jellyfin.normalise_id(row["id"]) for row in rows}
+        built["names"] = {key: names for key, names in names_by_id.items()
+                          if key in offered}
+    return built
+
+
+def present(user: jellyfin.User, medium: str, built: dict) -> dict:
+    """A shelf as it stands against this account's marks right now.
+
+    Applied on every read, however the shelf was got: a shelf built a minute
+    before somebody said "already watched" must not offer it to them again
+    while the rebuild runs. Rows marked "more like this" say so.
+    """
+    marks = taste.marks(user.key, medium)
+    if not marks:
+        return built
+    by_id, _ = place_marks(medium, marks, built.get("names"))
+    rows = []
+    for row in built["recommendations"]:
+        mark = by_id.get(jellyfin.normalise_id(row["id"]))
+        if mark is not None and mark.hides:
+            continue
+        if mark is not None and mark.opinion == taste.MORE:
+            row = {**row, "opinion": taste.MORE}
+        rows.append(row)
+    return {**built, "recommendations": rows}
 
 
 @dataclass(frozen=True, slots=True)
 class _Cached:
     built_at: float
     value: dict
+    #: The account's newest mark when this was built. A shelf built from an
+    #: older one is out of date however young it is.
+    revision: int = 0
 
 
 _cache: dict[tuple[str, str, tuple[str, ...]], _Cached] = {}
@@ -544,10 +772,13 @@ def result(
     key = _cache_key(user, medium, libraries)
     with _guard:
         cached = _cache.get(key)
-        if cached and not force and (
-                time.monotonic() - cached.built_at
-                <= _cache_seconds(medium)):
-            return cached.value
+    if cached and not force and (
+            time.monotonic() - cached.built_at <= _cache_seconds(medium)):
+        # Young, but older than a mark made since: served as it stands against
+        # the marks, while a rebuild that reads them runs behind.
+        if cached.revision < taste.revision(user.key, medium):
+            _rebuild_behind(user, medium, key)
+        return present(user, medium, cached.value)
 
     # One build per key at a time. Without this, every request that arrives
     # during a cold build starts its own: the same Jellyfin listing of the same
@@ -560,16 +791,56 @@ def result(
             if cached and not force and (
                     time.monotonic() - cached.built_at
                     <= _cache_seconds(medium)):
-                return cached.value
+                return present(user, medium, cached.value)
+        # Read before the marks are, so a mark landing during the build leaves
+        # this shelf reading as older than it and rebuilt again.
+        revision = taste.revision(user.key, medium)
+        marks = taste.marks(user.key, medium)
         library = jellyfin.recommendation_items_for_user(
             medium, user.id, libraries)
-        built = build(library, medium)
+        built = build(library, medium, marks)
         with _guard:
-            _cache[key] = _Cached(time.monotonic(), built)
-    log.info("%s recommendations user=%s libraries=%d seeds=%d rows=%d",
+            _cache[key] = _Cached(time.monotonic(), built, revision)
+    log.info("%s recommendations user=%s libraries=%d seeds=%d rows=%d marks=%d",
              medium, user.key, len(libraries), built["seed_count"],
-             len(built["recommendations"]))
-    return built
+             len(built["recommendations"]), len(marks))
+    return present(user, medium, built)
+
+
+#: Rebuilds a mark asked for, one at a time per shelf. See `taste.BehindRebuilds`.
+_after_marks = taste.BehindRebuilds("shelf")
+
+
+def _rebuild_behind(user: jellyfin.User, medium: str, key: tuple) -> None:
+    """Rebuild one cached shelf behind the answer, if a mark has outdated it."""
+    library_ids = key[2]
+    # Every library, or the one asked for: `_libraries_for` gives one of those
+    # two, and a single id names either the same way.
+    library_id = library_ids[0] if len(library_ids) == 1 else ""
+
+    def rebuild() -> None:
+        with _guard:
+            cached = _cache.get(key)
+        # A pull to refresh may have rebuilt it from these marks already.
+        if cached is not None and cached.revision >= taste.revision(user.key, medium):
+            return
+        result(user, library_id, force=True, medium=medium)
+
+    _after_marks.request(key, rebuild)
+
+
+def rebuild_after_mark(user: jellyfin.User, medium: str) -> None:
+    """Rebuild, behind the answer, every shelf of this account a mark has outdated.
+
+    Only shelves already built: one nobody has asked for yet is built from the
+    marks as they stand when somebody does.
+    """
+    if medium not in SUPPORTED_MEDIA:
+        return
+    with _guard:
+        keys = [key for key in _cache if key[0] == medium and key[1] == user.id]
+    for key in keys:
+        _rebuild_behind(user, medium, key)
 
 
 #: What a caller waiting on an out-of-band build is given to say.
@@ -613,9 +884,12 @@ def shelf_or_start(user: jellyfin.User, library_id: str = "", *,
     key = _cache_key(user, medium, _libraries_for(medium, library_id))
     with _guard:
         cached = _cache.get(key)
-        if cached is not None and (time.monotonic() - cached.built_at
-                                   <= _cache_seconds(medium)):
-            return cached.value, ""
+    if cached is not None and (time.monotonic() - cached.built_at
+                               <= _cache_seconds(medium)):
+        if cached.revision < taste.revision(user.key, medium):
+            _rebuild_behind(user, medium, key)
+        return present(user, medium, cached.value), ""
+    with _guard:
         failed_at, detail = _failures.get(key, (0.0, ""))
         waiting = detail and (
             time.monotonic() - failed_at <= RETRY_AFTER_SECONDS)
@@ -629,7 +903,7 @@ def shelf_or_start(user: jellyfin.User, library_id: str = "", *,
     if cached is not None:
         # The stale shelf, and -- while a rebuild is failing -- why it is the
         # newest one there is. Silence here would read as a current answer.
-        return cached.value, detail if waiting else ""
+        return present(user, medium, cached.value), detail if waiting else ""
     return None, detail if waiting else BUILDING
 
 

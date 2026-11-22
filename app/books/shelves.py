@@ -8,6 +8,7 @@ import time
 from threading import Lock, Thread
 
 from .. import jellyfin, logs
+from .. import taste as marking
 from . import engine, store
 
 log = logs.get("shelves")
@@ -183,7 +184,8 @@ def _stale_entry(user_key: str) -> dict | None:
     return data
 
 
-def _entry_computed_since(user_key: str, moment: float) -> tuple[dict, bool] | None:
+def _entry_computed_since(user_key: str, moment: float,
+                          revision: int = 0) -> tuple[dict, bool] | None:
     """A shelf that finished rebuilding while this caller waited for the lock.
 
     A forced rebuild costs twelve seconds, so three of them in fifteen seconds
@@ -191,12 +193,25 @@ def _entry_computed_since(user_key: str, moment: float) -> tuple[dict, bool] | N
     waiting for. A caller that arrived before a rebuild started could not have
     asked for anything fresher than what that rebuild produced, so it is served
     the same shelf rather than queueing another one behind it.
+
+    Unless that rebuild read older marks than this caller knows of. Finishing
+    after the caller arrived says nothing about when it read them: a build that
+    began before a mark and ended after it would otherwise be handed to the
+    very rebuild the mark asked for.
     """
     with _cache_guard:
         entry = _cache.get(user_key)
-    if entry and entry[0] >= moment:
+    if entry and entry[0] >= moment and _built_from(entry[1]) >= revision:
         return entry[1], entry[2]
     return None
+
+
+def _built_from(data: dict) -> int:
+    """The mark revision a shelf was built from; 0 for one from before marks."""
+    try:
+        return int(data.get("marks_revision") or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _refresh_behind(user: jellyfin.User, update_playlist: bool) -> None:
@@ -228,7 +243,8 @@ def result(user: jellyfin.User, force: bool = False,
     recommendation snapshot still offers it. Filter every cache path against
     that newer listing without waiting for another recommendation build.
     """
-    data = _result(user, force=force, update_playlist=update_playlist)
+    data = engine.present(
+        user.key, _result(user, force=force, update_playlist=update_playlist))
     if not data.get("discover"):
         return data
     with _cache_guard:
@@ -272,9 +288,14 @@ def _result(user: jellyfin.User, force: bool = False,
     worth a twelve-second wait, and this one only ever happens once per account.
     """
     requested_at = time.monotonic()
+    revision = marking.revision(user.key, store.MEDIUM)
     if not force and (cached := _fresh_entry(user.key)) is not None:
         data, written = cached
         log.debug("shelves cache hit user=%s playlist_written=%s", user.key, written)
+        # Young, but older than a mark made since: served (the caller filters
+        # it against the marks) while a rebuild that reads them runs behind.
+        if _built_from(data) < revision:
+            rebuild_after_mark(user)
         if update_playlist and not written:
             write_playlist(user, data)
         return data
@@ -291,7 +312,7 @@ def _result(user: jellyfin.User, force: bool = False,
                 write_playlist(user, data)
             return data
         if force and (recent := _entry_computed_since(
-                user.key, requested_at)) is not None:
+                user.key, requested_at, revision)) is not None:
             data, written = recent
             log.info("shelves rebuilt while this request waited user=%s", user.key)
             if update_playlist and not written:
@@ -300,14 +321,19 @@ def _result(user: jellyfin.User, force: bool = False,
         log.info("shelves computing user=%s force=%s update_playlist=%s",
                  user.key, force, update_playlist)
         started = time.monotonic()
-        data = engine.run(user, update_playlist=update_playlist)
+        # The playlist is written below, once this shelf is the cached one,
+        # never from inside the build: a write of an older shelf that is
+        # still on its way then finds it here and writes nothing, where
+        # before it could land between this build's write and its caching.
+        data = engine.run(user, update_playlist=False)
         # Popped before the shelf is cached or persisted: they are larger than
         # the shelf itself, and the index's sets do not survive a JSON round
         # trip.
         _publish_owned(user.key, data.pop("owned_index"),
                        data.pop("books_by_series", None))
+        data.pop("playlist_owed", None)
         with _cache_guard:
-            _cache[user.key] = (time.monotonic(), data, update_playlist)
+            _cache[user.key] = (time.monotonic(), data, False)
         # Written after the memory cache, so a failure to persist costs the next
         # restart and nothing else.
         try:
@@ -317,6 +343,8 @@ def _result(user: jellyfin.User, force: bool = False,
         log.info("shelves computed user=%s own=%d unowned=%d in %.1fs",
                  user.key, len(data.get("own") or []),
                  len(data.get("discover") or []), time.monotonic() - started)
+        if update_playlist:
+            write_playlist(user, data)
         return data
 
 
@@ -337,15 +365,27 @@ def write_playlist(user: jellyfin.User, data: dict) -> None:
     name = engine._playlist_name(user)
     log.info("settling deferred playlist write user=%s name=%r items=%d",
              user.key, name, len(data.get("own") or []))
+
+    def still_current() -> bool:
+        # Only the newest shelf is published. One cached since this read
+        # began owes the playlist its own write, and an older one writing
+        # after it would put back what it replaced.
+        with _cache_guard:
+            entry = _cache.get(user.key)
+        return entry is not None and entry[1] is data
+
     try:
-        jellyfin.set_playlist(user.id, name,
-                              [r["id"] for r in data.get("own") or []])
+        # Against the marks as they stand now, one writer at a time: see
+        # `engine.publish_playlist`.
+        _, settled = engine.publish_playlist(user, data.get("own") or [], still_current)
     except Exception as exc:  # noqa: BLE001 - see the docstring
         log.warning("could not write the playlist user=%s: %s", user.key, exc)
         return
+    if not settled:
+        return
     with _cache_guard:
         entry = _cache.get(user.key)
-        if entry is not None:
+        if entry is not None and entry[1] is data:
             _cache[user.key] = (entry[0], entry[1], True)
 
 
@@ -421,3 +461,105 @@ def forget_asin(asin: str, user_key: str | None = None) -> None:
             except Exception as exc:  # noqa: BLE001
                 log.warning("could not persist the trimmed shelf user=%s: %s", key, exc)
     log.info("asin=%s removed from %d cached shelves %s", asin, len(dropped), dropped)
+
+
+#: Rebuilds a mark asked for, one at a time per account. See
+#: `taste.BehindRebuilds`.
+_after_marks = marking.BehindRebuilds("book-shelf")
+
+
+def rebuild_after_mark(user: jellyfin.User) -> None:
+    """Rebuild this account's shelves behind the answer, once a mark has outdated them.
+
+    Without writing the playlist: the build finishing may already be older than
+    a mark made while it ran. The deferred write the next ordinary read settles
+    is checked against the marks as they stand then.
+    """
+    def rebuild() -> None:
+        with _cache_guard:
+            entry = _cache.get(user.key)
+        # A pull to refresh may have rebuilt it from these marks already.
+        if entry is not None and _built_from(entry[1]) >= marking.revision(
+                user.key, store.MEDIUM):
+            return
+        result(user, force=True, update_playlist=False)
+
+    _after_marks.request(user.key, rebuild)
+
+
+def _cached_rows(user_key: str, shelf: str) -> list[dict]:
+    """One shelf's rows as last built for this account, memory first then disk."""
+    with _cache_guard:
+        entry = _cache.get(user_key)
+    if entry is not None:
+        return list(entry[1].get(shelf) or [])
+    try:
+        stored = store.get_shelf(user_key)
+    except Exception:  # noqa: BLE001 - nothing cached is an empty answer here
+        return []
+    return list(stored[0].get(shelf) or []) if stored else []
+
+
+#: Longest blurb kept with a mark. The text model needs the words, not a
+#: publisher's whole page.
+MAX_MARKED_DESCRIPTION = 4000
+
+
+def suggestion_details(user: jellyfin.User, asin: str) -> dict:
+    """What one suggested book said about itself, from this account's own shelf.
+
+    Kept with a mark so a book the library does not hold can still count for
+    its authors, narrators, blurb and place in a series. Nothing is asked of
+    Audible: the row is the one the person was looking at.
+    """
+    wanted = asin.strip().upper()
+    for row in _cached_rows(user.key, "discover"):
+        if (row.get("asin") or "").strip().upper() == wanted:
+            return {
+                "title": row.get("title") or "",
+                "authors": list(row.get("authors") or []),
+                "narrators": list(row.get("narrators") or []),
+                "series": row.get("series") or "",
+                "series_position": row.get("series_position"),
+                "description": (row.get("description") or "")[:MAX_MARKED_DESCRIPTION],
+                # Enough to show the row again should no build bring it back.
+                "runtime_min": row.get("runtime_min"),
+                "image": row.get("image"),
+            }
+    return {}
+
+
+def owned_details(user: jellyfin.User, item_id: str) -> dict:
+    """A library book's title, authors and ASIN, for finding its other editions.
+
+    From this account's own shelf where the book is on it, and otherwise from
+    Jellyfin. With neither, nothing: the mark then matches by id alone, which
+    is safer than a title that might be somebody else's book.
+    """
+    wanted = jellyfin.normalise_id(item_id)
+    for row in _cached_rows(user.key, "own"):
+        if jellyfin.normalise_id(row.get("id") or "") == wanted and row.get("authors"):
+            return {"title": row.get("title") or "",
+                    "authors": list(row.get("authors") or []),
+                    "asin": row.get("asin") or ""}
+    try:
+        item = jellyfin.item_with_path(item_id, user.id)
+    except jellyfin.JellyfinUnavailable:
+        return {}
+    if not item:
+        return {}
+    return {"title": item.get("Name") or "",
+            "authors": engine._authors(item),
+            "asin": engine._asin(item) or ""}
+
+
+def playlist_owed(user: jellyfin.User) -> None:
+    """Have the next read publish this account's playlist again.
+
+    After a mark: the playlist was last written from a shelf the mark has
+    just outdated, and the rebuild it asked for writes nothing itself.
+    """
+    with _cache_guard:
+        entry = _cache.get(user.key)
+        if entry is not None:
+            _cache[user.key] = (entry[0], entry[1], False)
