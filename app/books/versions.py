@@ -66,6 +66,28 @@ def base_title(title: str) -> str:
     return " ".join(padded.split())
 
 
+def same_book(one: str, other: str) -> bool:
+    """Whether two titles with one base title can name the same book.
+
+    The base title drops the subtitle, and a subtitle can name a book:
+    "Mistborn: The Final Empire" and "Mistborn: The Well of Ascension" share
+    "mistborn" and are books one and two, and five Disney Princess stories
+    share their head. So the subtitles decide, by the owned index's own rules
+    (`engine._could_be_one_book`): two that describe, or that share most of
+    their words, are one book; a plain title is one book with a subtitle that
+    only describes it, and not with one that names a sequel.
+    """
+    first = engine._head_and_tail(one or "")
+    second = engine._head_and_tail(other or "")
+    tail_one = first[1] if first else ""
+    tail_two = second[1] if second else ""
+    if not tail_one and not tail_two:
+        return True
+    if not tail_one or not tail_two:
+        return engine._describes_rather_than_names(tail_one or tail_two)
+    return engine._could_be_one_book(tail_one, tail_two)
+
+
 def _names(values) -> list[str]:
     out = []
     for value in values or []:
@@ -189,26 +211,28 @@ class Recordings:
     """
 
     def __init__(self, items: list[dict]) -> None:
-        self._by_work: dict[str, list[tuple[set[str], set[str], int | None]]] = {}
+        self._by_work: dict[str, list[tuple[str, set[str], set[str], int | None]]] = {}
         for item in items:
             if is_graphic_audio_item(item):
                 continue
+            name = item.get("Name") or ""
             authors = {engine._norm_author(a) for a in engine._authors(item) if a}
             readers = set(series._readers(engine._people(item, "Narrator")))
             ticks = item.get("RunTimeTicks") or 0
             minutes = int(ticks / 600_000_000) if ticks else None
-            for key in {base_title(item.get("Name") or "")} - {""}:
-                self._by_work.setdefault(key, []).append((authors, readers, minutes))
+            for key in {base_title(name)} - {""}:
+                self._by_work.setdefault(key, []).append((name, authors, readers, minutes))
 
     def holds(self, title: str, authors: set[str], readers: set[str],
               minutes: int | None) -> bool | None:
         """True or False where the library says, None where it cannot tell."""
         found = [entry for entry in self._by_work.get(base_title(title), [])
-                 if not entry[0] or not authors or entry[0] & authors]
+                 if same_book(entry[0], title)
+                 and (not entry[1] or not authors or entry[1] & authors)]
         if not found:
             return False
         undecided = False
-        for _, held_readers, held_minutes in found:
+        for _, _, held_readers, held_minutes in found:
             if held_readers and readers:
                 if held_readers & readers:
                     return True
@@ -263,12 +287,14 @@ class _Recording:
 
 class _Book:
     def __init__(self, row: dict) -> None:
-        self.title = base_title(str(row.get("title") or ""))
+        self.full_title = str(row.get("title") or "")
+        self.title = base_title(self.full_title)
         self.authors = _authors_of(row)
         self.recordings = [_Recording(row)]
 
     def takes(self, row: dict) -> bool:
-        if base_title(str(row.get("title") or "")) != self.title:
+        title = str(row.get("title") or "")
+        if base_title(title) != self.title or not same_book(self.full_title, title):
             return False
         authors = _authors_of(row)
         return (authors & self.authors) or (not authors and not self.authors)

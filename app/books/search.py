@@ -63,9 +63,10 @@ def search(user: jellyfin.User, query: str, limit: int | None = None) -> list[di
     held = getattr(by_title, "held", None)
     results = []
     for book in versions.group(rows):
-        results.append(_book_hit(book, asins, by_title, requested, held))
+        results.extend(_book_hits(book, asins, by_title, requested, held))
         if len(results) >= wanted:
             break
+    results = results[:wanted]
     log.info("search user=%s query=%r hits=%d owned=%d",
              user.key, query, len(results), sum(1 for r in results if r["owned"]))
     return results
@@ -134,13 +135,20 @@ def _recording_hit(copies: list[dict], asins: set, by_title, requested: set,
     return hit, version
 
 
-def _book_hit(book: list[list[dict]], asins: set, by_title, requested: set, held) -> dict:
-    """One search row for one book, standing for the recording that best answers it.
+def _book_hits(book: list[list[dict]], asins: set, by_title, requested: set, held) -> list[dict]:
+    """The search rows for one book: one, unless a recording can still be asked for.
 
-    Held first (a reading before a dramatization when both are), then asked
-    for, then the one to ask for: a reading over a dramatization, unabridged
-    over abridged, in the catalogue's order. GraphicAudio's is the row only
-    when it is all the book has.
+    The first row stands for the recording that best answers the book: held
+    first (a reading before a dramatization when both are), then asked for,
+    then the one to ask for -- a reading over a dramatization, unabridged over
+    abridged, in the catalogue's order. GraphicAudio's is the row only when it
+    is all the book has.
+
+    The others fold into that row's `versions` only when there is nothing to
+    do with them: held, already asked for, or never asked for. One that can be
+    asked for keeps a row of its own, as before, because no client yet asks
+    for a version from inside a row; folded away, it could not be asked for at
+    all.
     """
     several = len(book) > 1
     pairs = [_recording_hit(copies, asins, by_title, requested, held, several) for copies in book]
@@ -156,12 +164,19 @@ def _book_hit(book: list[list[dict]], asins: set, by_title, requested: set, held
         )
 
     order = sorted(range(len(pairs)), key=lambda position: (rank(pairs[position]), position))
-    hit, _ = pairs[order[0]]
-    if several:
-        others = [pairs[position][1] for position in order[1:]]
-        hit["versions"] = others
-        hit["versionSummary"] = versions.summary(others)
-    return hit
+    first, _ = pairs[order[0]]
+    rows = [first]
+    folded = []
+    for position in order[1:]:
+        hit, version = pairs[position]
+        if version["askable"]:
+            rows.append(hit)
+        else:
+            folded.append(version)
+    if folded:
+        first["versions"] = folded
+        first["versionSummary"] = versions.summary(folded)
+    return rows
 
 
 def summary(asin: str) -> dict:

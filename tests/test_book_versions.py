@@ -118,7 +118,7 @@ check.that("versionSummary" not in hits[0], "and nothing to say about them")
 # Neither copy's id is held, and only one copy's title is the library's: the
 # recording is held all the same, whichever copy the row shows.
 library[:] = [dict(entry, ProviderIds={}) if entry["Id"] == "r1" else entry for entry in LIBRARY]
-hits = run([row("B09WRTK4DS", "Domestication: Battle Mage Farmer, Book 1", minutes=1021), KRAMER_US])
+hits = run([row("B09WRTK4DS", "Domestication: A Fantasy LitRPG Adventure", minutes=1021), KRAMER_US])
 check.equal(len(hits), 1, "two copies under different names are still one row")
 check.that(hits[0]["owned"], "either store's copy matching the library makes the reading held")
 library[:] = list(LIBRARY)
@@ -146,13 +146,14 @@ check.that(pilgrimage["owned"], "'001 Pilgrimage To Hell' holds the dramatizatio
 watch_may = row("B0WATCHMAY", "The Last Watch", authors=("J. S. Dewes",), narrators=("Nadia May",), minutes=900)
 watch_other = row("B0WATCHOTH", "The Last Watch", authors=("J. S. Dewes",), narrators=("Someone Else",), minutes=600)
 hits = run([watch_other, watch_may])
-check.equal(len(hits), 1, "two readings of one book are one row")
-check.equal(hits[0]["asin"], "B0WATCHMAY", "the row is the reading the library holds, by its reader")
-others = hits[0].get("versions") or [{}]
-check.that(not others[0].get("owned"), "the other reading is not taken for held")
-check.that(others[0].get("askable"), "the other reading can be asked for")
-check.equal(hits[0].get("versionSummary"), "Also a reading by Someone Else.",
-            "the row names the other reading by its reader")
+check.equal(hits[0]["asin"], "B0WATCHMAY", "the first row is the reading the library holds, by its reader")
+check.that(hits[0]["owned"], "and it is shown as held")
+# A reading that can still be asked for keeps its own row: nothing asks for a
+# version from inside a row yet, so folded away it could not be asked for.
+check.equal([h["asin"] for h in hits], ["B0WATCHMAY", "B0WATCHOTH"],
+            "the other reading keeps a row of its own")
+check.that(not hits[1]["owned"], "the other reading is not taken for held")
+check.that("versions" not in hits[0], "nothing is folded that could still be asked for")
 
 # --- nothing held: the reading stands for the book, not the dramatization -----
 
@@ -165,6 +166,43 @@ check.equal(hits[0].get("versionSummary"),
             "Also a GraphicAudio dramatization, which NextUp does not get.",
             "and the row says so")
 library[:] = list(LIBRARY)
+
+# --- books that share a head are not one book ----------------------------------
+
+siblings = run([row("B0MISTBRN1", "Mistborn: The Final Empire", authors=("Brandon Sanderson",), minutes=1490),
+                row("B0MISTBRN2", "Mistborn: The Well of Ascension", authors=("Brandon Sanderson",), minutes=1660)])
+check.equal([h["asin"] for h in siblings], ["B0MISTBRN1", "B0MISTBRN2"],
+            "Mistborn one and two are two books, not two versions of one")
+princesses = run([row("B0DISNEY01", "Disney Princess: Moana and Tales from Motunui", authors=("Disney Press",), minutes=30),
+                  row("B0DISNEY02", "Disney Princess: Belle and the Rose Riddle", authors=("Disney Press",), minutes=31)])
+check.equal(len(princesses), 2, "two Disney Princess stories are two books")
+
+# Which reading is held is read from the same book only, not from a sibling
+# that shares its head: the library's Final Empire is Kramer's, its Well of
+# Ascension somebody else's.
+# (The shared library's own Well of Ascension names no reader, which can't tell.)
+library[:] = [entry for entry in LIBRARY if entry["Id"] != "m2"] + [
+    item("s1", "Mistborn: The Final Empire", ["Brandon Sanderson"], "bookslib",
+         series_name="Mistborn", narrators=["Michael Kramer"], minutes=1490),
+    item("s2", "Mistborn: The Well of Ascension", ["Brandon Sanderson"], "bookslib",
+         series_name="Mistborn", narrators=["Someone Else"], minutes=1500),
+]
+hits = run([row("B0WOAKRAMR", "Mistborn: The Well of Ascension", authors=("Brandon Sanderson",), minutes=1660),
+            row("B0WOAOTHER", "Mistborn: The Well of Ascension", authors=("Brandon Sanderson",),
+                narrators=("Someone Else",), minutes=1500)])
+check.equal([h["asin"] for h in hits], ["B0WOAOTHER", "B0WOAKRAMR"],
+            "the reading held is told by the same book's reader, not a sibling's")
+library[:] = list(LIBRARY)
+
+# --- the settings off: a dramatization is a row of its own, as it always was ----
+
+config.REFUSE_GRAPHIC_AUDIO = False
+library[:] = [entry for entry in LIBRARY if entry["Id"] != "g1"]
+hits = run([KRAMER_US, GRAPHIC, KRAMER_CA])
+check.equal([h["asin"] for h in hits], ["B09WRTK4DS", "B0CZ4HN41N"],
+            "an askable dramatization keeps its row, after the reading that is held")
+library[:] = list(LIBRARY)
+config.REFUSE_GRAPHIC_AUDIO = True
 
 # --- the owned rule's limits ---------------------------------------------------
 
