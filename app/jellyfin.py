@@ -665,14 +665,19 @@ def books(uid: str) -> list[dict]:
         # The longer wait: see `_LISTING_TIMEOUT`.
         with _client(_LISTING_TIMEOUT) as c:
             for lib in libraries:
-                out.extend(_all_items(c, {
+                items = _all_items(c, {
                     "parentId": lib,
                     "includeItemTypes": "AudioBook",
                     "recursive": "true",
                     "fields": _BOOK_FIELDS,
                     "userId": uid,
                     "limit": _PAGE,
-                }))
+                })
+                # Which library each book is in: a GraphicAudio library's books
+                # are matched by other rules (books.versions).
+                for item in items:
+                    item["_library"] = lib
+                out.extend(items)
     except (httpx.HTTPError, ValueError) as exc:
         # Raised rather than returned empty. An empty book library is what
         # tells the engine there is nothing to recommend, and reporting an

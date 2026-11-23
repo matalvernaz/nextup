@@ -470,6 +470,9 @@ class TitleIndex(defaultdict):
         self.fulls: set[str] = set()
         self.tails: dict[str, set[str]] = defaultdict(set)
         self.series_names: set[str] = set()
+        #: One-word head -> authors, for books whose subtitle only describes
+        #: them. Read by `_already_owned` alone: see `_owned_index`.
+        self.word_heads: dict[str, set[str]] = defaultdict(set)
 
 
 def _head_and_tail(title: str) -> tuple[str, str] | None:
@@ -584,7 +587,25 @@ def _owned_index(library: list[dict]) -> tuple[set[str], dict[str, set[str]]]:
         split = _head_and_tail(name)
         if split is not None and split[0]:
             by_title.tails[split[0]].add(split[1])
+            # One word is too short a head to match on (`_title_keys`), but
+            # with only a description after it and an author to agree, it is
+            # the book: Audible's plain "Domestication" is the library's
+            # "Domestication : A Fantasy LitRPG Adventure (Battle Mage
+            # Farmer)", and the other store's copy of that one reading read as
+            # not owned (2026-11-22). Not for a named subtitle, which makes it
+            # another book: "Mistborn" is not "Mistborn: The Well of Ascension".
+            if (authors and len(split[0].split()) == 1
+                    and _describes_rather_than_names(_without_series(split[1], series))):
+                by_title.word_heads[split[0]] |= authors
     return asins, by_title
+
+
+def _without_series(tail: str, series: str) -> str:
+    """A normalised subtitle without the series name filed at its end, as in
+    "A Fantasy LitRPG Adventure (Battle Mage Farmer)"."""
+    if series and tail != series and tail.endswith(" " + series):
+        return tail[: -len(series)].strip()
+    return tail
 
 
 #: What a series plan reads off a book, and nothing larger. A listing carries
@@ -628,7 +649,20 @@ def _already_owned(cand: dict, asins: set[str], by_title: dict[str, set[str]]) -
         owners = by_title[key]
         if not owners or (cand_authors & owners):
             return True
+    # A one-word title the library holds under a longer, descriptive name, by
+    # the same author. The whole title only: a candidate's own one-word head
+    # could be any book of the series.
+    word_heads = getattr(by_title, "word_heads", None)
+    whole = _norm(title)
+    if word_heads and cand_authors and whole in word_heads:
+        return bool(cand_authors & word_heads[whole])
     return False
+
+
+def _refused(cand: dict) -> bool:
+    """Whether this server never asks for a candidate: GraphicAudio's, where it says so."""
+    from . import versions
+    return versions.refuses(cand)
 
 
 def _taste(seeds: list[dict], weights: dict[str, float] | None = None) -> dict:
@@ -1561,6 +1595,9 @@ def _keyword_candidates(queries: list[str], owned_check, *,
                 # Listenarr's search carries the cover, as the similarity
                 # lookup's rows do; see `audible._thin`.
                 "image": row.get("imageUrl"),
+                # Kept so a GraphicAudio dramatization can be told apart
+                # (`owned_check`); the similarity rows carry it already.
+                "publisher": row.get("publisher"),
                 "found_by": query,
                 "source": "keyword",
             }
@@ -1628,6 +1665,7 @@ def _want_candidates(
                 "runtime_min": row.get("lengthMinutes"),
                 "description": _candidate_description(asin),
                 "image": row.get("imageUrl"),
+                "publisher": row.get("publisher"),
                 "source": "hardcover_want",
             }
             # A book they want that this library already holds is not a thing
@@ -1725,7 +1763,9 @@ def run(user: jellyfin.User, update_playlist: bool = True) -> dict:
         had_taste["series_next"] = series_next
 
     def owned_check(cand: dict) -> bool:
-        return _already_owned(cand, owned_asins, owned_titles)
+        # A dramatization this server never asks for is passed over as a held
+        # book is: offering it would offer what cannot be had (REFUSE_GRAPHIC_AUDIO).
+        return _already_owned(cand, owned_asins, owned_titles) or _refused(cand)
 
     # Audible similarity votes, seeded only from books actually listened to.
     votes: Counter = Counter()

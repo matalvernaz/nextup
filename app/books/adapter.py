@@ -124,7 +124,10 @@ def _as_hit(row: dict) -> dict:
         # to build it, and dropping it made a book already on order look
         # askable.
         "requested": bool(row.get("requested")),
-        "overview": row.get("description") or "",
+        # A search row's other versions, said in one sentence, where it has no
+        # blurb of its own: "Also a GraphicAudio dramatization, in your
+        # GraphicAudio library." (books.versions.summary)
+        "overview": row.get("description") or row.get("versionSummary") or "",
         **{key: row[key] for key in ("imageUrl", "thumbnailUrl") if row.get(key)},
     }
 

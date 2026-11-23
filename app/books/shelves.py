@@ -86,6 +86,10 @@ def _list_and_publish(user: jellyfin.User) -> tuple[tuple[set, dict], dict[str, 
     """List one account's library, and publish what the caches keep of it."""
     library = jellyfin.books(user.id)
     index = engine._owned_index(library)
+    # Read by a book search, which folds a book's versions into one row.
+    # Imported here: versions reads series, which imports this module.
+    from . import versions
+    index[1].held = versions.Held(library)
     by_series = engine._books_by_series(library)
     _publish_owned(user.key, index, by_series)
     return index, by_series
