@@ -394,7 +394,12 @@ def _choose(editions: list[dict], wanted: Version, coverage: Counter) -> dict | 
     book. Where the drama is the only recording of a book, it is still asked
     for: there is nothing exact to prefer.
     """
-    eligible = [c for c in editions if _compatible(c["version"], wanted)]
+    # Never a GraphicAudio dramatization where this server gets those from
+    # GraphicAudio itself (REFUSE_GRAPHIC_AUDIO); with only that listed, the
+    # book is left for GraphicAudio. Imported here: versions reads this module.
+    from . import versions
+    eligible = [c for c in editions
+                if _compatible(c["version"], wanted) and not versions.refuses(c)]
     if not eligible:
         return None
 

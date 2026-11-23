@@ -508,6 +508,19 @@ def add(asin: str, monitored: bool = True, metadata: dict | None = None) -> AddR
             "That book could not be identified well enough to ask for it. "
             "Nothing was added.",
             None)
+    # The one door every request goes through, as above. A household that gets
+    # GraphicAudio's dramatizations from GraphicAudio itself never wants
+    # Audible's copies of them (Matt, 2026-11-22: "I don't get it through
+    # audible since their versions are lower quality").
+    from .books import versions
+    if versions.refuses(meta):
+        title = (meta.get("title") or asin).strip()
+        log.info("refusing asin=%s: %r is a GraphicAudio dramatization", asin, title)
+        return AddResult(
+            False,
+            f"{title} is GraphicAudio's dramatization, and this server gets those "
+            "from GraphicAudio, not from Audible. Nothing was added.",
+            None)
 
     body = {
         "metadata": meta,

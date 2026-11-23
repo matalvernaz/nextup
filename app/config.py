@@ -254,6 +254,21 @@ SERIES_WANT_LIMIT = _int("SERIES_WANT_LIMIT", 10)
 # theirs, so past the day's allowance it waits like any other. See
 # `books.follow`.
 FOLLOW_SERIES = _flag("FOLLOW_SERIES", True)
+
+# A book library of GraphicAudio's own releases. GraphicAudio sells its full-cast
+# dramatizations itself, and a household that buys them there keeps them apart
+# from its readings; their names there match nothing in the Audible catalogue
+# ("Battle Mage Farmer 1: Domestication", "001 Pilgrimage To Hell"), and they
+# carry no ASIN. Naming the library lets a book search say a dramatization is
+# already held. Comma-separated Jellyfin library ids. Unset: no library is
+# GraphicAudio's, and nothing changes. See app/books/versions.py.
+GRAPHIC_AUDIO_LIBRARY_IDS = _ids("GRAPHIC_AUDIO_LIBRARY_IDS")
+
+# Never ask for GraphicAudio's dramatizations through the audiobook service.
+# For a household that gets them from GraphicAudio, whose copies are better than
+# Audible's: a request for one is refused, Discover does not offer one, and a
+# followed series does not ask for one. Off unless set.
+REFUSE_GRAPHIC_AUDIO = _flag("REFUSE_GRAPHIC_AUDIO")
 # How often each followed series is looked at again. A new book is news for
 # days rather than minutes, and every look is a catalogue listing.
 FOLLOW_CHECK_HOURS = _int("FOLLOW_CHECK_HOURS", 24)
